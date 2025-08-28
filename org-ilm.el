@@ -116,6 +116,27 @@
   (when (org-ilm-infer-id)
     (org-ilm-recreate-overlays)))
 
+(defun org-ilm-open ()
+  "Open element at point."
+  (interactive)
+  (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'org-ilm-id)) (overlays-at (point)))))
+    (pcase (length ovs)
+      (0 nil)
+      (1 (org-ilm--open-from-ov (nth 0 ovs)))
+      (t
+       (let* ((choices (mapcar
+                        (lambda (ov)
+                          (cons
+                           (format "%s: %s"
+                                   (propertize (overlay-get ov 'org-ilm-type) 'face '(:weight bold))
+                                   (propertize
+                                    (overlay-get ov 'org-ilm-id)
+                                    'face '(:slant italic)))
+                           ov))
+                        ovs))
+              (choice (completing-read "Element: " choices nil t))
+              (ov (cdr (assoc choice choices))))
+         (org-ilm--open-from-ov ov))))))
 
 ;;;; Functions
 
@@ -160,12 +181,16 @@
     ))
   
   ;; Highlight region
-  (let ((id (nth 1 (split-string (org-element-property :value target-begin))))
-        (ov (make-overlay
+  (let* ((parts (split-string (org-element-property :value target-begin) ":"))
+         (type (nth 0 parts))
+         (id (nth 1 parts))
+         (ov (make-overlay
              (org-element-property :begin target-begin)
              (org-element-property :end target-end))))
     (overlay-put ov 'face 'org-ilm-face-extract)
     (overlay-put ov 'org-ilm-highlight t)
+    (overlay-put ov 'org-ilm-type type)
+    (overlay-put ov 'org-ilm-id id)
     (overlay-put ov 'help-echo (format "Highlight %s" id))))
 
 (defun org-ilm-remove-overlays ()
@@ -196,6 +221,11 @@
              (if-let ((prev-target (gethash value targets)))
                  (org-ilm--create-overlay prev-target target)
                (puthash value target targets)))))))))
+
+(defun org-ilm--open-from-ov (ov)
+  ""
+  (when-let ((id (overlay-get ov 'org-ilm-id)))
+    (find-file (format "%s.org" id))))
 
 ;;;; Footer
 
