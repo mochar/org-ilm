@@ -66,7 +66,9 @@
     (unless file-org-id-marker
       (error "Current file name not org ID, or failed to find it."))
     
-    (let* ((region-text (buffer-substring-no-properties (region-beginning) (region-end)))
+    (let* ((region-begin (region-beginning))
+           (region-end (region-end))
+           (region-text (buffer-substring-no-properties region-begin region-end))
            (region-text-clean (replace-regexp-in-string "\n" " " region-text))
            (snippet (substring region-text-clean 0 (min 50 (length region-text-clean))))
            (extract-org-id (org-id-new))
@@ -74,13 +76,30 @@
                               (format "%s.org" extract-org-id)
                               temporary-file-directory)))
 
+      ;; Wrap region with targets.
+      (save-excursion
+        (let ((target-text (format "<<extract:%s>>" extract-org-id))
+              (is-begin-line (or (= region-begin 0) (eq (char-before) ?\n))))
+          ;; Insert target before region
+          (goto-char region-begin)
+          (if is-begin-line
+              ;; Region starts at beginning of line: insert on new line above
+              (insert (format "%s\n" target-text))
+            ;; Otherwise, insert before region inline
+            (insert target-text))
+
+          ;; Insert target after region, adjusting for start target length
+          (goto-char (+ region-end (length target-text)))
+          (insert target-text)))
+      
       ;; Save region content into tmp file and move it as attachment to main
       ;; heading.
       (write-region region-text nil extract-tmp-path)
       (org-with-point-at attach-org-id-marker
         (org-attach-attach extract-tmp-path nil 'mv)
         (save-buffer))
-        
+
+      ;; Create child heading.
       (org-with-point-at file-org-id-marker
         (org-insert-heading-respect-content)
         (org-do-demote) ;; make it a child
