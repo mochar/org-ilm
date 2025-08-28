@@ -18,6 +18,7 @@
 (require 'org)
 (require 'org-id)
 (require 'org-attach)
+(require 'org-element)
 (require 'cl-lib)
 
 ;;;; Customization
@@ -38,6 +39,11 @@
   :group 'org-ilm)
 
 ;;;; Variables
+
+(defface org-ilm-face-extract
+  '((t :background "yellow"))
+  "Face used to highlight extracts.")
+
 ;;;; Commands
 (defun org-ilm-import-website (url)
   ""
@@ -85,6 +91,7 @@
 
 ;;;; Functions
 
+;;;;; Attachments
 (defun org-ilm-infer-id ()
   "Attempt parsing the org-id of current attachment file."
   (org-ilm-infer-id-from-attachment-path buffer-file-name))
@@ -96,6 +103,69 @@
     ("abc" (car (last parts)))
     ("ab/c" (mapconcat #'identity (last parts 2) ""))
     (t nil))))
+
+;;;;;; Extracts
+
+(defun org-ilm--ov-block-edit (ov after beg end &optional len)
+  (unless after
+    (user-error "Cannot modify this region")))
+
+(defun org-ilm--create-overlay (target-begin target-end)
+  ""
+  (message "Creating ilm overlay")
+  
+  ;; Hide targets
+  (dolist (target (list target-begin target-end))
+    (let ((begin (org-element-property :begin target))
+          (end (org-element-property :end target)))
+      (let ((ov (make-overlay
+                 begin
+                 ;; If next character is newline, include it.  Otherwise hitting
+                 ;; backspace on header will look like header is still on
+                 ;; newline but is in fact after the target.
+                 (if (eq (char-after end) ?\n) (+ end 1) end)
+                 nil t t)))
+        (overlay-put ov 'org-ilm-target t)
+        (overlay-put ov 'invisible t)
+        (overlay-put ov 'modification-hooks '(org-ilm--ov-block-edit))
+        )
+    ))
+  
+  ;; Highlight region
+  (let ((id (nth 1 (split-string (org-element-property :value target-begin))))
+        (ov (make-overlay
+             (org-element-property :begin target-begin)
+             (org-element-property :end target-end))))
+    (overlay-put ov 'face 'org-ilm-face-extract)
+    (overlay-put ov 'org-ilm-highlight t)
+    (overlay-put ov 'help-echo (format "Highlight %s" id))))
+
+(defun org-ilm-remove-overlays ()
+  ""
+  (interactive)
+  (org-with-wide-buffer
+   (remove-overlays (point-min) (point-max) 'org-ilm-highlight t)
+   (remove-overlays (point-min) (point-max) 'org-ilm-target t)))
+
+(defun org-ilm-recreate-overlays ()
+  ""
+  (interactive)
+  (org-ilm-remove-overlays)
+  (org-with-wide-buffer
+   (let ((targets (make-hash-table :test 'equal)))
+     (org-element-map (org-element-parse-buffer) 'target
+       (lambda (target)
+         (let* ((value (org-element-property :value target))
+                (parts (split-string value ":"))
+                (type (nth 0 parts))
+                (id (nth 1 parts)))
+           (message "Target: %s %s" type id)
+           (when (and
+                  id
+                  (member type '("extract" "cloze")))
+             (if-let ((prev-target (gethash value targets)))
+                 (org-ilm--create-overlay prev-target target)
+               (puthash value target targets)))))))))
 
 ;;;; Footer
 
