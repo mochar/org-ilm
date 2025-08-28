@@ -51,24 +51,36 @@
          (file-name (file-name-sans-extension
                      (file-name-nondirectory
                       file-path)))
-         (org-id (org-ilm-infer-id-from-attachment-path file-path))
-         (org-id-marker (org-id-find org-id t)))
-    (if (not org-id-marker)
-        (error "Current file is not an attachment, or failed to parse org ID.")
-      (let* ((region-text (buffer-substring-no-properties (region-beginning) (region-end)))
-             (region-text-clean (replace-regexp-in-string "\n" " " region-text))
-             (snippet (substring region-text-clean 0 (min 50 (length region-text-clean))))
-             (extract-org-id (org-id-new))
-             (extract-tmp-path (expand-file-name
-                                (format "%s.org" extract-org-id)
-                                temporary-file-directory)))
-        (write-region region-text nil extract-tmp-path)
-        (org-with-point-at org-id-marker
-          (org-insert-heading-respect-content)
-          (org-do-demote) ;; make it a child
-          (insert snippet)
-          (org-set-property "ID" extract-org-id)
-          (org-attach-attach extract-tmp-path nil 'mv))))))
+         (attach-org-id (org-ilm-infer-id-from-attachment-path file-path))
+         (attach-org-id-marker (org-id-find attach-org-id t))
+         (file-org-id file-name)
+         (file-org-id-marker (org-id-find file-org-id t)))
+    (unless attach-org-id-marker
+      (error "Current file is not an attachment, or failed to parse org ID."))
+    (unless file-org-id-marker
+      (error "Current file name not org ID, or failed to find it."))
+    
+    (let* ((region-text (buffer-substring-no-properties (region-beginning) (region-end)))
+           (region-text-clean (replace-regexp-in-string "\n" " " region-text))
+           (snippet (substring region-text-clean 0 (min 50 (length region-text-clean))))
+           (extract-org-id (org-id-new))
+           (extract-tmp-path (expand-file-name
+                              (format "%s.org" extract-org-id)
+                              temporary-file-directory)))
+
+      ;; Save region content into tmp file and move it as attachment to main
+      ;; heading.
+      (write-region region-text nil extract-tmp-path)
+      (org-with-point-at attach-org-id-marker
+        (org-attach-attach extract-tmp-path nil 'mv)
+        (save-buffer))
+        
+      (org-with-point-at file-org-id-marker
+        (org-insert-heading-respect-content)
+        (org-do-demote) ;; make it a child
+        (insert snippet)
+        (org-set-property "ID" extract-org-id)
+        (save-buffer)))))
 
 
 ;;;; Functions
