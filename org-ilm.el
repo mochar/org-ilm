@@ -76,6 +76,22 @@
                               (format "%s.org" extract-org-id)
                               temporary-file-directory)))
 
+      
+      ;; Save region content into tmp file and move it as attachment to main
+      ;; heading.
+      (write-region region-text nil extract-tmp-path)
+      (org-with-point-at attach-org-id-marker
+        (org-attach-attach extract-tmp-path nil 'mv)
+        (save-buffer))
+
+      ;; Create child heading.
+      (org-with-point-at file-org-id-marker
+        (org-insert-heading-respect-content)
+        (org-do-demote) ;; make it a child
+        (insert snippet)
+        (org-set-property "ID" extract-org-id)
+        (save-buffer))
+      
       ;; Wrap region with targets.
       (save-excursion
         (let ((target-text (format "<<extract:%s>>" extract-org-id))
@@ -91,21 +107,14 @@
           ;; Insert target after region, adjusting for start target length
           (goto-char (+ region-end (length target-text)))
           (insert target-text)))
-      
-      ;; Save region content into tmp file and move it as attachment to main
-      ;; heading.
-      (write-region region-text nil extract-tmp-path)
-      (org-with-point-at attach-org-id-marker
-        (org-attach-attach extract-tmp-path nil 'mv)
-        (save-buffer))
+      (save-buffer)
+      (org-ilm-recreate-overlays))))
 
-      ;; Create child heading.
-      (org-with-point-at file-org-id-marker
-        (org-insert-heading-respect-content)
-        (org-do-demote) ;; make it a child
-        (insert snippet)
-        (org-set-property "ID" extract-org-id)
-        (save-buffer)))))
+(defun org-ilm-prepare-buffer ()
+  "Recreate overlays if current buffer is an attachment Org file."
+  (interactive)
+  (when (org-ilm-infer-id)
+    (org-ilm-recreate-overlays)))
 
 
 ;;;; Functions
@@ -121,7 +130,7 @@
   (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
     ("abc" (car (last parts)))
     ("ab/c" (mapconcat #'identity (last parts 2) ""))
-    (t nil))))
+    (t nil))))  
 
 ;;;;;; Extracts
 
@@ -166,6 +175,8 @@
    (remove-overlays (point-min) (point-max) 'org-ilm-highlight t)
    (remove-overlays (point-min) (point-max) 'org-ilm-target t)))
 
+;; TODO Accept begin and end position so that new overlays can be processed by
+;; narrowing to just that region, without having to redo the whole file.
 (defun org-ilm-recreate-overlays ()
   ""
   (interactive)
