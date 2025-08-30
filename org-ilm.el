@@ -40,6 +40,13 @@
   :type 'function
   :group 'org-ilm)
 
+(defcustom org-ilm-import-default-method 'cp
+  "Default import method, or `nil' to always ask."
+  :type '(choice (const :tag "Nil" nil)
+                 (const :tag "Move" 'mv)
+                 (const :tag "Copy" 'cp))
+  :group 'org-ilm)
+
 ;;;; Variables
 
 (defface org-ilm-face-extract
@@ -287,6 +294,53 @@ return nil, and if only one, return it."
   (let ((strings (-map #'org-ql-view--format-element org-ilm-queue)))
     (org-ql-view--display :buffer "*Ilm Queue*" :header "Ilm queue" :strings strings)))
 
+
+;;;;; Import
+
+(defun org-ilm--select-import-method (&optional force-ask)
+  "Ask user to choose whether to copy or move file when importing.
+
+If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
+  (if (and (not force-ask) org-ilm-import-default-method)
+      org-ilm-import-default-method
+    (let* ((choices '(("Copy" . cp) ("Move" . mv)))
+           (choice (completing-read "Method: " choices nil t))
+           (method (cdr (assoc choice choices))))
+      method)))
+
+(defun org-ilm-import-org-file (file collection method)
+  "Import an Org file."
+  (interactive
+   (list
+    (read-file-name "Import Org file: ")
+    (org-ilm--select-collection)
+    (org-ilm--select-import-method)))
+
+  (let* ((org-id (org-id-new))
+         (file-tmp-path (expand-file-name
+                         (format "%s.org" org-id)
+                         temporary-file-directory)))
+    
+    ;; Move or copy the file to tmp directory so we can rename the file with the
+    ;; org ID before attaching it.
+    (pcase method
+      ('mv (rename-file file file-tmp-path))
+      ('cp (copy-file file file-tmp-path))
+      (t (error "Parameter METHOD must be one of 'mv or 'cp.")))
+    
+    (let ((org-capture-templates
+           `(("i" "Import"
+              entry (file ,(cdr collection))
+              "* INCR %?"
+              :hook (lambda ()
+                      (org-entry-put nil "ID" ,org-id)
+                      ;; We always use 'mv because we are importing the file
+                      ;; from the tmp dir.
+                      (org-attach-attach ,file-tmp-path nil 'mv)
+                      (org-entry-put
+                       nil "DIR"
+                       (abbreviate-file-name (org-attach-dir-get-create))))))))
+      (org-capture nil "i"))))
 
 ;;;; Footer
 
