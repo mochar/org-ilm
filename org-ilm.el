@@ -103,7 +103,7 @@
          (file-name (file-name-sans-extension
                      (file-name-nondirectory
                       file-path)))
-         (attach-org-id (org-ilm-infer-id-from-attachment-path file-path))
+         (attach-org-id (car (org-ilm-infer-id-from-attachment-path file-path)))
          (attach-org-id-marker (org-id-find attach-org-id t))
          (file-org-id file-name)
          (file-org-id-marker (org-id-find file-org-id t)))
@@ -190,11 +190,15 @@
               (ov (cdr (assoc choice choices))))
          (org-ilm--open-from-ov ov))))))
 
-(defun org-ilm-queue (collection)
-  "View queue in Agenda-like buffer."
-  (interactive (list (org-ilm--select-collection)))
-  (setq org-ilm-queue (org-ilm--collect-queue-entries collection))
-  (org-ilm--display-queue))
+(defun org-ilm-open-collection ()
+  "Open collection file, jump back to it if in attachment."
+  (interactive)
+  (if-let ((org-id-loc (org-ilm-infer-id)))
+      (progn
+        (find-file (car (cdr org-id-loc)))
+        (goto-char (cdr (cdr org-id-loc))))
+    (let ((collection (org-ilm--select-collection)))
+      (find-file (cdr collection)))))
 
 (defun org-ilm-open-dwim ()
   "Open element of highlight or within collection."
@@ -205,7 +209,15 @@
     (cond
      ((member (file-truename buffer-file-name) collection-files)
       (org-ilm-open))
-     ((org-ilm-infer-id) (org-ilm-open-highlight)))))
+     ((org-ilm-infer-id)
+      (unless (org-ilm-open-highlight)
+        (org-ilm-open-collection))))))
+
+(defun org-ilm-queue (collection)
+  "View queue in Agenda-like buffer."
+  (interactive (list (org-ilm--select-collection)))
+  (setq org-ilm-queue (org-ilm--collect-queue-entries collection))
+  (org-ilm--display-queue))
 
 (defun org-ilm-set-schedule-from-priority ()
   "Set schedule date based on priority."
@@ -318,13 +330,15 @@ return nil, and if only one, return it."
   (org-ilm-infer-id-from-attachment-path buffer-file-name))
   
 (defun org-ilm-infer-id-from-attachment-path (path)
-  "Attempt parsing the org-id from the attachment path."
+  "Attempt parsing the org-id from the attachment path, return (id . location)."
   (when path
-    (let ((parts (split-string (file-name-directory path) "/" t)))
-      (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
-        ("abc" (car (last parts)))
-        ("ab/c" (mapconcat #'identity (last parts 2) ""))
-        (t nil)))))
+    (let* ((parts (split-string (file-name-directory path) "/" t))
+           (potential-id (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
+                           ("abc" (car (last parts)))
+                           ("ab/c" (mapconcat #'identity (last parts 2) ""))
+                           (t nil)))
+           (location (org-id-find potential-id)))
+      (when location (cons potential-id location)))))
 
 ;;;;; Extracts
 
@@ -398,7 +412,8 @@ return nil, and if only one, return it."
 (defun org-ilm--open-from-ov (ov)
   ""
   (when-let ((id (overlay-get ov 'org-ilm-id)))
-    (find-file (format "%s.org" id))))
+    (find-file (format "%s.org" id))
+    id))
 
 ;;;;; Queue view
 
