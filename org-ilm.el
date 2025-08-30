@@ -56,6 +56,26 @@
 (defvar org-ilm-queue nil
   "List of org headings that form the queue.")
 
+;;;; Minor mode
+
+;;;###autoload
+(define-minor-mode org-ilm-global-mode
+  "Prepare some hooks and advices some functions."
+  :init-value nil
+  :global t
+  :lighter nil ;; String to display in mode line
+  :group 'org-ilm
+  ;; :keymap org-ilm-keymap ; TODO
+  (if org-ilm-global-mode
+      ;; Enable
+      (progn
+        (add-hook 'org-mode-hook #'org-ilm-prepare-buffer)
+        (advice-add 'org-priority :around #'org-ilm--update-from-priority-change)
+        )
+    ;; Disable
+    (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
+    (advice-remove 'org-priority #'org-ilm--update-from-priority-change)))
+
 ;;;; Commands
 (defun org-ilm-import-website (url)
   ""
@@ -202,6 +222,47 @@ return nil, and if only one, return it."
               (choice (completing-read "Collection: " choices nil t))
               (collection (cdr (assoc choice choices))))
          collection))))
+
+(defun org-ilm--parse-logbook (logbook)
+  "Parses the Org contents of a logbook drawer entry."
+  (let ((contents (org-element-contents logbook)))
+    (mapcar
+     ;; If more data is needed, see:
+     ;; https://orgmode.org/worg/dev/org-element-api.html
+     ;; See: Timestamp, Clock
+     (lambda (clock)
+       (let ((timestamp (org-element-property :value clock)))
+         `(:duration-minutes
+           ,(org-duration-to-minutes (org-element-property :duration clock))
+           :status ,(org-element-property :status clock)
+           :day-end ,(org-element-property :day-end timestamp)
+           :day-start ,(org-element-property :day-start timestamp)
+           :month-end ,(org-element-property :month-end timestamp)
+           :month-start ,(org-element-property :month-start timestamp)
+           :year-end ,(org-element-property :year-end timestamp)
+           :year-start ,(org-element-property :year-start timestamp))))
+     contents)))
+    
+(defun org-ilm--read-logbook ()
+  "Reads and parses the LOGBOOK drawer of heading at point."
+  (let* ((headline (save-excursion (org-back-to-heading) (org-element-at-point)))
+         (begin (org-element-property :begin headline))
+         (end (save-excursion
+                (outline-next-heading)
+                (point))))
+    (when (and begin end)
+      (save-excursion
+        (save-restriction
+          (narrow-to-region begin end)
+          (when-let* ((drawers (org-element-map
+                                   (org-element-parse-buffer)
+                                   'drawer #'identity))
+                      (logbook (seq-find
+                                (lambda (drawer)
+                                  (string-equal
+                                   (org-element-property :drawer-name drawer) "LOGBOOK"))
+                                drawers)))
+            (org-ilm--parse-logbook logbook)))))))
 
 ;;;;; Attachments
 (defun org-ilm-infer-id ()
@@ -351,6 +412,154 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                        nil "DIR"
                        (abbreviate-file-name (org-attach-dir-get-create))))))))
       (org-capture nil "i"))))
+
+;;;;; Stats
+;; Functions to work with e.g. the beta distribution.
+;; Random generation code from Claude.
+
+(defun org-ilm--random-uniform ()
+  "Generate a uniform random number between 0 and 1."
+  (/ (random 1000000) 1000000.0))
+
+(defun org-ilm--random-exponential (rate)
+  "Generate an exponential random variable with given rate parameter."
+  (- (/ (log (org-ilm--random-uniform)) rate)))
+
+(defun org-ilm--random-gamma (shape)
+  "Generate a gamma-distributed random variable with given shape parameter.
+Uses Marsaglia and Tsang's method for shape >= 1, and Ahrens-Dieter for shape < 1."
+  (cond
+   ((< shape 1)
+    ;; For shape < 1, use Ahrens-Dieter acceptance-rejection
+    (let ((c (/ 1.0 shape))
+          (d (- 1.0 shape)))
+      (catch 'done
+        (while t
+          (let* ((u (org-ilm--random-uniform))
+                 (v (org-ilm--random-uniform))
+                 (x (expt u c))
+                 (y (* v (expt x d))))
+            (when (<= (+ x y) 1.0)
+              (let ((z (- (log v) (* d (log x)))))
+                (when (<= z (* shape (1- x)))
+                  (throw 'done (* shape (expt (org-ilm--random-uniform) c)))))))))))
+   
+   ((= shape 1)
+    ;; For shape = 1, gamma distribution is exponential
+    (org-ilm--random-exponential 1.0))
+   
+   (t
+    ;; For shape > 1, use Marsaglia and Tsang's method
+    (let* ((d (- shape (/ 1.0 3.0)))
+           (c (/ 1.0 (sqrt (* 9.0 d)))))
+      (catch 'done
+        (while t
+          (let* ((x (org-ilm--random-normal))
+                 (v (+ 1.0 (* c x))))
+            (when (> v 0)
+              (let* ((v (* v v v))
+                     (u (org-ilm--random-uniform))
+                     (x2 (* x x)))
+                (when (or (< u (- 1.0 (* 0.0331 x2 x2)))
+                          (< (log u) (+ (* 0.5 x2) (* d (- 1.0 v (log v))))))
+                  (throw 'done (* d v))))))))))))
+
+(defun org-ilm--random-normal ()
+  "Generate a standard normal random variable using Box-Muller transform."
+  (let ((u1 (org-ilm--random-uniform))
+        (u2 (org-ilm--random-uniform)))
+    (* (sqrt (* -2.0 (log u1)))
+       (cos (* 2.0 pi u2)))))
+
+(defun org-ilm--random-beta (alpha beta &optional seed)
+  "Generate a beta-distributed random variable with parameters ALPHA and BETA.
+If SEED is provided, sets the random seed first for reproducible results."
+  (when seed
+    (unless (stringp seed)
+      (error "Seed must be a string."))
+    (random seed))
+  
+  (cond
+   ;; Special cases for efficiency
+   ((and (= alpha 1) (= beta 1))
+    ;; Beta(1,1) is uniform
+    (org-ilm--random-uniform))
+   
+   ((= alpha 1)
+    ;; Beta(1,β) = 1 - U^(1/β)
+    (- 1.0 (expt (org-ilm--random-uniform) (/ 1.0 beta))))
+   
+   ((= beta 1)
+    ;; Beta(α,1) = U^(1/α)
+    (expt (org-ilm--random-uniform) (/ 1.0 alpha)))
+   
+   (t
+    ;; General case: use gamma method
+    (let ((x (org-ilm--random-gamma alpha))
+          (y (org-ilm--random-gamma beta)))
+      (/ x (+ x y))))))
+
+;;;;; Priority
+
+(defun org-ilm--validated-priority (priority)
+  "Returns numeric value of priority if valid value, else nil."
+  (cond
+   ((stringp priority)
+    (when (member priority '("1" "2" "3" "4" "5" "6" "7" "8" "9"))
+      (string-to-number priority)))
+   ((numberp priority)
+    (when (member priority '(1 2 3 4 5 6 7 8 9))
+      priority))))
+
+(defun org-ilm--get-priority ()
+  "Return priority value of heading at point."
+  (org-ilm--validated-priority (org-entry-get nil "PRIORITY")))
+
+(defun org-ilm--beta-from-priority (priority)
+  "Beta parameters from priority value."
+  (let* ((a priority)
+         (b (+ 1 (- 9 a))))
+    (list a b)))
+
+(defun org-ilm--adjusted-priority-from-logbook (a b logbook)
+  "Calculate the variance adjusted beta parameters from logbook data.
+
+For now, decrease variance by proportionally scaling a and b by some
+factor that increases with the number of reviews."
+  (let* ((reviews (length logbook))
+         (a (* a (+ 1 reviews)))
+         (b (* b (+ 1 reviews))))
+    (list a b)))
+
+(defun org-ilm--beta-from-priority-and-logbook (priority logbook)
+  "Beta parameters from priority value, adjusted by logbook history."
+  (let ((params (org-ilm--beta-from-priority priority)))
+    (org-ilm--adjusted-priority-from-logbook (nth 0 params)
+                                             (nth 1 params)
+                                             logbook)))
+
+(defun org-ilm--get-priority-params ()
+  "Calculate the beta parameters of the heading at point."
+  (when-let ((priority (org-ilm--get-priority))
+             (logbook (org-ilm--read-logbook)))
+    (org-ilm--beta-from-priority-and-logbook priority logbook)))
+
+;;;;; Scheduling
+
+(defun org-ilm--schedule-from-priority (priority)
+  "Calculate a schedule date from priority value."
+  (setq priority (org-ilm--validated-priority priority))
+  (unless priority
+    (error "Priority value invalid."))
+  (let ((priority-normalized (/ (- priority 1) 8.0)))
+    ))
+
+(defun org-ilm--update-from-priority-change (func &rest args)
+  "Advice around `org-priority' to detect priority changes to update schedule."
+  (let ((old-priority (org-ilm--get-priority)))
+    (apply func args)
+    (let ((new-priority (org-ilm--get-priority)))
+      (message "Priority changed: %s -> %s" old-priority new-priority))))
 
 ;;;; Footer
 
