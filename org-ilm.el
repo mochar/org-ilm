@@ -19,7 +19,9 @@
 (require 'org-id)
 (require 'org-attach)
 (require 'org-element)
+(require 'org-ql)
 (require 'cl-lib)
+(require 'dash)
 
 ;;;; Customization
 (defgroup org-ilm nil
@@ -43,6 +45,9 @@
 (defface org-ilm-face-extract
   '((t :background "yellow"))
   "Face used to highlight extracts.")
+
+(defvar org-ilm-queue nil
+  "List of org headings that form the queue.")
 
 ;;;; Commands
 (defun org-ilm-import-website (url)
@@ -138,7 +143,37 @@
               (ov (cdr (assoc choice choices))))
          (org-ilm--open-from-ov ov))))))
 
+(defun org-ilm-queue (collection)
+  "View queue in Agenda-like buffer."
+  (interactive (list (org-ilm--select-collection)))
+  (setq org-ilm-queue (org-ilm--collect-queue-entries collection))
+  (org-ilm--display-queue))
+
+
 ;;;; Functions
+
+;;;;; Utilities
+(defun org-ilm--select-collection ()
+  "Prompt user for collection to select from.
+
+The collections are stored in `org-ilm-collections-alist'. If empty
+return nil, and if only one, return it."
+  (pcase (length org-ilm-collections-alist)
+    (0 nil)
+    (1 (nth 0 org-ilm-collections-alist))
+    (t (let* ((choices (mapcar
+                        (lambda (collection)
+                          (cons
+                           (format "%s %s"
+                                   (propertize
+                                    (symbol-name (car collection))
+                                    'face '(:weight bold))
+                                   (propertize (cdr collection) 'face '(:slant italic)))
+                           collection))
+                        org-ilm-collections-alist))
+              (choice (completing-read "Collection: " choices nil t))
+              (collection (cdr (assoc choice choices))))
+         collection))))
 
 ;;;;; Attachments
 (defun org-ilm-infer-id ()
@@ -147,13 +182,14 @@
   
 (defun org-ilm-infer-id-from-attachment-path (path)
   "Attempt parsing the org-id from the attachment path."
-  (let ((parts (split-string (file-name-directory path) "/" t)))
-  (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
-    ("abc" (car (last parts)))
-    ("ab/c" (mapconcat #'identity (last parts 2) ""))
-    (t nil))))  
+  (when path
+    (let ((parts (split-string (file-name-directory path) "/" t)))
+      (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
+        ("abc" (car (last parts)))
+        ("ab/c" (mapconcat #'identity (last parts 2) ""))
+        (t nil)))))
 
-;;;;;; Extracts
+;;;;; Extracts
 
 (defun org-ilm--ov-block-edit (ov after beg end &optional len)
   (unless after
@@ -226,6 +262,20 @@
   ""
   (when-let ((id (overlay-get ov 'org-ilm-id)))
     (find-file (format "%s.org" id))))
+
+;;;;; Queue view
+
+(defun org-ilm--collect-queue-entries (collection)
+  "Return entries (headings) that form the outstanding queue."
+  ;; TODO This now returns all headings, later should take into account outstanding.
+  (with-current-buffer (find-file-noselect (cdr collection))
+    (org-ql-select (current-buffer) nil :action 'element-with-markers)))
+
+(defun org-ilm--display-queue ()
+  "Open an Org-ql view of elements in `org-ilm-queue'."
+  (let ((strings (-map #'org-ql-view--format-element org-ilm-queue)))
+    (org-ql-view--display :buffer "*Ilm Queue*" :header "Ilm queue" :strings strings)))
+
 
 ;;;; Footer
 
