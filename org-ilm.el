@@ -80,11 +80,10 @@
       ;; Enable
       (progn
         (add-hook 'org-mode-hook #'org-ilm-prepare-buffer)
-        (advice-add 'org-priority :around #'org-ilm--update-from-priority-change)
         )
     ;; Disable
     (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
-    (advice-remove 'org-priority #'org-ilm--update-from-priority-change)))
+    ))
 
 ;;;; Commands
 (defun org-ilm-import-website (url)
@@ -207,6 +206,11 @@
      ((member (file-truename buffer-file-name) collection-files)
       (org-ilm-open))
      ((org-ilm-infer-id) (org-ilm-open-highlight)))))
+
+(defun org-ilm-set-schedule-from-priority ()
+  "Set schedule date based on priority."
+  (interactive)
+  (org-ilm--set-schedule-from-priority))
   
 ;;;; Functions
 
@@ -389,6 +393,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            (method (cdr (assoc choice choices))))
       method)))
 
+
 (defun org-ilm-import-org-file (file collection method)
   "Import an Org file."
   (interactive
@@ -420,7 +425,21 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                       (org-attach-attach ,file-tmp-path nil 'mv)
                       (org-entry-put
                        nil "DIR"
-                       (abbreviate-file-name (org-attach-dir-get-create))))))))
+                       (abbreviate-file-name (org-attach-dir-get-create)))
+
+                      ;; Schedule
+                      (org-ilm--set-schedule-from-priority)
+
+                      ;; Add advice around priority change to automatically
+                      ;; update schedule, but remove advice as soon as capture
+                      ;; is finished.
+                      (advice-add 'org-priority
+                                  :around #'org-ilm--update-from-priority-change)
+                      (add-hook 'kill-buffer-hook
+                                (lambda ()
+                                  (advice-remove 'org-priority
+                                                 #'org-ilm--update-from-priority-change))
+                                nil t))))))
       (org-capture nil "i"))))
 
 ;;;;; Stats
@@ -600,12 +619,17 @@ factor that increases with the number of reviews."
          (interval (+ (org-ilm--random-poisson rate) 1)))
     interval))
 
+(defun org-ilm--set-schedule-from-priority ()
+  "Set the schedule based on the priority."
+  (when-let ((interval (org-ilm--schedule-interval-from-priority (org-ilm--get-priority))))
+    (org-schedule nil (format "+%sd" interval))))
+
 (defun org-ilm--update-from-priority-change (func &rest args)
   "Advice around `org-priority' to detect priority changes to update schedule."
   (let ((old-priority (org-ilm--get-priority)))
     (apply func args)
     (let ((new-priority (org-ilm--get-priority)))
-      (message "Priority changed: %s -> %s" old-priority new-priority))))
+      (org-ilm--set-schedule-from-priority))))
 
 ;;;; Footer
 
