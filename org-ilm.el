@@ -589,21 +589,16 @@ factor that increases with the number of reviews."
 
 ;;;;; Scheduling
 
-(defun org-ilm--schedule-offset-from-priority (priority)
-  "Calculate a schedule offset from priority value."
+(defun org-ilm--schedule-interval-from-priority (priority)
+  "Calculate a schedule interval from priority value."
   (setq priority (org-ilm--validated-priority priority))
   (unless priority
     (error "Priority value invalid."))
-  (let* ((priority-normalized (/ (- priority 1) 8.0))
-         (beta-params (org-ilm--beta-from-mean-sd
-                             (max (min priority-normalized .99) .01)
-                             .1))
-         (offset-normalized (org-ilm--sample-priority beta-params))
-         (offset-scaled (+ org-ilm-schedule-min-days
-                           (* offset-normalized
-                              (- org-ilm-schedule-max-days org-ilm-schedule-min-days)))))
-    (message "%s\t%s\t%s\t%s" priority-normalized beta-params offset-normalized offset-scaled)
-    (round offset-scaled)))
+  (let* ((priority-normalized (/ (- (- 10 priority) 1) 8.0))
+         (priority-bounded (min (max priority-normalized 0.05) 0.95))
+         (rate (* 25 (- 1 priority-bounded)))
+         (interval (+ (org-ilm--random-poisson rate) 1)))
+    interval))
 
 (defun org-ilm--update-from-priority-change (func &rest args)
   "Advice around `org-priority' to detect priority changes to update schedule."
