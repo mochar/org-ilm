@@ -142,7 +142,7 @@
       ;; Save region content into tmp file and move it as attachment to main
       ;; heading.
       (write-region region-text nil extract-tmp-path)
-      (org-ilm--capture nil `(id ,file-org-id) extract-org-id extract-tmp-path))))
+      (org-ilm--capture nil `(id ,file-org-id) extract-org-id extract-tmp-path snippet))))
 
 (defun org-ilm-prepare-buffer ()
   "Recreate overlays if current buffer is an attachment Org file."
@@ -271,37 +271,39 @@ return nil, and if only one, return it."
                                 drawers)))
             (org-ilm--parse-logbook logbook)))))))
 
-(defun org-ilm--capture (is-source target org-id file-path)
+(defun org-ilm--capture (is-source target org-id file-path &optional title)
   "Make an org capture to make a new source heading or extract."
   (let ((org-capture-templates
-         `(("i" "Import"
-            entry ,target
-            "* [#5] INCR %?"
-            :hook (lambda ()
-                    (org-entry-put nil "ID" ,org-id)
-                    
-                    ;; Attach the file. We always use 'mv because we are
-                    ;; importing the file from the tmp dir.
-                    (org-attach-attach ,file-path nil 'mv)
-                    (when ,is-source
-                      (org-entry-put
-                       nil "DIR"
-                       (abbreviate-file-name (org-attach-dir-get-create))))
+          `(("i" "Import"
+             entry ,target
+             ,(format "* [#5] INCR %s %s" title "%?")
+             ;; :unnarrowed ; TODO for extracts might be nice?
+             :hook (lambda ()
+                     (org-entry-put nil "ID" ,org-id)
+                     
+                     ;; Attach the file. We always use 'mv because we are
+                     ;; importing the file from the tmp dir.
+                     (org-attach-attach ,file-path nil 'mv)
+                     (when ,is-source
+                       (org-entry-put
+                        nil "DIR"
+                        (abbreviate-file-name (org-attach-dir-get-create))))
 
-                    ;; Schedule
-                    (org-ilm--set-schedule-from-priority)
+                     ;; Schedule
+                     (org-ilm--set-schedule-from-priority)
 
-                    ;; Add advice around priority change to automatically
-                    ;; update schedule, but remove advice as soon as capture
-                    ;; is finished.
-                    (advice-add 'org-priority
-                                :around #'org-ilm--update-from-priority-change)
-                    (add-hook 'kill-buffer-hook
-                              (lambda ()
-                                (advice-remove 'org-priority
-                                               #'org-ilm--update-from-priority-change))
-                              nil t))))))
-    (org-capture nil "i")))
+                     ;; Add advice around priority change to automatically
+                     ;; update schedule, but remove advice as soon as capture
+                     ;; is finished.
+                     (advice-add 'org-priority
+                                 :around #'org-ilm--update-from-priority-change)
+                     (add-hook 'kill-buffer-hook
+                               (lambda ()
+                                 (advice-remove 'org-priority
+                                                #'org-ilm--update-from-priority-change))
+                               nil t))
+             ))))
+    (org-capture nil "i"))))
 
 ;;;;; Attachments
 (defun org-ilm-infer-id ()
@@ -418,7 +420,6 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            (method (cdr (assoc choice choices))))
       method)))
 
-
 (defun org-ilm-import-org-file (file collection method)
   "Import an Org file."
   (interactive
@@ -440,7 +441,6 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (t (error "Parameter METHOD must be one of 'mv or 'cp.")))
 
     (org-ilm--capture t `(file ,(cdr collection)) org-id file-tmp-path)))
-
 
 ;;;;; Stats
 ;; Functions to work with e.g. the beta distribution.
