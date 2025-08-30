@@ -66,6 +66,10 @@
 (defvar org-ilm-queue nil
   "List of org headings that form the queue.")
 
+(defvar org-ilm-map (make-sparse-keymap)
+  "Keymap for `org-ilm-global-mode'.")
+  
+
 ;;;; Minor mode
 
 ;;;###autoload
@@ -75,7 +79,7 @@
   :global t
   :lighter nil ;; String to display in mode line
   :group 'org-ilm
-  ;; :keymap org-ilm-keymap ; TODO
+  :keymap org-ilm-map
   (if org-ilm-global-mode
       ;; Enable
       (progn
