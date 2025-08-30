@@ -124,6 +124,17 @@
 (defun org-ilm-open ()
   "Open element at point."
   (interactive)
+  (if-let* ((attach-dir (org-attach-dir))
+            (org-id (org-id-get))
+            (path (expand-file-name (format "%s.org" org-id) attach-dir)))
+      (progn
+        (run-hook-with-args 'org-attach-open-hook path)
+        (org-open-file path t)) ;; last param: in-emacs
+      (error "No attachment directory exist, no Org id at current heading, or no attachment file associated with Org id.")))
+
+(defun org-ilm-open-highlight ()
+  "Open element associated with highlight at point."
+  (interactive)
   (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'org-ilm-id)) (overlays-at (point)))))
     (pcase (length ovs)
       (0 nil)
