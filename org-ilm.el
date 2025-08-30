@@ -98,7 +98,8 @@
   "Extract text in region to attachment Org file that is the child heading of current entry."
   (interactive)
   (unless (use-region-p) (user-error "No region active."))
-  (let* ((file-path buffer-file-name)
+  (let* ((file-buf (current-buffer))
+         (file-path buffer-file-name)
          (file-name (file-name-sans-extension
                      (file-name-nondirectory
                       file-path)))
@@ -120,29 +121,35 @@
            (extract-tmp-path (expand-file-name
                               (format "%s.org" extract-org-id)
                               temporary-file-directory)))
-      
-      ;; Wrap region with targets.
-      (save-excursion
-        (let ((target-text (format "<<extract:%s>>" extract-org-id))
-              (is-begin-line (or (= region-begin 0) (eq (char-before) ?\n))))
-          ;; Insert target before region
-          (goto-char region-begin)
-          (if is-begin-line
-              ;; Region starts at beginning of line: insert on new line above
-              (insert (format "%s\n" target-text))
-            ;; Otherwise, insert before region inline
-            (insert target-text))
-
-          ;; Insert target after region, adjusting for start target length
-          (goto-char (+ region-end (length target-text)))
-          (insert target-text)))
-      (save-buffer)
-      (org-ilm-recreate-overlays)
 
       ;; Save region content into tmp file and move it as attachment to main
       ;; heading.
       (write-region region-text nil extract-tmp-path)
-      (org-ilm--capture nil `(id ,file-org-id) extract-org-id extract-tmp-path snippet))))
+      (org-ilm--capture
+       nil
+       `(id ,file-org-id)
+       extract-org-id
+       extract-tmp-path
+       snippet
+       (lambda ()
+         ;; Wrap region with targets.
+         (with-current-buffer file-buf
+           (save-excursion
+             (let ((target-text (format "<<extract:%s>>" extract-org-id))
+                   (is-begin-line (or (= region-begin 0) (eq (char-before) ?\n))))
+               ;; Insert target before region
+               (goto-char region-begin)
+               (if is-begin-line
+                   ;; Region starts at beginning of line: insert on new line above
+                   (insert (format "%s\n" target-text))
+                 ;; Otherwise, insert before region inline
+                 (insert target-text))
+
+               ;; Insert target after region, adjusting for start target length
+               (goto-char (+ region-end (length target-text)))
+               (insert target-text)))
+           (save-buffer)
+           (org-ilm-recreate-overlays)))))))
 
 (defun org-ilm-prepare-buffer ()
   "Recreate overlays if current buffer is an attachment Org file."
@@ -271,7 +278,7 @@ return nil, and if only one, return it."
                                 drawers)))
             (org-ilm--parse-logbook logbook)))))))
 
-(defun org-ilm--capture (is-source target org-id file-path &optional title)
+(defun org-ilm--capture (is-source target org-id file-path &optional title on-success)
   "Make an org capture to make a new source heading or extract."
   (let ((org-capture-templates
           `(("i" "Import"
@@ -302,7 +309,7 @@ return nil, and if only one, return it."
                                  (advice-remove 'org-priority
                                                 #'org-ilm--update-from-priority-change))
                                nil t))
-             ))))
+             :before-finalize ,on-success))))
     (org-capture nil "i"))))
 
 ;;;;; Attachments
