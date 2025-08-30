@@ -120,22 +120,6 @@
            (extract-tmp-path (expand-file-name
                               (format "%s.org" extract-org-id)
                               temporary-file-directory)))
-
-      
-      ;; Save region content into tmp file and move it as attachment to main
-      ;; heading.
-      (write-region region-text nil extract-tmp-path)
-      (org-with-point-at attach-org-id-marker
-        (org-attach-attach extract-tmp-path nil 'mv)
-        (save-buffer))
-
-      ;; Create child heading.
-      (org-with-point-at file-org-id-marker
-        (org-insert-heading-respect-content)
-        (org-do-demote) ;; make it a child
-        (insert snippet)
-        (org-set-property "ID" extract-org-id)
-        (save-buffer))
       
       ;; Wrap region with targets.
       (save-excursion
@@ -153,7 +137,12 @@
           (goto-char (+ region-end (length target-text)))
           (insert target-text)))
       (save-buffer)
-      (org-ilm-recreate-overlays))))
+      (org-ilm-recreate-overlays)
+
+      ;; Save region content into tmp file and move it as attachment to main
+      ;; heading.
+      (write-region region-text nil extract-tmp-path)
+      (org-ilm--capture nil `(id ,file-org-id) extract-org-id extract-tmp-path))))
 
 (defun org-ilm-prepare-buffer ()
   "Recreate overlays if current buffer is an attachment Org file."
@@ -281,6 +270,38 @@ return nil, and if only one, return it."
                                    (org-element-property :drawer-name drawer) "LOGBOOK"))
                                 drawers)))
             (org-ilm--parse-logbook logbook)))))))
+
+(defun org-ilm--capture (is-source target org-id file-path)
+  "Make an org capture to make a new source heading or extract."
+  (let ((org-capture-templates
+         `(("i" "Import"
+            entry ,target
+            "* [#5] INCR %?"
+            :hook (lambda ()
+                    (org-entry-put nil "ID" ,org-id)
+                    
+                    ;; Attach the file. We always use 'mv because we are
+                    ;; importing the file from the tmp dir.
+                    (org-attach-attach ,file-path nil 'mv)
+                    (when ,is-source
+                      (org-entry-put
+                       nil "DIR"
+                       (abbreviate-file-name (org-attach-dir-get-create))))
+
+                    ;; Schedule
+                    (org-ilm--set-schedule-from-priority)
+
+                    ;; Add advice around priority change to automatically
+                    ;; update schedule, but remove advice as soon as capture
+                    ;; is finished.
+                    (advice-add 'org-priority
+                                :around #'org-ilm--update-from-priority-change)
+                    (add-hook 'kill-buffer-hook
+                              (lambda ()
+                                (advice-remove 'org-priority
+                                               #'org-ilm--update-from-priority-change))
+                              nil t))))))
+    (org-capture nil "i")))
 
 ;;;;; Attachments
 (defun org-ilm-infer-id ()
@@ -417,34 +438,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       ('mv (rename-file file file-tmp-path))
       ('cp (copy-file file file-tmp-path))
       (t (error "Parameter METHOD must be one of 'mv or 'cp.")))
-    
-    (let ((org-capture-templates
-           `(("i" "Import"
-              entry (file ,(cdr collection))
-              "* INCR %?"
-              :hook (lambda ()
-                      (org-entry-put nil "ID" ,org-id)
-                      ;; We always use 'mv because we are importing the file
-                      ;; from the tmp dir.
-                      (org-attach-attach ,file-tmp-path nil 'mv)
-                      (org-entry-put
-                       nil "DIR"
-                       (abbreviate-file-name (org-attach-dir-get-create)))
 
-                      ;; Schedule
-                      (org-ilm--set-schedule-from-priority)
+    (org-ilm--capture t `(file ,(cdr collection)) org-id file-tmp-path)))
 
-                      ;; Add advice around priority change to automatically
-                      ;; update schedule, but remove advice as soon as capture
-                      ;; is finished.
-                      (advice-add 'org-priority
-                                  :around #'org-ilm--update-from-priority-change)
-                      (add-hook 'kill-buffer-hook
-                                (lambda ()
-                                  (advice-remove 'org-priority
-                                                 #'org-ilm--update-from-priority-change))
-                                nil t))))))
-      (org-capture nil "i"))))
 
 ;;;;; Stats
 ;; Functions to work with e.g. the beta distribution.
