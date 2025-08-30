@@ -47,6 +47,16 @@
                  (const :tag "Copy" 'cp))
   :group 'org-ilm)
 
+(defcustom org-ilm-schedule-max-days 60
+  "Maximum number of days that a topic may be scheduled."
+  :type 'number
+  :group 'org-ilm)
+
+(defcustom org-ilm-schedule-min-days 1
+  "Minimum number of days that a topic may be scheduled."
+  :type 'number
+  :group 'org-ilm)
+
 ;;;; Variables
 
 (defface org-ilm-face-extract
@@ -471,6 +481,16 @@ Uses Marsaglia and Tsang's method for shape >= 1, and Ahrens-Dieter for shape < 
     (* (sqrt (* -2.0 (log u1)))
        (cos (* 2.0 pi u2)))))
 
+(defun org-ilm--random-poisson (lambda)
+  "Generate a Poission random variable using Knuth's algorithm."
+  (let ((l (exp (- lambda)))
+        (k 0)
+        (p 1.0))
+    (while (> p l)
+      (setq k (1+ k))
+      (setq p (* p (random-uniform))))
+    (1- k)))
+
 (defun org-ilm--random-beta (alpha beta &optional seed)
   "Generate a beta-distributed random variable with parameters ALPHA and BETA.
 If SEED is provided, sets the random seed first for reproducible results."
@@ -499,6 +519,18 @@ If SEED is provided, sets the random seed first for reproducible results."
           (y (org-ilm--random-gamma beta)))
       (/ x (+ x y))))))
 
+(defun org-ilm--beta-from-mean-sd (mean sd)
+  "Compute Alpha and Beta for a Beta distribution given MEAN and standard deviation SD."
+  (unless (and (> mean 0) (< mean 1))
+    (error "Mean must be between 0 and 1"))
+  (unless (> sd 0)
+    (error "Standard deviation must be positive"))
+  (let ((var (* sd sd)))  ;; convert SD to variance
+    (let ((alpha (- (/ (* mean (- 1 mean)) var) mean)))
+      (let ((beta (* alpha (/ (- 1 mean) mean))))
+        (list alpha beta)))))
+
+
 ;;;;; Priority
 
 (defun org-ilm--validated-priority (priority)
@@ -512,8 +544,12 @@ If SEED is provided, sets the random seed first for reproducible results."
       priority))))
 
 (defun org-ilm--get-priority ()
-  "Return priority value of heading at point."
-  (org-ilm--validated-priority (org-entry-get nil "PRIORITY")))
+  "Return priority value of heading at point.
+
+If no priority is set, return default value of 5."
+  (or
+   (org-ilm--validated-priority (org-entry-get nil "PRIORITY"))
+   5))
 
 (defun org-ilm--beta-from-priority (priority)
   "Beta parameters from priority value."
@@ -544,15 +580,30 @@ factor that increases with the number of reviews."
              (logbook (org-ilm--read-logbook)))
     (org-ilm--beta-from-priority-and-logbook priority logbook)))
 
+(defun org-ilm--sample-priority (beta-params &optional seed)
+  "Sample a priority value given the beta params."
+  (interactive (list (org-ilm--get-priority-params)))
+  (org-ilm--random-beta (nth 0 beta-params)
+                        (nth 1 beta-params)
+                        seed))
+
 ;;;;; Scheduling
 
-(defun org-ilm--schedule-from-priority (priority)
-  "Calculate a schedule date from priority value."
+(defun org-ilm--schedule-offset-from-priority (priority)
+  "Calculate a schedule offset from priority value."
   (setq priority (org-ilm--validated-priority priority))
   (unless priority
     (error "Priority value invalid."))
-  (let ((priority-normalized (/ (- priority 1) 8.0)))
-    ))
+  (let* ((priority-normalized (/ (- priority 1) 8.0))
+         (beta-params (org-ilm--beta-from-mean-sd
+                             (max (min priority-normalized .99) .01)
+                             .1))
+         (offset-normalized (org-ilm--sample-priority beta-params))
+         (offset-scaled (+ org-ilm-schedule-min-days
+                           (* offset-normalized
+                              (- org-ilm-schedule-max-days org-ilm-schedule-min-days)))))
+    (message "%s\t%s\t%s\t%s" priority-normalized beta-params offset-normalized offset-scaled)
+    (round offset-scaled)))
 
 (defun org-ilm--update-from-priority-change (func &rest args)
   "Advice around `org-priority' to detect priority changes to update schedule."
