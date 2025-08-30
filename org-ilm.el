@@ -167,7 +167,17 @@
   (setq org-ilm-queue (org-ilm--collect-queue-entries collection))
   (org-ilm--display-queue))
 
-
+(defun org-ilm-open-dwim ()
+  "Open element of highlight or within collection."
+  (interactive)
+  (let ((collection-files (mapcar
+                           (lambda (c) (file-truename (cdr c)))
+                           org-ilm-collections-alist)))
+    (cond
+     ((member (file-truename buffer-file-name) collection-files)
+      (org-ilm-open))
+     ((org-ilm-infer-id) (org-ilm-open-highlight)))))
+  
 ;;;; Functions
 
 ;;;;; Utilities
