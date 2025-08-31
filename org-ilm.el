@@ -20,6 +20,8 @@
 (require 'org-attach)
 (require 'org-element)
 (require 'org-ql)
+(require 'org-srs)
+(require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
 
@@ -57,9 +59,22 @@
   :type 'number
   :group 'org-ilm)
 
-(defcustom org-ilm-todo-state "INCR"
+(defcustom org-ilm-incr-state "INCR"
   "Default TODO state of elements to be processed incrementally."
   :type 'string
+  :group 'org-ilm)
+
+(defcustom org-ilm-card-state "CARD"
+  "Default TODO state of flash cards."
+  :type 'string
+  :group 'org-ilm)
+
+(defcustom org-ilm-card-default-location 'collection
+  "Whether to store the card content in the `collection' or as an `attachment'.
+
+When set to `attachment', org-transclusion will be used to transclude the content in the collection during review."
+  :type '(choice (const :tag "Collection" 'collection)
+                 (const :tag "Attachment" 'attachment))
   :group 'org-ilm)
 
 ;;;; Variables
@@ -68,12 +83,18 @@
   '((t :background "yellow"))
   "Face used to highlight extracts.")
 
+(defface org-ilm-face-card
+  '((t :background "pink"))
+  "Face used to highlight clozes.")
+
 (defvar org-ilm-queue nil
   "List of org headings that form the queue.")
 
 (defvar org-ilm-map (make-sparse-keymap)
   "Keymap for `org-ilm-global-mode'.")
-  
+
+(defvar org-ilm-target-regexp "<<\\(extract\\|card\\):\\([^>]+\\)>>"
+  "Regexp to match targets enclosing extracts and clozes.")
 
 ;;;; Minor mode
 
@@ -100,7 +121,9 @@
   (interactive "sURL: "))
 
 (defun org-ilm-extract ()
-  "Extract text in region to attachment Org file that is the child heading of current entry."
+  "Extract text in region.
+
+Will become an attachment Org file that is the child heading of current entry."
   (interactive)
   (unless (use-region-p) (user-error "No region active."))
   (let* ((file-buf (current-buffer))
@@ -119,9 +142,8 @@
     
     (let* ((region-begin (region-beginning))
            (region-end (region-end))
-           (region-text (buffer-substring-no-properties region-begin region-end))
-           (region-text-clean (replace-regexp-in-string "\n" " " region-text))
-           (snippet (substring region-text-clean 0 (min 50 (length region-text-clean))))
+           (region-text (org-ilm--buffer-text region-begin region-end))
+           (snippet (org-ilm--generate-text-snippet region-text))
            (extract-org-id (org-id-new))
            (extract-tmp-path (expand-file-name
                               (format "%s.org" extract-org-id)
@@ -131,7 +153,7 @@
       ;; heading.
       (write-region region-text nil extract-tmp-path)
       (org-ilm--capture
-       nil
+       'extract
        `(id ,file-org-id)
        extract-org-id
        extract-tmp-path
@@ -228,6 +250,13 @@
   "Set schedule date based on priority."
   (interactive)
   (org-ilm--set-schedule-from-priority))
+
+(defun org-ilm-cloze-toggle-this ()
+  "Toggle cloze at point, without creating the card."
+  (interactive)
+  (if (org-ilm--srs-in-cloze-p)
+      (org-srs-item-uncloze-dwim)
+    (org-srs-item-cloze-dwim)))
   
 ;;;; Functions
 
@@ -296,7 +325,7 @@ If `HEADLINE' is passed, read it as org-property."
                                   (string-equal
                                    (org-element-property :drawer-name drawer) "LOGBOOK"))
                                 drawers)))
-            (org-ilm--parse-logbook logbook))))))))
+            (org-ilm--parse-logbook logbook)))))))
 
 (defun org-ilm--get-logbook (&optional headline)
   "Returns logbook or parses it if not available."
@@ -304,12 +333,13 @@ If `HEADLINE' is passed, read it as org-property."
       logbook
     (org-ilm--read-logbook headline)))
 
-(defun org-ilm--capture (is-source target org-id file-path &optional title on-success)
-  "Make an org capture to make a new source heading or extract."
-  (let ((org-capture-templates
+(defun org-ilm--capture (type target org-id file-path &optional title on-success)
+  "Make an org capture to make a new source heading, extract, or card."
+  (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
+         (org-capture-templates
           `(("i" "Import"
              entry ,target
-             ,(format "* %s [#5] %s %s" org-ilm-todo-state title "%?")
+             ,(format "* %s [#5] %s %s" state title "%?")
              ;; :unnarrowed ; TODO for extracts might be nice?
              :hook (lambda ()
                      (org-entry-put nil "ID" ,org-id)
@@ -317,7 +347,7 @@ If `HEADLINE' is passed, read it as org-property."
                      ;; Attach the file. We always use 'mv because we are
                      ;; importing the file from the tmp dir.
                      (org-attach-attach ,file-path nil 'mv)
-                     (when ,is-source
+                     (when (eq ',type 'source)
                        (org-entry-put
                         nil "DIR"
                         (abbreviate-file-name (org-attach-dir-get-create))))
@@ -342,6 +372,25 @@ If `HEADLINE' is passed, read it as org-property."
   "Current date in UTC as string."
   (format-time-string "%Y-%m-%d" (current-time) t))
 
+(defun org-ilm--buffer-text (&optional region-begin region-end)
+  "Extract buffer text without the targets."
+  (s-replace-regexp
+   org-ilm-target-regexp ""
+   (buffer-substring-no-properties (or region-begin (point-min))
+                                   (or region-end (point-max)))))
+
+(defun org-ilm--generate-text-snippet (text)
+  ""
+  (let* ((text-clean (replace-regexp-in-string "\n" " " text))
+         (snippet (substring text-clean 0 (min 50 (length text-clean)))))
+    snippet))
+
+(defun org-ilm--where-am-i ()
+  "Returns one of 'collection, 'attachment, nil."
+  ;; TODO
+  )
+
+
 ;;;;; Attachments
 (defun org-ilm-infer-id ()
   "Attempt parsing the org-id of current attachment file."
@@ -364,10 +413,8 @@ If `HEADLINE' is passed, read it as org-property."
   (unless after
     (user-error "Cannot modify this region")))
 
-(defun org-ilm--create-overlay (target-begin target-end)
+(defun org-ilm--create-overlay (target-begin target-end &optional no-face)
   ""
-  (message "Creating ilm overlay")
-  
   ;; Hide targets
   (dolist (target (list target-begin target-end))
     (let ((begin (org-element-property :begin target))
@@ -389,10 +436,14 @@ If `HEADLINE' is passed, read it as org-property."
   (let* ((parts (split-string (org-element-property :value target-begin) ":"))
          (type (nth 0 parts))
          (id (nth 1 parts))
+         (face (pcase type
+                 ("extract" 'org-ilm-face-extract)
+                 ("card" 'org-ilm-face-card)))
          (ov (make-overlay
              (org-element-property :begin target-begin)
              (org-element-property :end target-end))))
-    (overlay-put ov 'face 'org-ilm-face-extract)
+    (unless no-face
+      (overlay-put ov 'face face))
     (overlay-put ov 'org-ilm-highlight t)
     (overlay-put ov 'org-ilm-type type)
     (overlay-put ov 'org-ilm-id id)
@@ -407,7 +458,7 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;; TODO Accept begin and end position so that new overlays can be processed by
 ;; narrowing to just that region, without having to redo the whole file.
-(defun org-ilm-recreate-overlays ()
+(defun org-ilm-recreate-overlays (&optional no-face)
   ""
   (interactive)
   (org-ilm-remove-overlays)
@@ -422,9 +473,9 @@ If `HEADLINE' is passed, read it as org-property."
            (message "Target: %s %s" type id)
            (when (and
                   id
-                  (member type '("extract" "cloze")))
+                  (member type '("extract" "card")))
              (if-let ((prev-target (gethash value targets)))
-                 (org-ilm--create-overlay prev-target target)
+                 (org-ilm--create-overlay prev-target target no-face)
                (puthash value target targets)))))))))
 
 (defun org-ilm--open-from-ov (ov)
@@ -508,7 +559,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       ('cp (copy-file file file-tmp-path))
       (t (error "Parameter METHOD must be one of 'mv or 'cp.")))
 
-    (org-ilm--capture t `(file ,(cdr collection)) org-id file-tmp-path)))
+    (org-ilm--capture 'source `(file ,(cdr collection)) org-id file-tmp-path)))
 
 ;;;;; Stats
 ;; Functions to work with e.g. the beta distribution.
@@ -715,6 +766,81 @@ factor that increases with the number of reviews."
     (apply func args)
     (let ((new-priority (org-ilm--get-priority)))
       (org-ilm--set-schedule-from-priority))))
+
+;;;;; SRS
+;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
+;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
+;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
+
+;; Creating multiple clozes reviewed together
+;; https://github.com/bohonghuang/org-srs/issues/40#issuecomment-3217858563
+
+(defun org-ilm-cloze ()
+  "Create a cloze card of text in region."
+  (interactive)
+  (let* ((file-buf (current-buffer))
+         (card-org-id (org-id-new))
+         (card-tmp-path (expand-file-name
+                         (format "%s.org" card-org-id)
+                         temporary-file-directory))
+         (file-org-id (file-name-sans-extension
+                       (file-name-nondirectory
+                        buffer-file-name)))
+         (snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text)))
+         clozes)
+    (org-ilm-card-export-cloze
+     (lambda ()
+       (setq clozes (org-srs-item-cloze-collect)))
+     (lambda ()
+       (write-region (point-min) (point-max) card-tmp-path)
+
+       (org-ilm--capture
+        'card
+        `(id ,file-org-id)
+        card-org-id
+        card-tmp-path
+        snippet
+        (lambda ()
+          ;; Wrap region with targets.
+          (with-current-buffer file-buf
+            (save-excursion
+              (mapcar
+               (lambda (cloze)
+                 (let ((region-begin (nth 1 cloze))
+                       (region-end (nth 2 cloze))
+                       (target-text (format "<<card:%s>>" card-org-id)))
+                   ;; Insert target before region
+                   (goto-char region-begin)
+                   (insert target-text)
+
+                   ;; Insert target after region, adjusting for start target length
+                   (goto-char (+ region-end (length target-text)))
+                   (insert target-text)))
+               clozes))
+            (save-buffer)
+            (org-ilm-recreate-overlays))))))
+    ))
+
+(defun org-ilm--srs-in-cloze-p ()
+  "Is point on a cloze?
+
+Just a hack by looking at code of `org-srs-item-cloze-item-at-point'."
+  (if (org-srs-item-cloze-bounds) t nil))
+
+(defun org-ilm--srs-review-this ()
+  "Start an org-srs review session of just the heading at point.
+
+Achieves this by narrowing to subtree and calling
+`org-srs-review-start'. In the collection, cards are always the leafs of
+the hierarchy, so we don't have to worry about another srs heading being
+below it.
+
+TODO replace with org-srs-item-review as suggested by org-srs creator:
+https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
+  (org-narrow-to-subtree)
+  ;; When buffer narrows, will only review items within narrowed region.
+  (org-srs-review-start))
+
 
 ;;;; Footer
 
