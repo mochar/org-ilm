@@ -413,12 +413,26 @@ If `HEADLINE' is passed, read it as org-property."
   (unless after
     (user-error "Cannot modify this region")))
 
+(defun org-ilm--add-target-end-nowhite-property (target)
+  "Add :end-nowhite property which excludes spaces at the end of target string."
+  (let* ((begin (org-element-property :begin target))
+         (end (org-element-property :end target))
+         (target-text (buffer-substring-no-properties begin end))
+         (trailing-spaces (length (progn
+                                    (string-match " *\\'" target-text)
+                                    (match-string 0 target-text))))
+         (end-nowhite (- end trailing-spaces)))
+    (org-element-put-property target :end-nowhite end-nowhite)))
+
 (defun org-ilm--create-overlay (target-begin target-end &optional no-face)
   ""
+  (setq target-begin (org-ilm--add-target-end-nowhite-property target-begin))
+  (setq target-end (org-ilm--add-target-end-nowhite-property target-end))
+  
   ;; Hide targets
   (dolist (target (list target-begin target-end))
     (let ((begin (org-element-property :begin target))
-          (end (org-element-property :end target)))
+          (end (org-element-property :end-nowhite target)))
       (let ((ov (make-overlay
                  begin
                  ;; If next character is newline, include it.  Otherwise hitting
@@ -441,7 +455,7 @@ If `HEADLINE' is passed, read it as org-property."
                  ("card" 'org-ilm-face-card)))
          (ov (make-overlay
              (org-element-property :begin target-begin)
-             (org-element-property :end target-end))))
+             (org-element-property :end-nowhite target-end))))
     (unless no-face
       (overlay-put ov 'face face))
     (overlay-put ov 'org-ilm-highlight t)
@@ -470,12 +484,13 @@ If `HEADLINE' is passed, read it as org-property."
                 (parts (split-string value ":"))
                 (type (nth 0 parts))
                 (id (nth 1 parts)))
-           (message "Target: %s %s" type id)
            (when (and
                   id
                   (member type '("extract" "card")))
              (if-let ((prev-target (gethash value targets)))
-                 (org-ilm--create-overlay prev-target target no-face)
+                 (progn
+                   (org-ilm--create-overlay prev-target target no-face)
+                   (remhash value targets))
                (puthash value target targets)))))))))
 
 (defun org-ilm--open-from-ov (ov)
