@@ -57,6 +57,11 @@
   :type 'number
   :group 'org-ilm)
 
+(defcustom org-ilm-todo-state "INCR"
+  "Default TODO state of elements to be processed incrementally."
+  :type 'string
+  :group 'org-ilm)
+
 ;;;; Variables
 
 (defface org-ilm-face-extract
@@ -304,7 +309,7 @@ If `HEADLINE' is passed, read it as org-property."
   (let ((org-capture-templates
           `(("i" "Import"
              entry ,target
-             ,(format "* [#5] INCR %s %s" title "%?")
+             ,(format "* %s [#5] %s %s" org-ilm-todo-state title "%?")
              ;; :unnarrowed ; TODO for extracts might be nice?
              :hook (lambda ()
                      (org-entry-put nil "ID" ,org-id)
@@ -439,18 +444,12 @@ If `HEADLINE' is passed, read it as org-property."
     (setq headline (plist-put headline :logbook logbook))
     (let ((sample (org-ilm--sample-priority-from-headline headline)))
       (setq headline (plist-put headline :priority-sample sample))
-      (message "Headline: %s" headline)
       headline)))
 
 (defun org-ilm--compare-priority (first second)
   "Comparator of two headlines by sampled priority."
-  ;; (message "First: %s\nSeciond: %s" first second)
-  (when-let ((priority-first (org-ilm--get-priority first))
-             (beta-first (org-ilm--get-priority-params first))
-             (sampled-first (org-ilm--sample-priority beta-first))
-             (priority-second (org-ilm--get-priority second))
-             (beta-second (org-ilm--get-priority-params second))
-             (sampled-second (org-ilm--sample-priority beta-second)))
+  (when-let ((priority-first (org-element-property :priority-sample first))
+             (priority-second (org-element-property :priority-sample second)))
     (< priority-first priority-second)))
 
 (defun org-ilm--collect-queue-entries (collection)
