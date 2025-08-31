@@ -269,10 +269,13 @@ return nil, and if only one, return it."
            :year-start ,(org-element-property :year-start timestamp))))
      contents)))
     
-(defun org-ilm--read-logbook ()
-  "Reads and parses the LOGBOOK drawer of heading at point."
-  (let* ((headline (save-excursion (org-back-to-heading) (org-element-at-point)))
-         (begin (org-element-property :begin headline))
+(defun org-ilm--read-logbook (&optional headline)
+  "Reads and parses the LOGBOOK drawer of heading at point.
+
+If `HEADLINE' is passed, read it as org-property."
+  (unless headline
+    (setq headline (save-excursion (org-back-to-heading) (org-element-at-point))))
+  (let* ((begin (org-element-property :begin headline))
          (end (save-excursion
                 (outline-next-heading)
                 (point))))
@@ -288,7 +291,13 @@ return nil, and if only one, return it."
                                   (string-equal
                                    (org-element-property :drawer-name drawer) "LOGBOOK"))
                                 drawers)))
-            (org-ilm--parse-logbook logbook)))))))
+            (org-ilm--parse-logbook logbook))))))))
+
+(defun org-ilm--get-logbook (&optional headline)
+  "Returns logbook or parses it if not available."
+  (if-let ((logbook (org-element-property :logbook headline)))
+      logbook
+    (org-ilm--read-logbook headline)))
 
 (defun org-ilm--capture (is-source target org-id file-path &optional title on-success)
   "Make an org capture to make a new source heading or extract."
@@ -322,7 +331,11 @@ return nil, and if only one, return it."
                                                 #'org-ilm--update-from-priority-change))
                                nil t))
              :before-finalize ,on-success))))
-    (org-capture nil "i"))))
+    (org-capture nil "i")))
+
+(defun org-ilm--current-date-utc ()
+  "Current date in UTC as string."
+  (format-time-string "%Y-%m-%d" (current-time) t))
 
 ;;;;; Attachments
 (defun org-ilm-infer-id ()
@@ -417,11 +430,36 @@ return nil, and if only one, return it."
 
 ;;;;; Queue view
 
+(defun org-ilm--ql-headline-action ()
+  "Add sampled priority to headline plist when org-ql parses headlines."
+  (let* (;; This part is same as `element-with-markers' action of org-ql.
+         (headline (org-ql--add-markers
+                    (org-element-headline-parser (line-end-position))))
+         (logbook (org-ilm--read-logbook headline)))
+    (setq headline (plist-put headline :logbook logbook))
+    (let ((sample (org-ilm--sample-priority-from-headline headline)))
+      (setq headline (plist-put headline :priority-sample sample))
+      (message "Headline: %s" headline)
+      headline)))
+
+(defun org-ilm--compare-priority (first second)
+  "Comparator of two headlines by sampled priority."
+  ;; (message "First: %s\nSeciond: %s" first second)
+  (when-let ((priority-first (org-ilm--get-priority first))
+             (beta-first (org-ilm--get-priority-params first))
+             (sampled-first (org-ilm--sample-priority beta-first))
+             (priority-second (org-ilm--get-priority second))
+             (beta-second (org-ilm--get-priority-params second))
+             (sampled-second (org-ilm--sample-priority beta-second)))
+    (< priority-first priority-second)))
+
 (defun org-ilm--collect-queue-entries (collection)
   "Return entries (headings) that form the outstanding queue."
-  ;; TODO This now returns all headings, later should take into account outstanding.
   (with-current-buffer (find-file-noselect (cdr collection))
-    (org-ql-select (current-buffer) nil :action 'element-with-markers)))
+    (org-ql-select (current-buffer)
+      '(scheduled :to today)
+      :action #'org-ilm--ql-headline-action
+      :sort #'org-ilm--compare-priority)))
 
 (defun org-ilm--display-queue ()
   "Open an Org-ql view of elements in `org-ilm-queue'."
@@ -584,13 +622,21 @@ If SEED is provided, sets the random seed first for reproducible results."
     (when (member priority '(1 2 3 4 5 6 7 8 9))
       priority))))
 
-(defun org-ilm--get-priority ()
-  "Return priority value of heading at point.
+(defun org-ilm--get-priority (&optional headline)
+  "Return priority value of HEADLINE, or if nil, the one at point.
 
 If no priority is set, return default value of 5."
-  (or
-   (org-ilm--validated-priority (org-entry-get nil "PRIORITY"))
-   5))
+  (let ((priority (if headline
+                      (org-element-property :priority headline)
+                    (org-entry-get nil "PRIORITY"))))
+    ;; When HEADLINE is parsed with org-element, buffer local
+    ;; `org-priority-lowest' and highest not respected, returns a high number
+    ;; instead that can be converted back to our priority.
+    (if (and (numberp priority) (> priority 48))
+        (- priority 48)
+      (or
+       (org-ilm--validated-priority priority)
+       5))))
 
 (defun org-ilm--beta-from-priority (priority)
   "Beta parameters from priority value."
@@ -615,10 +661,10 @@ factor that increases with the number of reviews."
                                              (nth 1 params)
                                              logbook)))
 
-(defun org-ilm--get-priority-params ()
+(defun org-ilm--get-priority-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
-  (when-let ((priority (org-ilm--get-priority))
-             (logbook (org-ilm--read-logbook)))
+  (let ((priority (org-ilm--get-priority headline))
+        (logbook (org-ilm--get-logbook headline)))
     (org-ilm--beta-from-priority-and-logbook priority logbook)))
 
 (defun org-ilm--sample-priority (beta-params &optional seed)
@@ -627,6 +673,15 @@ factor that increases with the number of reviews."
   (org-ilm--random-beta (nth 0 beta-params)
                         (nth 1 beta-params)
                         seed))
+
+(defun org-ilm--sample-priority-from-headline (headline)
+  "This still assumes there is a headline at point. Used in `org-ilm--ql-headline-action'."
+  (when-let* ((beta (org-ilm--get-priority-params headline))
+              (seed (format "%s%s"
+                            (org-ilm--current-date-utc)
+                            (org-element-property :ID headline)))
+              (sample (org-ilm--sample-priority beta seed)))
+    sample))
 
 ;;;;; Scheduling
 
