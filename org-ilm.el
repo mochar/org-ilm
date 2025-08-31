@@ -460,9 +460,18 @@ If `HEADLINE' is passed, read it as org-property."
       :action #'org-ilm--ql-headline-action
       :sort #'org-ilm--compare-priority)))
 
+(defun org-ilm--format-heading-element (element)
+  "Add priority to heading format on top of what org-ql adds."
+  (let* ((string (org-ql-view--format-element element))
+         (priority (* 100 (plist-get element :priority-sample)))
+         (prefix (propertize (format "%.2f" priority) 'face 'shadow))
+         (new-string (concat "   " prefix " " (string-trim-left string))))
+    ;; Need to add back properties for agenda to work properly
+    (org-add-props new-string (text-properties-at 0 string))))
+
 (defun org-ilm--display-queue ()
   "Open an Org-ql view of elements in `org-ilm-queue'."
-  (let ((strings (-map #'org-ql-view--format-element org-ilm-queue)))
+  (let ((strings (-map #'org-ilm--format-heading-element org-ilm-queue)))
     (org-ql-view--display :buffer "*Ilm Queue*" :header "Ilm queue" :strings strings)))
 
 
