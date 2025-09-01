@@ -393,24 +393,26 @@ ON-SUCCESS."
   "Current date in UTC as string."
   (format-time-string "%Y-%m-%d" (current-time) t))
 
-(defun org-ilm--buffer-text-clean (&optional region-begin region-end)
+(defun org-ilm--buffer-text-clean (&optional region-begin region-end keep-clozes)
   "Extract buffer text without clozes and extract and card targets."
   (let ((text (s-replace-regexp
                org-ilm-target-regexp ""
                (buffer-substring-no-properties (or region-begin (point-min))
                                                (or region-end (point-max))))))
     ;; Remove clozes by looping until none left
-    (with-temp-buffer
-      (insert text)
-      (while (let ((clz (org-srs-item-cloze-collect))) clz)
-        (let* ((cloze (car (org-srs-item-cloze-collect)))
-               (region-begin (nth 1 cloze))
-               (region-end   (nth 2 cloze))
-               (inner (substring-no-properties (nth 3 cloze))))
-          (goto-char region-begin)
-          (delete-region region-begin region-end)
-          (insert inner)))
-      (buffer-string))))
+    (if keep-clozes
+        text
+      (with-temp-buffer
+        (insert text)
+        (while (let ((clz (org-srs-item-cloze-collect))) clz)
+          (let* ((cloze (car (org-srs-item-cloze-collect)))
+                 (region-begin (nth 1 cloze))
+                 (region-end   (nth 2 cloze))
+                 (inner (substring-no-properties (nth 3 cloze))))
+            (goto-char region-begin)
+            (delete-region region-begin region-end)
+            (insert inner)))
+        (buffer-string)))))
 
 (defun org-ilm--generate-text-snippet (text)
   ""
@@ -930,9 +932,12 @@ command."
       (setq clozes (org-srs-item-cloze-collect))
       (setq auto-clozed t))
     (cl-assert clozes)
-    
-    (setq buffer-text (org-ilm--buffer-text-clean)
-          snippet (org-ilm--generate-text-snippet buffer-text))
+
+    ;; The buffer text we export should be cleaned of targets but not of clozes.
+    ;; The text we use to make a snippet should not contain clozes as well.
+    ;; TODO Inefficient, snippet should be cleaned afterwards
+    (setq buffer-text (org-ilm--buffer-text-clean nil nil t)
+          snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text-clean)))
 
     (write-region buffer-text nil card-tmp-path)
 
