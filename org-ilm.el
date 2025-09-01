@@ -142,7 +142,7 @@ Will become an attachment Org file that is the child heading of current entry."
     
     (let* ((region-begin (region-beginning))
            (region-end (region-end))
-           (region-text (org-ilm--buffer-text region-begin region-end))
+           (region-text (org-ilm--buffer-text-clean region-begin region-end))
            (snippet (org-ilm--generate-text-snippet region-text))
            (extract-org-id (org-id-new))
            (extract-tmp-path (expand-file-name
@@ -333,9 +333,19 @@ If `HEADLINE' is passed, read it as org-property."
       logbook
     (org-ilm--read-logbook headline)))
 
-(defun org-ilm--capture (type target org-id file-path &optional title on-success)
-  "Make an org capture to make a new source heading, extract, or card."
+(defun org-ilm--capture (type target org-id file-path &optional title on-success on-abort)
+  "Make an org capture to make a new source heading, extract, or card.
+
+The callback ON-SUCCESS is called when capture is saved, by passing it to before-finalize hook, which is set to nil in `org-capture-kill'.
+
+The callback ON-ABORT is called when capture is cancelled, which can be
+detected in after-finalize hook with the `org-note-abort' flag set to t
+in `org-capture-kill'.  TODO Therefore ON-SUCCESS can probably be called
+in after-finalize as well, but I figured this out after implementing
+ON-SUCCESS."
   (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
+         (after-finalize (lambda ()
+                           (when org-note-abort (funcall on-abort))))
          (org-capture-templates
           `(("i" "Import"
              entry ,target
@@ -343,41 +353,64 @@ If `HEADLINE' is passed, read it as org-property."
              ;; :unnarrowed ; TODO for extracts might be nice?
              :hook (lambda ()
                      (org-entry-put nil "ID" ,org-id)
-                     
-                     ;; Attach the file. We always use 'mv because we are
-                     ;; importing the file from the tmp dir.
-                     (org-attach-attach ,file-path nil 'mv)
+
+                     ;; If this is a source header where the attachments will
+                     ;; live, we need to set the DIR property, otherwise for
+                     ;; some reason org-attach on children doesn't detect that
+                     ;; there is a parent attachment header, even with a non-nil
+                     ;; `org-attach-use-inheritance'.
                      (when (eq ',type 'source)
                        (org-entry-put
                         nil "DIR"
                         (abbreviate-file-name (org-attach-dir-get-create))))
+                     
+                     ;; Attach the file. We always use 'mv because we are
+                     ;; importing the file from the tmp dir.
+                     (org-attach-attach ,file-path nil 'mv)
 
-                     ;; Schedule
-                     (org-ilm--set-schedule-from-priority)
+                     ;; Schedule the header. We do not add a schedule for cards,
+                     ;; as that info is parsed with
+                     ;; `org-ilm--srs-earliest-due-timestamp'.
+                     (unless (eq ',type 'card)
+                       (org-ilm--set-schedule-from-priority)
 
-                     ;; Add advice around priority change to automatically
-                     ;; update schedule, but remove advice as soon as capture
-                     ;; is finished.
-                     (advice-add 'org-priority
-                                 :around #'org-ilm--update-from-priority-change)
-                     (add-hook 'kill-buffer-hook
-                               (lambda ()
-                                 (advice-remove 'org-priority
-                                                #'org-ilm--update-from-priority-change))
-                               nil t))
-             :before-finalize ,on-success))))
+                       ;; Add advice around priority change to automatically
+                       ;; update schedule, but remove advice as soon as capture
+                       ;; is finished.
+                       (advice-add 'org-priority
+                                   :around #'org-ilm--update-from-priority-change)
+                       (add-hook 'kill-buffer-hook
+                                 (lambda ()
+                                   (advice-remove 'org-priority
+                                                  #'org-ilm--update-from-priority-change))
+                                 nil t)
+                       ))
+             :before-finalize ,on-success
+             :after-finalize ,after-finalize))))
     (org-capture nil "i")))
 
 (defun org-ilm--current-date-utc ()
   "Current date in UTC as string."
   (format-time-string "%Y-%m-%d" (current-time) t))
 
-(defun org-ilm--buffer-text (&optional region-begin region-end)
-  "Extract buffer text without the extract and card targets."
-  (s-replace-regexp
-   org-ilm-target-regexp ""
-   (buffer-substring-no-properties (or region-begin (point-min))
-                                   (or region-end (point-max)))))
+(defun org-ilm--buffer-text-clean (&optional region-begin region-end)
+  "Extract buffer text without clozes and extract and card targets."
+  (let ((text (s-replace-regexp
+               org-ilm-target-regexp ""
+               (buffer-substring-no-properties (or region-begin (point-min))
+                                               (or region-end (point-max))))))
+    ;; Remove clozes by looping until none left
+    (with-temp-buffer
+      (insert text)
+      (while (let ((clz (org-srs-item-cloze-collect))) clz)
+        (let* ((cloze (car (org-srs-item-cloze-collect)))
+               (region-begin (nth 1 cloze))
+               (region-end   (nth 2 cloze))
+               (inner (substring-no-properties (nth 3 cloze))))
+          (goto-char region-begin)
+          (delete-region region-begin region-end)
+          (insert inner)))
+      (buffer-string))))
 
 (defun org-ilm--generate-text-snippet (text)
   ""
@@ -821,7 +854,12 @@ factor that increases with the number of reviews."
 ;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
 
 (defun org-ilm-cloze ()
-  "Create a cloze card of text in region."
+  "Create a cloze card.
+
+A cloze is made automatically of the element at point or active
+region. If instead a grouped set of clozes must be made, you can first
+call `org-ilm-cloze-toggle-this' a couple times before calling this
+command."
   (interactive)
 
   (let* ((file-buf (current-buffer))
@@ -833,15 +871,18 @@ factor that increases with the number of reviews."
                        (file-name-nondirectory
                         buffer-file-name)))
          (clozes (org-srs-item-cloze-collect))
-         buffer-text snippet)
+         buffer-text snippet auto-clozed)
 
+    ;; When no clozes have been made, make cloze of element at point or active
+    ;; region. We set the flag auto-clozed to t, so that when capture is
+    ;; aborted, we can toggle it back.
     (unless clozes
       (org-srs-item-cloze-dwim)
-      (setq clozes (org-srs-item-cloze-collect)))
-
+      (setq clozes (org-srs-item-cloze-collect))
+      (setq auto-clozed t))
     (cl-assert clozes)
     
-    (setq buffer-text (org-ilm--buffer-text)
+    (setq buffer-text (org-ilm--buffer-text-clean)
           snippet (org-ilm--generate-text-snippet buffer-text))
 
     (write-region buffer-text nil card-tmp-path)
@@ -853,9 +894,12 @@ factor that increases with the number of reviews."
      card-tmp-path
      snippet
      (lambda ()
+       ;; Success callback. Go through each cloze in the source file and replace
+       ;; it with our target tags. Render them by recreating overlays.
        (with-current-buffer file-buf
          (save-excursion
-           ;; process clozes until none left
+           ;; process clozes until none left TODO similar functionality
+           ;; `org-ilm--buffer-text-clean', extract to own function
            (while (let ((clz (org-srs-item-cloze-collect))) clz)
              (let* ((cloze (car (org-srs-item-cloze-collect)))
                     (region-begin (nth 1 cloze))
@@ -865,9 +909,14 @@ factor that increases with the number of reviews."
                (goto-char region-begin)
                (delete-region region-begin region-end)
                (insert target-text inner target-text))))
-         
          (save-buffer)
-         (org-ilm-recreate-overlays))))))
+         (org-ilm-recreate-overlays)))
+     (lambda ()
+       ;; Abort callback. Undo cloze if made automatically by this function.
+       (when auto-clozed
+         (with-current-buffer file-buf
+           (org-srs-item-uncloze-dwim))))
+     )))
 
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
