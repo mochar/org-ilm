@@ -440,6 +440,55 @@ ON-SUCCESS."
            (location (org-id-find potential-id)))
       (when location (cons potential-id location)))))
 
+(defun org-ilm--attachment-path (&optional if-exists)
+  "Return path to the attachment of heading at point."
+  (when-let* ((org-id (org-id-get))
+              (path (org-attach-expand (format "%s.org" org-id))))
+    (when (or (not if-exists) (file-exists-p path))
+      path)))
+
+;;;;;; Transclusion
+(defun org-ilm--org-narrow-to-header ()
+  ""
+  (org-narrow-to-subtree)
+  (save-excursion
+    (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
+
+(defun org-ilm--attachment-transclusion-create-text (&optional path level)
+  ""
+  (when-let ((path (or path (org-ilm--attachment-path t)))
+             (level (or level (org-current-level))))
+    (format "#+transclude: [[file:%s]] :level %s" path (+ 1 level))))
+
+(defun org-ilm-attachment-transclusion-create (&optional transclude)
+  "Create and move point to transclusion for the attachment of header at point."
+  (interactive)
+  (when-let* ((transclusion-text (org-ilm--attachment-transclusion-create-text))
+              (transclusion-pattern ; May start with whitespace
+               (concat "^[ \t]*" (regexp-quote transclusion-text))))
+    (save-restriction
+      (org-ilm--org-narrow-to-header)
+      ;; Need to remove active transclusion, otherwise pattern not found.
+      (org-transclusion-remove-all)
+      (goto-char (point-min))
+      (if (re-search-forward transclusion-pattern nil t)
+          ;; Transclusion text exists, go to beginning of the line
+          (beginning-of-line)
+        ;; Not found, append at end of the header
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (insert transclusion-text "\n")
+        (beginning-of-line)))
+    (when transclude
+      (org-transclusion-add))))
+
+(defun org-ilm-attachment-transclusion-transclude ()
+  "Transclude the contents of the current heading's attachment."
+  (interactive)
+  (save-excursion
+    (org-ilm-attachment-transclusion-create t)))
+
+
 ;;;;; Extracts
 
 (defun org-ilm--ov-block-edit (ov after beg end &optional len)
@@ -931,7 +980,7 @@ Just a hack by looking at code of `org-srs-item-cloze-item-at-point'."
           (save-excursion
             (mapcar (lambda (item) (apply #'org-srs-item-due-timestamp item)) items))))
     (apply #'org-srs-timestamp-min due-timestamps)))
-  
+
 (defun org-ilm--srs-review-this ()
   "Start an org-srs review session of just the heading at point.
 
