@@ -502,15 +502,27 @@ If `HEADLINE' is passed, read it as org-property."
 ;;;;; Queue view
 
 (defun org-ilm--ql-headline-action ()
-  "Add sampled priority to headline plist when org-ql parses headlines."
+  "Add some custom properties to headline when org-ql parses buffer."
   (let* (;; This part is same as `element-with-markers' action of org-ql.
          (headline (org-ql--add-markers
                     (org-element-headline-parser (line-end-position))))
-         (logbook (org-ilm--read-logbook headline)))
-    (setq headline (plist-put headline :logbook logbook))
+         (is-card (string-equal (org-element-property :todo-keyword headline)
+                                org-ilm-card-state)))
+    (if is-card
+        ;; If card, set due time of earliest item as scheduled property
+        ;; This is a hack to show due time in days in the agenda view.
+        (when-let* ((due-timestamp-str (org-ilm--srs-earliest-due-timestamp))
+                    (due-timestamp (parse-iso8601-time-string due-timestamp-str))
+                    (due-org-timestamp (org-timestamp-from-time due-timestamp)))
+          (setq headline (org-element-put-property headline :scheduled due-org-timestamp)))
+      ;; If not card, attach logbook as property
+      (let ((logbook (unless is-card (org-ilm--read-logbook headline))))
+        (setq headline (plist-put headline :logbook logbook))))
+
+    ;; Sample priority value
     (let ((sample (org-ilm--sample-priority-from-headline headline)))
-      (setq headline (plist-put headline :priority-sample sample))
-      headline)))
+      (setq headline (plist-put headline :priority-sample sample)))
+    headline))
 
 (defun org-ilm--compare-priority (first second)
   "Comparator of two headlines by sampled priority."
@@ -519,12 +531,33 @@ If `HEADLINE' is passed, read it as org-property."
     (< priority-first priority-second)))
 
 (defun org-ilm--collect-queue-entries (collection)
-  "Return entries (headings) that form the outstanding queue."
+  "Return entries (headings) that form the outstanding queue.
+
+Ideally we want to use the (scheduled :to today) predicate instead of
+post-query filtering like we do here, since we do add the :scheduled
+property to card headlines with `org-ilm--ql-headline-action'. However
+because org-ql applies this action after the query filter, this does not
+work."
   (with-current-buffer (find-file-noselect (cdr collection))
-    (org-ql-select (current-buffer)
-      '(scheduled :to today)
-      :action #'org-ilm--ql-headline-action
-      :sort #'org-ilm--compare-priority)))
+    (let ((entries (org-ql-select (current-buffer)
+                     `(or
+                       (and
+                        (todo ,org-ilm-incr-state)
+                        (scheduled :to today))
+                       (todo ,org-ilm-card-state))
+                     :action #'org-ilm--ql-headline-action
+                     :sort #'org-ilm--compare-priority)))
+      (seq-filter
+       (lambda (entry)
+         (let ((is-card (string-equal
+                         (org-element-property :todo-keyword entry)
+                         org-ilm-card-state)))
+           (if is-card
+               (when-let* ((scheduled (org-element-property :scheduled entry))
+                           (scheduled-str (org-timestamp-translate scheduled)))
+                 (<= (org-timestamp-to-now scheduled-str) 0))
+             t)))
+       entries))))
 
 (defun org-ilm--format-heading-element (element)
   "Add priority to heading format on top of what org-ql adds."
@@ -842,6 +875,14 @@ factor that increases with the number of reviews."
 Just a hack by looking at code of `org-srs-item-cloze-item-at-point'."
   (if (org-srs-item-cloze-bounds) t nil))
 
+(defun org-ilm--srs-earliest-due-timestamp ()
+  "Returns the earliest due timestamp of this headline's cards."
+  (when-let* ((items (org-srs-query-region #'always (org-entry-beginning-position) (org-entry-end-position)))
+         (due-timestamps
+          (save-excursion
+            (mapcar (lambda (item) (apply #'org-srs-item-due-timestamp item)) items))))
+    (apply #'org-srs-timestamp-min due-timestamps)))
+  
 (defun org-ilm--srs-review-this ()
   "Start an org-srs review session of just the heading at point.
 
