@@ -373,7 +373,7 @@ If `HEADLINE' is passed, read it as org-property."
   (format-time-string "%Y-%m-%d" (current-time) t))
 
 (defun org-ilm--buffer-text (&optional region-begin region-end)
-  "Extract buffer text without the targets."
+  "Extract buffer text without the extract and card targets."
   (s-replace-regexp
    org-ilm-target-regexp ""
    (buffer-substring-no-properties (or region-begin (point-min))
@@ -787,12 +787,10 @@ factor that increases with the number of reviews."
 ;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
 ;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
 
-;; Creating multiple clozes reviewed together
-;; https://github.com/bohonghuang/org-srs/issues/40#issuecomment-3217858563
-
 (defun org-ilm-cloze ()
   "Create a cloze card of text in region."
   (interactive)
+
   (let* ((file-buf (current-buffer))
          (card-org-id (org-id-new))
          (card-tmp-path (expand-file-name
@@ -801,40 +799,42 @@ factor that increases with the number of reviews."
          (file-org-id (file-name-sans-extension
                        (file-name-nondirectory
                         buffer-file-name)))
-         (snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text)))
-         clozes)
-    (org-ilm-card-export-cloze
-     (lambda ()
-       (setq clozes (org-srs-item-cloze-collect)))
-     (lambda ()
-       (write-region (point-min) (point-max) card-tmp-path)
+         (clozes (org-srs-item-cloze-collect))
+         buffer-text snippet)
 
-       (org-ilm--capture
-        'card
-        `(id ,file-org-id)
-        card-org-id
-        card-tmp-path
-        snippet
-        (lambda ()
-          ;; Wrap region with targets.
-          (with-current-buffer file-buf
-            (save-excursion
-              (mapcar
-               (lambda (cloze)
-                 (let ((region-begin (nth 1 cloze))
-                       (region-end (nth 2 cloze))
-                       (target-text (format "<<card:%s>>" card-org-id)))
-                   ;; Insert target before region
-                   (goto-char region-begin)
-                   (insert target-text)
+    (unless clozes
+      (org-srs-item-cloze-dwim)
+      (setq clozes (org-srs-item-cloze-collect)))
 
-                   ;; Insert target after region, adjusting for start target length
-                   (goto-char (+ region-end (length target-text)))
-                   (insert target-text)))
-               clozes))
-            (save-buffer)
-            (org-ilm-recreate-overlays))))))
-    ))
+    (cl-assert clozes)
+    
+    (setq buffer-text (org-ilm--buffer-text)
+          snippet (org-ilm--generate-text-snippet buffer-text))
+
+    (write-region buffer-text nil card-tmp-path)
+
+    (org-ilm--capture
+     'card
+     `(id ,file-org-id)
+     card-org-id
+     card-tmp-path
+     snippet
+     (lambda ()
+       (with-current-buffer file-buf
+         (save-excursion
+           ;; process clozes until none left
+           (while (let ((clz (org-srs-item-cloze-collect))) clz)
+             (let* ((cloze (car (org-srs-item-cloze-collect)))
+                    (region-begin (nth 1 cloze))
+                    (region-end   (nth 2 cloze))
+                    (inner (substring-no-properties (nth 3 cloze)))
+                    (target-text (format "<<card:%s>>" card-org-id)))
+               (goto-char region-begin)
+               (delete-region region-begin region-end)
+               (insert target-text inner target-text))))
+         
+         (save-buffer)
+         (org-ilm-recreate-overlays))))))
 
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
