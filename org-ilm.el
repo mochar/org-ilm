@@ -340,11 +340,19 @@ If `HEADLINE' is passed, read it as org-property."
                                 drawers)))
             (org-ilm--parse-logbook logbook)))))))
 
-(defun org-ilm--get-logbook (&optional headline)
+(defun org-ilm-get-logbook (&optional headline)
   "Returns logbook or parses it if not available."
-  (if-let ((logbook (org-element-property :logbook headline)))
-      logbook
+  ;; Might be nil, but if its a member, it has been parsed before, so don't
+  ;; parse again.
+  (if (and headline (plist-member headline :logbook))
+      (plist-get headline :logbook)
     (org-ilm--read-logbook headline)))
+
+(defun org-ilm-get-subjects (&optional headline)
+  "Returns subjects of headline or parses "
+  (if (and headline (plist-member headline :subjects))
+      (plist-get headline :subjects)
+    (org-ilm--subjects-gather headline)))
 
 (defun org-ilm--capture (type target org-id tmp-file-path &optional title on-success on-abort)
   "Make an org capture to make a new source heading, extract, or card.
@@ -705,7 +713,10 @@ The callback ON-ABORT is called when capture is cancelled."
 ;;;;; Queue 
 
 (defun org-ilm--ql-headline-action ()
-  "Add some custom properties to headline when org-ql parses buffer."
+  "Add some custom properties to headline when org-ql parses buffer.
+
+Note these are plist properties placed on the headline element, NOT
+`org-element-property' properties."
   (let* (;; This part is same as `element-with-markers' action of org-ql.
          (headline (org-ql--add-markers
                     (org-element-headline-parser (line-end-position))))
@@ -723,7 +734,7 @@ The callback ON-ABORT is called when capture is cancelled."
         (setq headline (plist-put headline :logbook logbook))))
 
     ;; Add list of subjects
-    (setq headline (plist-put headline :subjects (org-ilm--subjects-gather)))
+    (setq headline (plist-put headline :subjects (org-ilm-get-subjects headline)))
 
     ;; Sample priority value
     (let ((sample (org-ilm--sample-priority-from-headline headline)))
@@ -732,8 +743,8 @@ The callback ON-ABORT is called when capture is cancelled."
 
 (defun org-ilm--compare-priority (first second)
   "Comparator of two headlines by sampled priority."
-  (when-let ((priority-first (org-element-property :priority-sample first))
-             (priority-second (org-element-property :priority-sample second)))
+  (when-let ((priority-first (plist-get first :priority-sample))
+             (priority-second (plist-get second :priority-sample)))
     (< priority-first priority-second)))
 
 (defun org-ilm--collect-queue-entries (collection)
@@ -957,39 +968,52 @@ If no priority is set, return default value of 5."
          (b (+ 1 (- 9 a))))
     (list a b)))
 
-(defun org-ilm--adjusted-priority-from-logbook (a b logbook)
+(defun org-ilm--priority-adjusted-from-logbook (params logbook)
   "Calculate the variance adjusted beta parameters from logbook data.
 
 For now, decrease variance by proportionally scaling a and b by some
 factor that increases with the number of reviews."
   (let* ((reviews (length logbook))
-         (a (* a (+ 1 reviews)))
-         (b (* b (+ 1 reviews))))
+         (a (* (nth 0 params) (+ 1 reviews)))
+         (b (* (nth 1 params) (+ 1 reviews))))
+    (list a b)))
+
+(defun org-ilm--priority-adjusted-from-subjects (params subjects)
+  ""
+  (let ((a (nth 0 params))
+        (b (nth 1 params)))
+    (dolist (subject subjects)
+      (when-let ((subject-entry (org-mem-entry-by-id subject))
+                 (subject-priority (org-priority-to-value
+                                    (or (org-mem-entry-priority subject-entry)
+                                        "5")))
+                 (subject-params (org-ilm--beta-from-priority subject-priority)))
+        (setq (+ a (nth 0 subject-params) -1))
+        (setq (+ b (nth 0 subject-params) -1))))
     (list a b)))
 
 (defun org-ilm--beta-from-priority-and-logbook (priority logbook)
   "Beta parameters from priority value, adjusted by logbook history."
   (let ((params (org-ilm--beta-from-priority priority)))
-    (org-ilm--adjusted-priority-from-logbook (nth 0 params)
-                                             (nth 1 params)
-                                             logbook)))
+    (org-ilm--priority-adjusted-from-logbook params logbook)))
 
-(defun org-ilm--get-priority-params (&optional headline)
+(defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
   (let ((priority (org-ilm--get-priority headline))
-        (logbook (org-ilm--get-logbook headline)))
+        (logbook (org-ilm-get-logbook headline))
+        (subjects ()))
     (org-ilm--beta-from-priority-and-logbook priority logbook)))
 
 (defun org-ilm--sample-priority (beta-params &optional seed)
   "Sample a priority value given the beta params."
-  (interactive (list (org-ilm--get-priority-params)))
+  (interactive (list (org-ilm--priority-get-params)))
   (org-ilm--random-beta (nth 0 beta-params)
                         (nth 1 beta-params)
                         seed))
 
 (defun org-ilm--sample-priority-from-headline (headline)
   "This still assumes there is a headline at point. Used in `org-ilm--ql-headline-action'."
-  (when-let* ((beta (org-ilm--get-priority-params headline))
+  (when-let* ((beta (org-ilm--priority-get-params headline))
               (seed (format "%s%s"
                             (org-ilm--current-date-utc)
                             (org-element-property :ID headline)))
@@ -1127,11 +1151,11 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 
 ;;;;; Subjects
 
-(defun org-ilm--subjects-gather ()
+(defun org-ilm--subjects-gather (&optional headline)
   "Gather list of subjects org ids of headline at point."
   (let (subjects)
     ;; Check for inherited SUBJECTS property
-    (when-let ((property-subjects (org-entry-get nil "SUBJECTS" t))
+    (when-let ((property-subjects (org-entry-get headline "SUBJECTS" t))
                (test-push-entry
                 (lambda (value)
                   (when-let ((entry (gethash value org-mem--id<>entry)))
@@ -1150,12 +1174,12 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 
     ;; Check for ancestor subject headline
     (org-element-lineage-map
-        (org-element-at-point nil)
-        (lambda (headline)
+        (org-element-at-point headline)
+        (lambda (element)
           (when (member
-                 (org-element-property :todo-keyword headline) org-ilm-subject-states)
+                 (org-element-property :todo-keyword element) org-ilm-subject-states)
             (cl-pushnew
-             (org-id-get headline t) ; creates id if not exists
+             (org-id-get element t) ; creates id if not exists
              subjects :test #'equal)))
       '(headline))
 
