@@ -486,6 +486,20 @@ The callback ON-ABORT is called when capture is cancelled."
         (when (member (expand-file-name src-file) collections)
           (cons 'attachment (list file-title src-file)))))))
 
+(defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
+  "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
+  (let* ((states-list (if (stringp states) (list states) states))
+         (choice
+          (completing-read (or prompt "Node: ")
+                           (if blank-ok #'org-node-collection-main
+                             #'org-node-collection-basic)
+                           (lambda (name node)
+                             (member (org-mem-todo-state node) states-list))
+                           ()
+                           initial-input
+                           (if org-node-alter-candidates 'org-node-hist-altered
+                             'org-node-hist))))
+    (gethash choice org-node--candidate<>entry)))
 
 ;;;;; Attachments
 (defun org-ilm-infer-id-from-attachment-path (path)
@@ -1184,6 +1198,22 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
       '(headline))
 
     subjects))
+
+(defun org-ilm-subject-add ()
+  "Annotate headline at point with a subject."
+  (interactive)
+  (let* ((subject-entry (org-ilm--node-read-candidate-state-only org-ilm-subject-states))
+         (subject-id (org-mem-entry-id subject-entry))
+         (cur-subjects (org-entry-get nil "SUBJECTS" t)))
+    (if (string-match subject-id cur-subjects)
+        ;; TODO print more info: `org-entry-property-inherited-from'
+        ;; TODO offer option to remove
+        (message "Subject already added")
+      (let* ((subject-desc (org-mem-entry-title subject-entry))
+             (subject-link (org-link-make-string
+                            (concat "id:" subject-id) subject-desc)))
+        (org-entry-put nil "SUBJECTS+"
+                       (concat cur-subjects " " subject-link))))))
 
 
 ;;;; Footer
