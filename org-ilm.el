@@ -99,6 +99,9 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defvar org-ilm-target-regexp (format "<<%s>>" org-ilm-target-value-regexp)
   "Regexp to match targets enclosing extracts and clozes.")
 
+(defvar org-ilm--targets-editable nil
+  "Whether or not to allow editing/removing of target text.")
+
 ;;;; Minor mode
 
 ;;;###autoload
@@ -541,24 +544,27 @@ The callback ON-ABORT is called when capture is cancelled."
     (org-transclusion-add)))
 
 
-;;;;; Overlays
+;;;;; Targets
 
 ;; TODO edit `org-ilm--ov-block-edit' so that user prompted if extract
 ;; higghlight wants to be removed.
 
-(defun org-ilm--parse-target-string (string)
+(defun org-ilm--target-parse-string (string &optional with-brackets)
   "Parse and return parts of target string as specified in `org-ilm-target-value-regexp'."
-  (when-let* ((parts (s-match org-ilm-target-value-regexp string))
+  (when-let* ((regexp (if with-brackets
+                          org-ilm-target-regexp
+                        org-ilm-target-value-regexp))
+              (parts (s-match regexp string))
               (type (nth 1 parts))
               (pos (nth 2 parts))
               (id (nth 3 parts)))
     `(:string ,string :type ,type :pos ,pos :id ,id)))
 
-(defun org-ilm--parse-target-element (element)
+(defun org-ilm--target-parse-element (element)
   "Parse and return parts of target element."
   (setq tmp-el element)
   (when-let* ((string (org-element-property :value element))
-              (parts (org-ilm--parse-target-string string))
+              (parts (org-ilm--target-parse-string string))
               (begin (org-element-property :begin element))
               (end (org-element-property :end element)))
     (let* (;; Parse target text to offset end position by spaces
@@ -571,8 +577,51 @@ The callback ON-ABORT is called when capture is cancelled."
       (setq parts (plist-put parts :end end-nowhite)))
     parts))
 
+(defun org-ilm--target-parse-match ()
+  "Parse and return target matched with `re-search-forward' and friends."
+  (when-let ((target (org-ilm--target-parse-string (match-string-no-properties 0)))
+             (begin (match-beginning 0))
+             (end (match-end 0)))
+    (setq target (plist-put target :begin begin))
+    (setq target (plist-put target :end end))
+    target))
+
+(defun org-ilm--target-around-point (pos)
+  "Returns start target or end target around point, depending if `POS' is 'begin or 'end."
+  (cl-assert (memq pos '(begin end)))
+  (let* ((find-begin (eq pos 'begin))
+         (re-func (if find-begin #'re-search-backward #'re-search-forward))
+         (pos-string (if find-begin "begin" "end")))
+    (save-excursion
+      (when (funcall re-func org-ilm-target-regexp nil t)
+        (let ((target (org-ilm--target-parse-match)))
+          (when (string-equal (plist-get target :pos) pos-string)
+            target))))))
+
+(defun org-ilm--targets-around-point ()
+  "Returns begin and targets around point, or nil if not in highlight."
+  (when-let ((target-begin (org-ilm--target-around-point 'begin))
+             (target-end (org-ilm--target-around-point 'end)))
+    (list target-begin target-end)))
+
+(defun org-ilm-targets-remove-around-point ()
+  "Removes targets around point if exists."
+  (interactive)
+  (when-let ((targets (org-ilm--targets-around-point)))
+    (atomic-change-group
+      (let ((org-ilm--targets-editable t))
+        (delete-region (plist-get (nth 1 targets) :begin)
+                       (plist-get (nth 1 targets) :end))
+        (delete-region (plist-get (nth 0 targets) :begin)
+                       (plist-get (nth 0 targets) :end)))
+      (org-ilm-recreate-overlays))))
+    
+
+
+;;;;; Overlays
+
 (defun org-ilm--ov-block-edit (ov after beg end &optional len)
-  (unless after
+  (unless (or after org-ilm--targets-editable)
     (user-error "Cannot modify this region")))
 
 (defun org-ilm--create-overlay (target-begin target-end &optional no-face)
@@ -627,7 +676,7 @@ The callback ON-ABORT is called when capture is cancelled."
    (let ((begin-targets (make-hash-table :test 'equal)))
      (org-element-map (org-element-parse-buffer) 'target
        (lambda (target-element)
-         (when-let* ((target (org-ilm--parse-target-element target-element))
+         (when-let* ((target (org-ilm--target-parse-element target-element))
                      (target-id (plist-get target :id)))
            (message "Target: %s" target)
            (when (member (plist-get target :type) '("extract" "card"))
