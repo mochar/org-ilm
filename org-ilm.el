@@ -93,7 +93,10 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defvar org-ilm-map (make-sparse-keymap)
   "Keymap for `org-ilm-global-mode'.")
 
-(defvar org-ilm-target-regexp "<<\\(extract\\|card\\):\\([^>]+\\)>>"
+(defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
+  "Regexp to match values of targets enclosing extracts and clozes.")
+
+(defvar org-ilm-target-regexp (format "<<%s>>" org-ilm-target-value-regexp)
   "Regexp to match targets enclosing extracts and clozes.")
 
 ;;;; Minor mode
@@ -115,7 +118,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
     (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
     ))
 
-;;;; Commands
+;;; Commands
 (defun org-ilm-import-website (url)
   ""
   (interactive "sURL: "))
@@ -162,19 +165,22 @@ Will become an attachment Org file that is the child heading of current entry."
          ;; Wrap region with targets.
          (with-current-buffer file-buf
            (save-excursion
-             (let ((target-text (format "<<extract:%s>>" extract-org-id))
-                   (is-begin-line (or (= region-begin 0) (eq (char-before) ?\n))))
+             (let* ((is-begin-line (or (= region-begin 0)
+                                       (eq (char-before region-begin) ?\n)))
+                    (target-template (format "<<extract:%s:%s>>" "%s" extract-org-id))
+                    (target-begin (concat
+                                   (format target-template "begin")
+                                   ;; Region starts at beginning of line: insert
+                                   ;; on new line above
+                                   (when is-begin-line "\n")))
+                    (target-end (format target-template "end")))
                ;; Insert target before region
                (goto-char region-begin)
-               (if is-begin-line
-                   ;; Region starts at beginning of line: insert on new line above
-                   (insert (format "%s\n" target-text))
-                 ;; Otherwise, insert before region inline
-                 (insert target-text))
+               (insert target-begin)
 
                ;; Insert target after region, adjusting for start target length
-               (goto-char (+ region-end (length target-text)))
-               (insert target-text)))
+               (goto-char (+ region-end (length target-begin)))
+               (insert target-end)))
            (save-buffer)
            (org-ilm-recreate-overlays)))))))
 
@@ -535,32 +541,46 @@ The callback ON-ABORT is called when capture is cancelled."
     (org-transclusion-add)))
 
 
-;;;;; Extracts
+;;;;; Overlays
+
+;; TODO edit `org-ilm--ov-block-edit' so that user prompted if extract
+;; higghlight wants to be removed.
+
+(defun org-ilm--parse-target-string (string)
+  "Parse and return parts of target string as specified in `org-ilm-target-value-regexp'."
+  (when-let* ((parts (s-match org-ilm-target-value-regexp string))
+              (type (nth 1 parts))
+              (pos (nth 2 parts))
+              (id (nth 3 parts)))
+    `(:string ,string :type ,type :pos ,pos :id ,id)))
+
+(defun org-ilm--parse-target-element (element)
+  "Parse and return parts of target element."
+  (setq tmp-el element)
+  (when-let* ((string (org-element-property :value element))
+              (parts (org-ilm--parse-target-string string))
+              (begin (org-element-property :begin element))
+              (end (org-element-property :end element)))
+    (let* (;; Parse target text to offset end position by spaces
+           (target-text (buffer-substring-no-properties begin end))
+           (trailing-spaces (length (progn
+                                      (string-match " *\\'" target-text)
+                                      (match-string 0 target-text))))
+           (end-nowhite (- end trailing-spaces)))
+      (setq parts (plist-put parts :begin begin))
+      (setq parts (plist-put parts :end end-nowhite)))
+    parts))
 
 (defun org-ilm--ov-block-edit (ov after beg end &optional len)
   (unless after
     (user-error "Cannot modify this region")))
 
-(defun org-ilm--add-target-end-nowhite-property (target)
-  "Add :end-nowhite property which excludes spaces at the end of target string."
-  (let* ((begin (org-element-property :begin target))
-         (end (org-element-property :end target))
-         (target-text (buffer-substring-no-properties begin end))
-         (trailing-spaces (length (progn
-                                    (string-match " *\\'" target-text)
-                                    (match-string 0 target-text))))
-         (end-nowhite (- end trailing-spaces)))
-    (org-element-put-property target :end-nowhite end-nowhite)))
-
 (defun org-ilm--create-overlay (target-begin target-end &optional no-face)
-  ""
-  (setq target-begin (org-ilm--add-target-end-nowhite-property target-begin))
-  (setq target-end (org-ilm--add-target-end-nowhite-property target-end))
-  
+  "Create an overlay to hide the target markers and highlight the target text."
   ;; Hide targets
   (dolist (target (list target-begin target-end))
-    (let ((begin (org-element-property :begin target))
-          (end (org-element-property :end-nowhite target)))
+    (let ((begin (plist-get target :begin))
+          (end (plist-get target :end)))
       (let ((ov (make-overlay
                  begin
                  ;; If next character is newline, include it.  Otherwise hitting
@@ -575,15 +595,14 @@ The callback ON-ABORT is called when capture is cancelled."
     ))
   
   ;; Highlight region
-  (let* ((parts (split-string (org-element-property :value target-begin) ":"))
-         (type (nth 0 parts))
-         (id (nth 1 parts))
+  (let* ((id (plist-get target-begin :id))
+         (type (plist-get target-begin :type))
          (face (pcase type
                  ("extract" 'org-ilm-face-extract)
                  ("card" 'org-ilm-face-card)))
          (ov (make-overlay
-             (org-element-property :begin target-begin)
-             (org-element-property :end-nowhite target-end))))
+             (plist-get target-begin :begin)
+             (plist-get target-end :end))))
     (unless no-face
       (overlay-put ov 'face face))
     (overlay-put ov 'org-ilm-highlight t)
@@ -605,21 +624,21 @@ The callback ON-ABORT is called when capture is cancelled."
   (interactive)
   (org-ilm-remove-overlays)
   (org-with-wide-buffer
-   (let ((targets (make-hash-table :test 'equal)))
+   (let ((begin-targets (make-hash-table :test 'equal)))
      (org-element-map (org-element-parse-buffer) 'target
-       (lambda (target)
-         (let* ((value (org-element-property :value target))
-                (parts (split-string value ":"))
-                (type (nth 0 parts))
-                (id (nth 1 parts)))
-           (when (and
-                  id
-                  (member type '("extract" "card")))
-             (if-let ((prev-target (gethash value targets)))
+       (lambda (target-element)
+         (when-let* ((target (org-ilm--parse-target-element target-element))
+                     (target-id (plist-get target :id)))
+           (message "Target: %s" target)
+           (when (member (plist-get target :type) '("extract" "card"))
+             (pcase (plist-get target :pos)
+               ("begin" (puthash target-id target begin-targets))
+               ("end"
+                (when-let ((begin-target (gethash target-id begin-targets)))
                  (progn
-                   (org-ilm--create-overlay prev-target target no-face)
-                   (remhash value targets))
-               (puthash value target targets)))))))))
+                   (org-ilm--create-overlay begin-target target no-face)
+                   ;; TODO Do we need to remove it?
+                   (remhash target-id begin-targets))))))))))))
 
 (defun org-ilm--open-from-ov (ov)
   ""
@@ -1007,10 +1026,12 @@ command."
                     (region-begin (nth 1 cloze))
                     (region-end   (nth 2 cloze))
                     (inner (substring-no-properties (nth 3 cloze)))
-                    (target-text (format "<<card:%s>>" card-org-id)))
+                    (target-template (format "<<card:%s:%s>>" "%s" card-org-id))
+                    (target-begin (format target-template "begin"))
+                    (target-end (format target-template "end")))
                (goto-char region-begin)
                (delete-region region-begin region-end)
-               (insert target-text inner target-text))))
+               (insert target-begin inner target-end))))
          (save-buffer)
          (org-ilm-recreate-overlays)))
      (lambda ()
