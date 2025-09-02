@@ -60,13 +60,18 @@
   :group 'org-ilm)
 
 (defcustom org-ilm-incr-state "INCR"
-  "Default TODO state of elements to be processed incrementally."
+  "TODO state of elements to be processed incrementally."
   :type 'string
   :group 'org-ilm)
 
 (defcustom org-ilm-card-state "CARD"
-  "Default TODO state of flash cards."
+  "TODO state of flash cards."
   :type 'string
+  :group 'org-ilm)
+
+(defcustom org-ilm-subject-states '("SUBJ")
+  "TODO state of subjects."
+  :type '(repeat string)
   :group 'org-ilm)
 
 (defcustom org-ilm-card-default-location 'collection
@@ -121,7 +126,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
     (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
     ))
 
-;;; Commands
+;;;; Commands
 (defun org-ilm-import-website (url)
   ""
   (interactive "sURL: "))
@@ -697,7 +702,7 @@ The callback ON-ABORT is called when capture is cancelled."
         (find-file attachment))
     id))
 
-;;;;; Queue view
+;;;;; Queue 
 
 (defun org-ilm--ql-headline-action ()
   "Add some custom properties to headline when org-ql parses buffer."
@@ -716,6 +721,9 @@ The callback ON-ABORT is called when capture is cancelled."
       ;; If not card, attach logbook as property
       (let ((logbook (unless is-card (org-ilm--read-logbook headline))))
         (setq headline (plist-put headline :logbook logbook))))
+
+    ;; Add list of subjects
+    (setq headline (plist-put headline :subjects (org-ilm--subjects-gather)))
 
     ;; Sample priority value
     (let ((sample (org-ilm--sample-priority-from-headline headline)))
@@ -1115,6 +1123,43 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
   (org-narrow-to-subtree)
   ;; When buffer narrows, will only review items within narrowed region.
   (org-srs-review-start))
+
+
+;;;;; Subjects
+
+(defun org-ilm--subjects-gather ()
+  "Gather list of subjects org ids of headline at point."
+  (let (subjects)
+    ;; Check for inherited SUBJECTS property
+    (when-let ((property-subjects (org-entry-get nil "SUBJECTS" t))
+               (test-push-entry
+                (lambda (value)
+                  (when-let ((entry (gethash value org-mem--id<>entry)))
+                    (when (member (org-mem-entry-todo-state entry) org-ilm-subject-states)
+                      (cl-pushnew value subjects :test #'equal)
+                      value)))))
+      (dolist (subject-string (string-split property-subjects))
+        (cond
+         ;; String is an org-id
+         ((funcall test-push-entry subject-string))
+         ;; String is an org link to org-id
+         ((string-match org-link-bracket-re subject-string)
+          (let ((link (match-string 1 subject-string)))
+            (when (string-prefix-p "id:" link)
+              (funcall test-push-entry (substring link 3))))))))
+
+    ;; Check for ancestor subject headline
+    (org-element-lineage-map
+        (org-element-at-point nil)
+        (lambda (headline)
+          (when (member
+                 (org-element-property :todo-keyword headline) org-ilm-subject-states)
+            (cl-pushnew
+             (org-id-get headline t) ; creates id if not exists
+             subjects :test #'equal)))
+      '(headline))
+
+    subjects))
 
 
 ;;;; Footer
