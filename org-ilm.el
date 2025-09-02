@@ -333,19 +333,37 @@ If `HEADLINE' is passed, read it as org-property."
       logbook
     (org-ilm--read-logbook headline)))
 
-(defun org-ilm--capture (type target org-id file-path &optional title on-success on-abort)
+(defun org-ilm--capture (type target org-id tmp-file-path &optional title on-success on-abort)
   "Make an org capture to make a new source heading, extract, or card.
 
-The callback ON-SUCCESS is called when capture is saved, by passing it to before-finalize hook, which is set to nil in `org-capture-kill'.
-
-The callback ON-ABORT is called when capture is cancelled, which can be
-detected in after-finalize hook with the `org-note-abort' flag set to t
-in `org-capture-kill'.  TODO Therefore ON-SUCCESS can probably be called
-in after-finalize as well, but I figured this out after implementing
-ON-SUCCESS."
+The callback ON-SUCCESS is called when capture is saved.
+The callback ON-ABORT is called when capture is cancelled."
   (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
-         (after-finalize (lambda ()
-                           (when org-note-abort (funcall on-abort))))
+         (before-finalize
+          (lambda ()
+            ;; If this is a source header where the attachments will
+            ;; live, we need to set the DIR property, otherwise for
+            ;; some reason org-attach on children doesn't detect that
+            ;; there is a parent attachment header, even with a non-nil
+            ;; `org-attach-use-inheritance'.
+            (when (eq type 'source)
+              (org-entry-put
+               nil "DIR"
+               (abbreviate-file-name (org-attach-dir-get-create))))
+            
+            ;; Attach the file. We always use 'mv because we are
+            ;; importing the file from the tmp dir.
+            (org-attach-attach tmp-file-path nil 'mv)))
+         (after-finalize
+          (lambda ()
+            ;; Deal with success and aborted capture. This can be detected in
+            ;; after-finalize hook with the `org-note-abort' flag set to t in
+            ;; `org-capture-kill'.
+            (if org-note-abort
+                (when on-abort
+                  (funcall on-abort))
+              (when on-success
+                (funcall on-success)))))
          (org-capture-templates
           `(("i" "Import"
              entry ,target
@@ -359,14 +377,10 @@ ON-SUCCESS."
                      ;; some reason org-attach on children doesn't detect that
                      ;; there is a parent attachment header, even with a non-nil
                      ;; `org-attach-use-inheritance'.
-                     (when (eq ',type 'source)
-                       (org-entry-put
-                        nil "DIR"
-                        (abbreviate-file-name (org-attach-dir-get-create))))
-                     
-                     ;; Attach the file. We always use 'mv because we are
-                     ;; importing the file from the tmp dir.
-                     (org-attach-attach ,file-path nil 'mv)
+                     ;; (when (eq ',type 'source)
+                       ;; (org-entry-put
+                        ;; nil "DIR"
+                        ;; (abbreviate-file-name (org-attach-dir-get-create))))
 
                      ;; Schedule the header. We do not add a schedule for cards,
                      ;; as that info is parsed with
@@ -383,9 +397,17 @@ ON-SUCCESS."
                                  (lambda ()
                                    (advice-remove 'org-priority
                                                   #'org-ilm--update-from-priority-change))
-                                 nil t)
-                       ))
-             :before-finalize ,on-success
+                                 nil t))
+
+                     ;; For cards, need to transclude the contents in order for
+                     ;; org-srs to detect the clozes.
+                     (when (eq ',type 'card)
+                       (save-excursion
+                         (org-ilm--transclusion-goto ,tmp-file-path 'create)
+                         (org-transclusion-add)
+                         (org-srs-item-new 'cloze)
+                         (org-ilm--transclusion-goto ,tmp-file-path 'delete))))
+             :before-finalize ,before-finalize
              :after-finalize ,after-finalize))))
     (org-capture nil "i")))
 
@@ -420,6 +442,12 @@ ON-SUCCESS."
          (snippet (substring text-clean 0 (min 50 (length text-clean)))))
     snippet))
 
+(defun org-ilm--org-narrow-to-header ()
+  ""
+  (org-narrow-to-subtree)
+  (save-excursion
+    (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
+
 (defun org-ilm--where-am-i ()
   "Returns one of 'collection, 'attachment, nil."
   ;; TODO
@@ -449,46 +477,50 @@ ON-SUCCESS."
     (when (or (not if-exists) (file-exists-p path))
       path)))
 
-;;;;;; Transclusion
-(defun org-ilm--org-narrow-to-header ()
-  ""
-  (org-narrow-to-subtree)
-  (save-excursion
-    (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
+;;;;; Transclusion
 
-(defun org-ilm--attachment-transclusion-create-text (&optional path level)
+(defun org-ilm--transclusion-goto (file-path &optional action)
   ""
-  (when-let ((path (or path (org-ilm--attachment-path t)))
-             (level (or level (org-current-level))))
-    (format "#+transclude: [[file:%s]] :level %s" path (+ 1 level))))
-
-(defun org-ilm-attachment-transclusion-create (&optional transclude)
-  "Create and move point to transclusion for the attachment of header at point."
-  (interactive)
-  (when-let* ((transclusion-text (org-ilm--attachment-transclusion-create-text))
-              (transclusion-pattern ; May start with whitespace
-               (concat "^[ \t]*" (regexp-quote transclusion-text))))
+  (let* ((transclusion-text (format "#+transclude: [[file:%s]]" file-path))
+         (current-level (org-current-level))
+         (create (eq action 'create))
+         (transclusion-pattern ; May start with whitespace
+          (concat "^[ \t]*" (regexp-quote transclusion-text))))
     (save-restriction
       (org-ilm--org-narrow-to-header)
       ;; Need to remove active transclusion, otherwise pattern not found.
       (org-transclusion-remove-all)
       (goto-char (point-min))
       (if (re-search-forward transclusion-pattern nil t)
-          ;; Transclusion text exists, go to beginning of the line
-          (beginning-of-line)
-        ;; Not found, append at end of the header
-        (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
-        (insert transclusion-text "\n")
-        (beginning-of-line)))
-    (when transclude
-      (org-transclusion-add))))
+          (pcase action
+            ('delete (delete-line))
+            ('create (progn
+                       (delete-line)
+                       (split-line))))
+        (when create
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))))
+      (when create
+        (insert (format "%s :level %s" transclusion-text (+ 1 current-level)))))))
+
+(defun org-ilm-attachment-transclusion-delete ()
+  "Delete transclusion text for the attachment of header at point."
+  (interactive)
+  (when-let ((attachment-path (org-ilm--attachment-path t)))
+    (org-ilm--transclusion-goto attachment-path 'delete)))
+
+(defun org-ilm-attachment-transclusion-create ()
+  "Create and move point to transclusion for the attachment of header at point."
+  (interactive)
+  (when-let ((attachment-path (org-ilm--attachment-path t)))
+    (org-ilm--transclusion-goto attachment-path 'create)))
 
 (defun org-ilm-attachment-transclusion-transclude ()
   "Transclude the contents of the current heading's attachment."
   (interactive)
   (save-excursion
-    (org-ilm-attachment-transclusion-create t)))
+    (org-ilm-attachment-transclusion-create)
+    (org-transclusion-add)))
 
 
 ;;;;; Extracts
