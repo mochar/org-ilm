@@ -131,7 +131,7 @@ Will become an attachment Org file that is the child heading of current entry."
          (file-name (file-name-sans-extension
                      (file-name-nondirectory
                       file-path)))
-         (attach-org-id (car (org-ilm-infer-id-from-attachment-path file-path)))
+         (attach-org-id (car (org-ilm--attachment-data)))
          (attach-org-id-marker (org-id-find attach-org-id t))
          (file-org-id file-name)
          (file-org-id-marker (org-id-find file-org-id t)))
@@ -181,7 +181,7 @@ Will become an attachment Org file that is the child heading of current entry."
 (defun org-ilm-prepare-buffer ()
   "Recreate overlays if current buffer is an attachment Org file."
   (interactive)
-  (when (org-ilm-infer-id)
+  (when (org-ilm--attachment-data)
     (org-ilm-recreate-overlays)))
 
 (defun org-ilm-open ()
@@ -220,25 +220,24 @@ Will become an attachment Org file that is the child heading of current entry."
 (defun org-ilm-open-collection ()
   "Open collection file, jump back to it if in attachment."
   (interactive)
-  (if-let ((org-id-loc (org-ilm-infer-id)))
+  (if-let* ((data (org-ilm--attachment-data))
+            (org-id-loc (org-id-find (car data))))
       (progn
-        (find-file (car (cdr org-id-loc)))
-        (goto-char (cdr (cdr org-id-loc))))
+        (find-file (car org-id-loc))
+        (goto-char (cdr org-id-loc)))
     (let ((collection (org-ilm--select-collection)))
       (find-file (cdr collection)))))
 
 (defun org-ilm-open-dwim ()
   "Open element of highlight or within collection."
   (interactive)
-  (let ((collection-files (mapcar
-                           (lambda (c) (file-truename (cdr c)))
-                           org-ilm-collections-alist)))
-    (cond
-     ((member (file-truename buffer-file-name) collection-files)
-      (org-ilm-open))
-     ((org-ilm-infer-id)
+  (let ((location (org-ilm--where-am-i)))
+    (pcase (car location)
+     ('collection (org-ilm-open))
+     ('attachment
       (unless (org-ilm-open-highlight)
-        (org-ilm-open-collection))))))
+        (org-ilm-open-collection)))
+     (t (org-ilm-open-collection)))))
 
 (defun org-ilm-queue (collection)
   "View queue in Agenda-like buffer."
@@ -449,16 +448,23 @@ The callback ON-ABORT is called when capture is cancelled."
     (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
 
 (defun org-ilm--where-am-i ()
-  "Returns one of 'collection, 'attachment, nil."
+  "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
   ;; TODO
-  )
+  (let ((collections (mapcar
+                      (lambda (c) (expand-file-name (cdr c)))
+                      org-ilm-collections-alist)))
+    (if (member buffer-file-name collections)
+        (cons 'collection buffer-file-name)
+      (when-let* ((_ buffer-file-name)
+                  (file-title (file-name-sans-extension
+                         (file-name-nondirectory buffer-file-name)))
+                  (_ (org-uuidgen-p file-title))
+                  (src-file (org-id-find-id-file file-title)))
+        (when (member (expand-file-name src-file) collections)
+          (cons 'attachment (list file-title src-file)))))))
 
 
 ;;;;; Attachments
-(defun org-ilm-infer-id ()
-  "Attempt parsing the org-id of current attachment file."
-  (org-ilm-infer-id-from-attachment-path buffer-file-name))
-  
 (defun org-ilm-infer-id-from-attachment-path (path)
   "Attempt parsing the org-id from the attachment path, return (id . location)."
   (when path
@@ -469,6 +475,12 @@ The callback ON-ABORT is called when capture is cancelled."
                            (t nil)))
            (location (org-id-find potential-id)))
       (when location (cons potential-id location)))))
+
+(defun org-ilm--attachment-data ()
+  "Returns (org-id collection-path) if current buffer is collection attachment file."
+  (when-let ((location (org-ilm--where-am-i)))
+    (when (eq 'attachment (car location))
+      (cdr location))))
 
 (defun org-ilm--attachment-path (&optional if-exists)
   "Return path to the attachment of heading at point."
