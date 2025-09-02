@@ -409,6 +409,7 @@ The callback ON-ABORT is called when capture is cancelled."
 
                      ;; For cards, need to transclude the contents in order for
                      ;; org-srs to detect the clozes.
+                     ;; TODO `org-transclusion-add' super slow!!
                      (when (eq ',type 'card)
                        (save-excursion
                          (org-ilm--transclusion-goto ,tmp-file-path 'create)
@@ -545,9 +546,6 @@ The callback ON-ABORT is called when capture is cancelled."
 
 
 ;;;;; Targets
-
-;; TODO edit `org-ilm--ov-block-edit' so that user prompted if extract
-;; higghlight wants to be removed.
 
 (defun org-ilm--target-parse-string (string &optional with-brackets)
   "Parse and return parts of target string as specified in `org-ilm-target-value-regexp'."
