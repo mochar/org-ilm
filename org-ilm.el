@@ -993,30 +993,31 @@ factor that increases with the number of reviews."
     (list a b)))
 
 (defun org-ilm--priority-adjusted-from-subjects (params subjects)
-  ""
+  "Average the priority out over the subject priorities."
   (let ((a (nth 0 params))
         (b (nth 1 params)))
     (dolist (subject subjects)
-      (when-let ((subject-entry (org-mem-entry-by-id subject))
-                 (subject-priority (org-priority-to-value
-                                    (or (org-mem-entry-priority subject-entry)
-                                        "5")))
-                 (subject-params (org-ilm--beta-from-priority subject-priority)))
-        (setq (+ a (nth 0 subject-params) -1))
-        (setq (+ b (nth 0 subject-params) -1))))
+      (when-let* ((subject-entry (org-mem-entry-by-id subject))
+                  (subject-priority (org-priority-to-value
+                                     (or (org-mem-entry-priority subject-entry)
+                                         "5")))
+                  (subject-params (org-ilm--beta-from-priority subject-priority)))
+        (setq a (+ a (nth 0 subject-params) -1))
+        (setq b (+ b (nth 0 subject-params) -1))))
     (list a b)))
 
-(defun org-ilm--beta-from-priority-and-logbook (priority logbook)
-  "Beta parameters from priority value, adjusted by logbook history."
+(defun org-ilm--priority-beta-compile (priority subjects logbook)
+  "Compile the finale beta parameters from priority value, subjects, and logbook history."
   (let ((params (org-ilm--beta-from-priority priority)))
-    (org-ilm--priority-adjusted-from-logbook params logbook)))
+    (setq params (org-ilm--priority-adjusted-from-logbook params logbook))
+    (setq params (org-ilm--priority-adjusted-from-subjects params subjects))))
 
 (defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
   (let ((priority (org-ilm--get-priority headline))
         (logbook (org-ilm-get-logbook headline))
-        (subjects ()))
-    (org-ilm--beta-from-priority-and-logbook priority logbook)))
+        (subjects (org-ilm-get-subjects headline)))
+    (org-ilm--priority-beta-compile priority subjects logbook)))
 
 (defun org-ilm--sample-priority (beta-params &optional seed)
   "Sample a priority value given the beta params."
@@ -1188,7 +1189,8 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 
     ;; Check for ancestor subject headline
     (org-element-lineage-map
-        (org-element-at-point headline)
+        ;; returned property will be nil if headline nil
+        (org-element-at-point (org-element-property :begin headline))
         (lambda (element)
           (when (member
                  (org-element-property :todo-keyword element) org-ilm-subject-states)
@@ -1205,7 +1207,8 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
   (let* ((subject-entry (org-ilm--node-read-candidate-state-only org-ilm-subject-states))
          (subject-id (org-mem-entry-id subject-entry))
          (cur-subjects (org-entry-get nil "SUBJECTS" t)))
-    (if (string-match subject-id cur-subjects)
+    (if (and cur-subjects
+             (string-match subject-id cur-subjects))
         ;; TODO print more info: `org-entry-property-inherited-from'
         ;; TODO offer option to remove
         (message "Subject already added")
