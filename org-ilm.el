@@ -623,8 +623,12 @@ The callback ON-ABORT is called when capture is cancelled."
 
 (defun org-ilm--open-from-ov (ov)
   ""
-  (when-let ((id (overlay-get ov 'org-ilm-id)))
-    (find-file (format "%s.org" id))
+  (when-let ((id (overlay-get ov 'org-ilm-id))
+             (attachment (format "%s.org" id)))
+    (when (or
+           (file-exists-p attachment)
+           (yes-or-no-p "Attachment does not exist. Open anyway?"))
+        (find-file attachment))
     id))
 
 ;;;;; Queue view
