@@ -946,7 +946,7 @@ Uses Marsaglia and Tsang's method for shape >= 1, and Ahrens-Dieter for shape < 
         (p 1.0))
     (while (> p l)
       (setq k (1+ k))
-      (setq p (* p (random-uniform))))
+      (setq p (* p (org-ilm--random-uniform))))
     (1- k)))
 
 (defun org-ilm--random-beta (alpha beta &optional seed)
