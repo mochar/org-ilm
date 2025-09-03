@@ -501,6 +501,36 @@ The callback ON-ABORT is called when capture is cancelled."
                              'org-node-hist))))
     (gethash choice org-node--candidate<>entry)))
 
+(defun org-ilm--org-headline-element-from-id (org-id)
+  "Return headline element from org id."
+  (when-let ((marker (org-id-find org-id t)))
+    (save-excursion
+      (with-current-buffer (marker-buffer marker)
+        (goto-char marker)
+        (org-element-at-point)))))
+
+(defun org-ilm--org-id-from-string (string)
+  "Interpret STRING as org-id, link with org-id, or else nil."
+  (cond
+   ((org-uuidgen-p string) string)
+   ((string-match org-link-bracket-re string)
+    (let ((link (match-string 1 string)))
+      (when (string-prefix-p "id:" link)
+        (substring link 3))))))
+
+(defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
+  "Return org ids of ancestors of entry."
+  (when-let ((entry (if (stringp entry-or-id)
+                        (org-node-by-id entry-or-id)
+                      entry-or-id)))
+    (let ((ancestry
+           (delq nil ;; Delete nils returned when no org-id
+                 (mapcar (lambda (x)
+                           (car (last x)))
+                         ;; cdr to skip itself
+                         (cdr (org-mem-entry-crumbs entry))))))
+      (if with-root-str (cons "ROOT" ancestry) ancestry))))
+
 ;;;;; Attachments
 (defun org-ilm-infer-id-from-attachment-path (path)
   "Attempt parsing the org-id from the attachment path, return (id . location)."
@@ -703,7 +733,6 @@ The callback ON-ABORT is called when capture is cancelled."
        (lambda (target-element)
          (when-let* ((target (org-ilm--target-parse-element target-element))
                      (target-id (plist-get target :id)))
-           (message "Target: %s" target)
            (when (member (plist-get target :type) '("extract" "card"))
              (pcase (plist-get target :pos)
                ("begin" (puthash target-id target begin-targets))
@@ -725,6 +754,8 @@ The callback ON-ABORT is called when capture is cancelled."
     id))
 
 ;;;;; Queue 
+
+;; TODO headline-action should really only set schedule for cards, rest should be done after query.
 
 (defun org-ilm--ql-headline-action ()
   "Add some custom properties to headline when org-ql parses buffer.
@@ -1035,6 +1066,36 @@ factor that increases with the number of reviews."
               (sample (org-ilm--sample-priority beta seed)))
     sample))
 
+(defvar org-ilm--priority-subject-cache (make-hash-table :test 'equal)
+  "Map subject org-id -> (priority priority-sum parent-subject-ids)")
+
+(defun org-ilm--priority-subjects-gather (headline-or-id)
+  "Recursive function to gather all subjects and their priorities.
+
+For the given headline, gather priority data from three sources:
+- Headline itself (easy)
+- It's first subject ancestor (resursive)
+  - Note we don't need to go through ALL ancestors, as the first ancestor's priority data will contain that of ITS ancestors.
+- It's linked subjects (recursive)"
+  (let* ((parent-subjects-data
+          (org-ilm--subjects-get-parent-subjects headline-or-id))
+         (headline (car parent-subjects-data))
+         (parent-subjects (cdr parent-subjects-data)))
+    ;; Parent/linked subject has been identified, return its priority data
+    ;; by retrieving from cache and if not there, recursive call.
+    (dolist (parent-subject parent-subjects)
+      (let ((parent-id (org-element-property :ID parent-subject)))
+          (or (gethash parent-id org-ilm--priority-subject-cache)
+              (org-ilm--subjects-gather subject-headline-or-id))))))
+
+(defun org-ilm-subjects-gather (&optional headline)
+  "Gather list of subjects org ids of headline at point."
+  (let ((headline (or headline (element-at-point))))
+    
+    (org-ilm--subjects-gather headline)
+    ))
+
+
 ;;;;; Scheduling
 
 (defun org-ilm--schedule-interval-from-priority (priority)
@@ -1166,50 +1227,95 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 
 ;;;;; Subjects
 
-(defun org-ilm--subjects-gather (&optional headline)
-  "Gather list of subjects org ids of headline at point."
-  (let (subjects)
-    ;; Check for inherited SUBJECTS property
-    (when-let ((property-subjects (org-entry-get headline "SUBJECTS" t))
-               (test-push-entry
-                (lambda (value)
-                  (when-let ((entry (gethash value org-mem--id<>entry)))
-                    (when (member (org-mem-entry-todo-state entry) org-ilm-subject-states)
-                      (cl-pushnew value subjects :test #'equal)
-                      value)))))
-      (dolist (subject-string (string-split property-subjects))
-        (cond
-         ;; String is an org-id
-         ((funcall test-push-entry subject-string))
-         ;; String is an org link to org-id
-         ((string-match org-link-bracket-re subject-string)
-          (let ((link (match-string 1 subject-string)))
-            (when (string-prefix-p "id:" link)
-              (funcall test-push-entry (substring link 3))))))))
+;; TODO org-ilm--subjects-gather should first org-ql query for all SUBJ then gather priorties. this is because org-ql caches them. to get the cache-key use code below:
+;; (cl-letf (((symbol-function 'org-ql--select-cached)
+;;            (lambda (&rest args)
+;;              (setq org-ilm--subj-query-cache-key args)
+;;              (message "%s" args))))
+;;   (org-ilm--collect-queue-entries (car org-ilm-collections-alist)))
 
-    ;; Check for ancestor subject headline
-    (org-element-lineage-map
-        ;; returned property will be nil if headline nil
-        (org-element-at-point (org-element-property :begin headline))
-        (lambda (element)
-          (when (member
-                 (org-element-property :todo-keyword element) org-ilm-subject-states)
-            (cl-pushnew
-             (org-id-get element t) ; creates id if not exists
-             subjects :test #'equal)))
-      '(headline))
+(defun org-ilm--subjects-get-parent-subjects (headline-or-id &optional check-links-recursively include-indirect-ancestors)
+  "For a headline, get first subject in headline ancestory and all the linked subjects.
 
-    subjects))
+These two form the direct parents of the DAG.
+
+When CHECK-LINKS-RECURSIVELY, repeat process for all linked subjects in SUBJECTS property.
+When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
+  (let* ((headline (if (stringp headline-or-id)
+                       ;; TODO deal with nil
+                       (org-ilm--org-headline-element-from-id headline-or-id)
+                     headline-or-id))
+         (headline-id (org-element-property :ID headline))
+         (headline-entry (org-node-by-id headline-id))
+         (headline-ancestry (org-ilm--org-mem-ancestry-ids headline-entry))
+         subject-ids)
+
+    ;; Check for ancestor subject headline.
+    ;; TODO skip if `headline-ancestry' is nil?
+    (unless
+        ;; We don't need to check for ancestors if top-level headline.
+        (= 1 (org-element-property :level headline))
+      (org-element-lineage-map
+          headline
+          (lambda (element)
+            (when (member
+                   (org-element-property :todo-keyword element) org-ilm-subject-states)
+              (let ((org-id (org-id-get element t))) ; creates id if not exists
+                (cl-pushnew org-id subject-ids :test #'equal)
+                ;; Return non-nil in case we dont want all ancestors
+                org-id)))
+        '(headline) nil (not include-indirect-ancestors)))
+    
+    ;; Check for inherited SUBJECTS property.
+    ;; Do this after outline ancestors as former does not have circular problems.
+    ;; Two steps:
+    ;;   1. Gather valid subject-ids
+    ;;   2. Filter if subject-id is ancestor of any other subject-id
+    (when-let ((property-subjects-str (org-entry-get headline "SUBJECTS" t)))
+      (let (property-subject-ids property-subject-ancestors)
+
+        ;; First we gather valid subject-ids as well as their individual ancestries
+        (dolist (subject-string (string-split property-subjects-str))
+          (when-let* ((org-id (org-ilm--org-id-from-string subject-string))
+                      ;; Skip if linked to itself
+                      (_ (not (string= org-id headline-id)))
+                      ;; Skip if ancestor of headline
+                      (_ (not (member org-id headline-ancestry)))
+                      ;; Should have org id and therefore cached by org-mem
+                      (entry (gethash org-id org-mem--id<>entry))
+                      ;; Should be subject todo state
+                      (_ (member (org-mem-entry-todo-state entry)
+                                 org-ilm-subject-states))
+                      ;; Skip if is subject is descendant of headline - this will
+                      ;; lead to circular DAG, causing infinite loops, and doesn't
+                      ;; make sense anyway.
+                      (subject-ancestry (org-ilm--org-mem-ancestry-ids entry t))
+                      (_ (not (member headline-id subject-ancestry))))
+            (cl-pushnew org-id property-subject-ids :test #'equal)
+            (cl-pushnew subject-ancestry property-subject-ancestors)
+            (when check-links-recursively
+              (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id t include-indirect-ancestors)))
+                (cl-pushnew parent-id property-subject-ids :test #'equal)
+                (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-subject-ancestors)))))
+
+        ;; Filter if subject-id is ancestor of any other subject-id
+        (let ((ancestries (apply #'append property-subject-ancestors)))
+          (dolist (subject-id property-subject-ids)
+            (unless (member subject-id ancestries)
+              (cl-pushnew subject-id subject-ids :test #'equal))))))
+
+    (cons headline subject-ids)))
 
 (defun org-ilm-subject-add ()
-  "Annotate headline at point with a subject."
+  "Annotate headline at point with a subject.
+
+TODO Skip if self or descendant."
   (interactive)
   (let* ((subject-entry (org-ilm--node-read-candidate-state-only org-ilm-subject-states))
          (subject-id (org-mem-entry-id subject-entry))
          (cur-subjects (org-entry-get nil "SUBJECTS" t)))
     (if (and cur-subjects
              (string-match subject-id cur-subjects))
-        ;; TODO print more info: `org-entry-property-inherited-from'
         ;; TODO offer option to remove
         (message "Subject already added")
       (let* ((subject-desc (org-mem-entry-title subject-entry))
