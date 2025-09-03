@@ -109,6 +109,9 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 
 ;;;; Minor mode
 
+(defun org-ilm--org-mem-hook (&rest _)
+  (org-ilm-priority-subject-cache-reset))
+
 ;;;###autoload
 (define-minor-mode org-ilm-global-mode
   "Prepare some hooks and advices some functions."
@@ -121,9 +124,17 @@ When set to `attachment', org-transclusion will be used to transclude the conten
       ;; Enable
       (progn
         (add-hook 'org-mode-hook #'org-ilm-prepare-buffer)
+        (add-hook 'org-mem-post-full-scan-functions
+                  #'org-ilm--org-mem-hook)
+        (add-hook 'org-mem-post-targeted-scan-functions
+                  #'org-ilm--org-mem-hook)
         )
     ;; Disable
     (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
+    (remove-hook 'org-mem-post-full-scan-functions
+              #'org-ilm--org-mem-hook)
+    (remove-hook 'org-mem-post-targeted-scan-functions
+              #'org-ilm--org-mem-hook)
     ))
 
 ;;;; Commands
@@ -352,7 +363,7 @@ If `HEADLINE' is passed, read it as org-property."
   "Returns subjects of headline or parses "
   (if (and headline (plist-member headline :subjects))
       (plist-get headline :subjects)
-    (org-ilm--subjects-gather headline)))
+    (org-ilm--priority-subject-gather headline)))
 
 (defun org-ilm--capture (type target org-id tmp-file-path &optional title on-success on-abort)
   "Make an org capture to make a new source heading, extract, or card.
@@ -755,8 +766,6 @@ The callback ON-ABORT is called when capture is cancelled."
 
 ;;;;; Queue 
 
-;; TODO headline-action should really only set schedule for cards, rest should be done after query.
-
 (defun org-ilm--ql-headline-action ()
   "Add some custom properties to headline when org-ql parses buffer.
 
@@ -779,7 +788,8 @@ Note these are plist properties placed on the headline element, NOT
         (setq headline (plist-put headline :logbook logbook))))
 
     ;; Add list of subjects
-    (setq headline (plist-put headline :subjects (org-ilm-get-subjects headline)))
+    (setq headline (plist-put headline :subjects
+                              (org-ilm--priority-subject-gather headline)))
 
     ;; Sample priority value
     (let ((sample (org-ilm--sample-priority-from-headline headline)))
@@ -1013,6 +1023,12 @@ If no priority is set, return default value of 5."
          (b (+ 1 (- 9 a))))
     (list a b)))
 
+(defun org-ilm--beta-combine (&rest params-list)
+  "Combine multiple Beta distributions."
+  (list
+   (apply #'+ -1 (mapcar (lambda (x) (nth 0 x)) params-list))
+   (apply #'+ -1 (mapcar (lambda (x) (nth 1 x)) params-list))))
+
 (defun org-ilm--priority-adjusted-from-logbook (params logbook)
   "Calculate the variance adjusted beta parameters from logbook data.
 
@@ -1025,17 +1041,15 @@ factor that increases with the number of reviews."
 
 (defun org-ilm--priority-adjusted-from-subjects (params subjects)
   "Average the priority out over the subject priorities."
-  (let ((a (nth 0 params))
-        (b (nth 1 params)))
-    (dolist (subject subjects)
-      (when-let* ((subject-entry (org-mem-entry-by-id subject))
-                  (subject-priority (org-priority-to-value
-                                     (or (org-mem-entry-priority subject-entry)
-                                         "5")))
-                  (subject-params (org-ilm--beta-from-priority subject-priority)))
-        (setq a (+ a (nth 0 subject-params) -1))
-        (setq b (+ b (nth 0 subject-params) -1))))
-    (list a b)))
+  (let ((subject-count (nth 2 subjects))
+        (subject-sum (nth 1 subjects)))
+    (if (= 0 subject-count)
+        params
+      (let* ((subjects-avg-priority (/ (float subject-sum) subject-count))
+             (subjects-params (mapcar
+                               (lambda (p) (* p subject-count))
+                               (org-ilm--beta-from-priority subjects-avg-priority))))
+        (org-ilm--beta-combine params subjects-params)))))
 
 (defun org-ilm--priority-beta-compile (priority subjects logbook)
   "Compile the finale beta parameters from priority value, subjects, and logbook history."
@@ -1066,34 +1080,48 @@ factor that increases with the number of reviews."
               (sample (org-ilm--sample-priority beta seed)))
     sample))
 
-(defvar org-ilm--priority-subject-cache (make-hash-table :test 'equal)
-  "Map subject org-id -> (priority priority-sum parent-subject-ids)")
+;;;;;; Subject priorities
+(defvar org-ilm-priority-subject-cache (make-hash-table :test 'equal)
+  "Map subject org-id -> (priority priority-sum parent-subject-ids)
 
-(defun org-ilm--priority-subjects-gather (headline-or-id)
-  "Recursive function to gather all subjects and their priorities.
+Gets reset after org-mem refreshes.")
 
-For the given headline, gather priority data from three sources:
-- Headline itself (easy)
-- It's first subject ancestor (resursive)
-  - Note we don't need to go through ALL ancestors, as the first ancestor's priority data will contain that of ITS ancestors.
-- It's linked subjects (recursive)"
-  (let* ((parent-subjects-data
-          (org-ilm--subjects-get-parent-subjects headline-or-id))
-         (headline (car parent-subjects-data))
-         (parent-subjects (cdr parent-subjects-data)))
-    ;; Parent/linked subject has been identified, return its priority data
-    ;; by retrieving from cache and if not there, recursive call.
-    (dolist (parent-subject parent-subjects)
-      (let ((parent-id (org-element-property :ID parent-subject)))
-          (or (gethash parent-id org-ilm--priority-subject-cache)
-              (org-ilm--subjects-gather subject-headline-or-id))))))
+(defun org-ilm-priority-subject-cache-reset ()
+  (setq org-ilm-priority-subject-cache (make-hash-table :test 'equal)))
 
-(defun org-ilm-subjects-gather (&optional headline)
-  "Gather list of subjects org ids of headline at point."
-  (let ((headline (or headline (element-at-point))))
-    
-    (org-ilm--subjects-gather headline)
-    ))
+(defun org-ilm--priority-subject-gather (headline-or-id)
+  "Gather recursively given headline's priority and parent subject priorities."
+  (let ((id (if (stringp headline-or-id)
+                headline-or-id
+              (org-element-property :ID headline-or-id))))
+    (or (gethash id org-ilm-priority-subject-cache)
+        (let* ((parents-data
+                (org-ilm--subjects-get-parent-subjects headline-or-id))
+               (headline (car parents-data))
+               (is-subject (member
+                            (org-element-property :todo-keyword headline)
+                            org-ilm-subject-states))
+               (parent-ids (cdr parents-data))
+               (priority (org-ilm--get-priority headline))
+               (priority-sum 0)
+               (priority-count 0))
+          ;; Parent/linked subject has been identified, return its priority data
+          ;; by retrieving from cache and if not there, recursive call.
+          (dolist (parent-id parent-ids)
+            (let ((parent-priority-data (org-ilm--priority-subject-gather parent-id)))
+              (setq priority-count (+
+                                    priority-count
+                                    (nth 2 parent-priority-data)
+                                    1))
+              ;; Sum is sum of parent + parent itself
+              (setq priority-sum (+
+                                  priority-sum
+                                  (nth 1 parent-priority-data)
+                                  (nth 0 parent-priority-data)))))
+          (let ((priority-data (list priority priority-sum priority-count parent-ids)))
+            (when is-subject
+              (puthash id priority-data org-ilm-priority-subject-cache))
+            priority-data)))))
 
 
 ;;;;; Scheduling
@@ -1235,9 +1263,9 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 ;;   (org-ilm--collect-queue-entries (car org-ilm-collections-alist)))
 
 (defun org-ilm--subjects-get-parent-subjects (headline-or-id &optional check-links-recursively include-indirect-ancestors)
-  "For a headline, get first subject in headline ancestory and all the linked subjects.
+  "Retrieve parent subjects of a headline.
 
-These two form the direct parents of the DAG.
+Processing is done to remove indirect or redundant parents, so that the returned parents form the direct parents of the DAG.
 
 When CHECK-LINKS-RECURSIVELY, repeat process for all linked subjects in SUBJECTS property.
 When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
