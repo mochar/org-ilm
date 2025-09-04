@@ -24,6 +24,7 @@
 (require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
+(require 'ts)
 
 ;;;; Customization
 (defgroup org-ilm nil
@@ -764,7 +765,9 @@ The callback ON-ABORT is called when capture is cancelled."
         (find-file attachment))
     id))
 
-;;;;; Queue 
+;;;;; Query
+
+;; TODO optimizations: https://github.com/alphapapa/org-ql/issues/88#issuecomment-570473621
 
 (defun org-ilm--ql-headline-action ()
   "Add some custom properties to headline when org-ql parses buffer.
@@ -802,6 +805,11 @@ Note these are plist properties placed on the headline element, NOT
              (priority-second (plist-get second :priority-sample)))
     (< priority-first priority-second)))
 
+(defun org-ilm--ql-card-due ()
+  "Check if org-srs earliest card due today, optimized for org-ql query."
+  (when-let ((due (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)))
+    (ts<= (ts-parse due) (ts-now))))
+
 (defun org-ilm--collect-queue-entries (collection)
   "Return entries (headings) that form the outstanding queue.
 
@@ -816,20 +824,14 @@ work."
                        (and
                         (todo ,org-ilm-incr-state)
                         (scheduled :to today))
-                       (todo ,org-ilm-card-state))
+                       (and
+                        (todo ,org-ilm-card-state)
+                        (org-ilm--ql-card-due)))
                      :action #'org-ilm--ql-headline-action
                      :sort #'org-ilm--compare-priority)))
-      (seq-filter
-       (lambda (entry)
-         (let ((is-card (string-equal
-                         (org-element-property :todo-keyword entry)
-                         org-ilm-card-state)))
-           (if is-card
-               (when-let* ((scheduled (org-element-property :scheduled entry))
-                           (scheduled-str (org-timestamp-translate scheduled)))
-                 (<= (org-timestamp-to-now scheduled-str) 0))
-             t)))
-       entries))))
+      entries)))
+
+;;;; Queue
 
 (defun org-ilm--format-heading-element (element)
   "Add priority to heading format on top of what org-ql adds."
