@@ -228,7 +228,7 @@ Will become an attachment Org file that is the child heading of current entry."
             (path (expand-file-name (format "%s.org" org-id) attach-dir)))
       (progn
         (run-hook-with-args 'org-attach-open-hook path)
-        (org-open-file path t)) ;; last param: in-emacs
+        (org-open-file path 'in-emacs))
       (error "No attachment directory exist, no Org id at current heading, or no attachment file associated with Org id.")))
 
 (defun org-ilm-open-highlight ()
@@ -920,7 +920,11 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
 
 (defvar org-ilm-queue-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "n")
+                (lambda ()
+                  (interactive)
+                  (next-line)
+                  (when (eobp) (previous-line))))
     (define-key map (kbd "p") #'previous-line)
     (define-key map (kbd "b") #'backward-char)
     (define-key map (kbd "f") #'forward-char)
@@ -931,14 +935,14 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
                   (kill-buffer (current-buffer))))
     (define-key map (kbd "m") #'org-ilm-queue-object-mark)
     (define-key map (kbd "g") #'org-ilm-queue-revert)
+    (define-key map (kbd "RET") #'org-ilm-queue-open-attachment)
+    (define-key map (kbd "SPC") #'org-ilm-queue-open-element)
     (define-key map (kbd "M s") #'org-ilm-queue-mark-by-subject)
+    (define-key map (kbd "M :") #'org-ilm-queue-mark-by-tag)
+    (define-key map (kbd "M d") #'org-ilm-queue-mark-by-due)
     ;; TODO r: Review start command
     ;; TODO G: query again - undo manual changes
     ;; TODO C-u G: like G but also select collection
-    ;; TODO RET/space: replicate open like in agenda
-    ;; TODO M :: mark by tag
-    ;; TODO M s: mark by number of days due
-    ;; TODO M j: mark by subject
     ;; TODO B: bulk commands
     map)
   "Keymap for the queue buffer.")
@@ -946,19 +950,39 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
 (defvar org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
 
+(defun org-ilm-queue-open-attachment (object)
+  "Open attachment of object at point."
+  (interactive (list (vtable-current-object)))
+  (let ((loc (org-id-find (plist-get object :id) 'marker)))
+    (with-current-buffer (marker-buffer loc)
+      (goto-char loc)
+      (org-ilm-open))))
+
+(defun org-ilm-queue-open-element (object)
+  "Open attachment of object at point."
+  (interactive (list (vtable-current-object)))
+  (let ((loc (org-id-find (plist-get object :id) 'marker)))
+    (pop-to-buffer (marker-buffer loc))
+    (goto-char loc)))
+
 (defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
   (interactive (list (vtable-current-object)))
   (let* ((id (plist-get object :id)))
     (if (member id org-ilm--queue-marked-objects)
-        ;; not sure why but inconsistent behavior when not setq, even though
-        ;; cl-delete is meant to remove destructively.
-        (setq org-ilm--queue-marked-objects (cl-delete id org-ilm--queue-marked-objects  :test #'equal))
+        ;; Only toggle if called interactively
+        (when (called-interactively-p)
+          ;; not sure why but inconsistent behavior when not setq, even though
+          ;; cl-delete is meant to remove destructively.
+          (setq org-ilm--queue-marked-objects (cl-delete id org-ilm--queue-marked-objects  :test #'equal)))
       (cl-pushnew id org-ilm--queue-marked-objects  :test #'equal))
     ;; TODO gives cache error no idea why
     ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
     ;; (vtable-update-object (vtable-current-table) object)
-    (org-ilm-queue-revert)))
+    (org-ilm-queue-revert))
+  (when (called-interactively-p)
+    (next-line)
+    (when (eobp) (previous-line))))
 
 (defun org-ilm-queue-mark-by-subject (subject)
   "Mark all elements in queue that are part of SUBJECT."
@@ -980,6 +1004,27 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
       (when (seq-some
              (lambda (s) (member s desc-ids))
              (nth 3 (plist-get object :subjects)))
+        (org-ilm-queue-object-mark object)))))
+
+(defun org-ilm-queue-mark-by-tag (tag)
+  "Mark all elements in queue that have tag TAG."
+  (interactive
+   (list
+    (completing-read
+     "Tag: "
+     (with-current-buffer (find-file-noselect (cdr (plist-get org-ilm-queue :collection)))
+       (org-get-buffer-tags)))))
+  (dolist (object (plist-get org-ilm-queue :queue))
+    (when (member tag (plist-get object :tags))
+      (org-ilm-queue-object-mark object))))
+
+(defun org-ilm-queue-mark-by-due (days)
+  "Mark all elements in queue that are due by DAYS days.
+DAYS can be specified as numeric prefix arg."
+  (interactive "N")
+  (dolist (object (plist-get org-ilm-queue :queue))
+    (when-let ((due (* -1 (plist-get object :scheduled-relative))))
+      (when (<= (round due) days) 
         (org-ilm-queue-object-mark object)))))
 
 (defun org-ilm-queue-revert ()
