@@ -38,6 +38,9 @@
   :type '(alist :key-type symbol :value-type file)
   :group 'org-ilm)
 
+(defcustom org-ilm-queries-alist `((Outstanding . ,org-ilm--query-outstanding))
+  "Alist mapping query name to org-ql query.")
+
 (defcustom org-ilm-id-from-attachment-path-func 'org-ilm-infer-id-from-attachment-path
   "Function that accepts a path to an attachment file and returns the Org id of the header."
   :type 'function
@@ -139,6 +142,8 @@ When set to `attachment', org-transclusion will be used to transclude the conten
     ))
 
 ;;;; Commands
+;; TODO move commands to appriopriate headings
+
 (defun org-ilm-import-website (url)
   ""
   (interactive "sURL: "))
@@ -265,12 +270,6 @@ Will become an attachment Org file that is the child heading of current entry."
         (org-ilm-open-collection)))
      (t (org-ilm-open-collection)))))
 
-(defun org-ilm-queue (collection)
-  "View queue in Agenda-like buffer."
-  (interactive (list (org-ilm--select-collection)))
-  (setq org-ilm-queue (org-ilm--collect-queue-entries collection))
-  (org-ilm--display-queue))
-
 (defun org-ilm-set-schedule-from-priority ()
   "Set schedule date based on priority."
   (interactive)
@@ -286,27 +285,36 @@ Will become an attachment Org file that is the child heading of current entry."
 ;;;; Functions
 
 ;;;;; Utilities
-(defun org-ilm--select-collection ()
-  "Prompt user for collection to select from.
 
-The collections are stored in `org-ilm-collections-alist'. If empty
-return nil, and if only one, return it."
-  (pcase (length org-ilm-collections-alist)
+(defun org-ilm--select-alist (alist &optional prompt)
+  "Prompt user for element in alist to select from.
+If empty return nil, and if only one, return it."
+  (pcase (length alist)
     (0 nil)
-    (1 (nth 0 org-ilm-collections-alist))
+    (1 (nth 0 alist))
     (t (let* ((choices (mapcar
-                        (lambda (collection)
+                        (lambda (thing)
                           (cons
                            (format "%s %s"
                                    (propertize
-                                    (symbol-name (car collection))
+                                    (symbol-name (car thing))
                                     'face '(:weight bold))
-                                   (propertize (cdr collection) 'face '(:slant italic)))
-                           collection))
-                        org-ilm-collections-alist))
-              (choice (completing-read "Collection: " choices nil t))
-              (collection (cdr (assoc choice choices))))
-         collection))))
+                                   (propertize (cdr thing) 'face '(:slant italic)))
+                           thing))
+                        alist))
+              (choice (completing-read (or prompt "Select: " choices nil t)))
+              (item (cdr (assoc choice choices))))
+         item))))
+
+(defun org-ilm--select-collection ()
+  "Prompt user for collection to select from.
+The collections are stored in `org-ilm-collections-alist'."
+  (org-ilm--select-alist org-ilm-collections-alist "Collection: "))
+
+(defun org-ilm--select-query ()
+  "Prompt user for query to select from.
+The queries are stored in `org-ilm-queries-alist'."
+  (org-ilm--select-alist org-ilm-queries-alist "Query: "))
 
 (defun org-ilm--parse-logbook (logbook)
   "Parses the Org contents of a logbook drawer entry."
@@ -820,26 +828,24 @@ wasteful if headline does not match query."
   (when-let ((due (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)))
     (ts<= due (ts-now))))
 
-(defun org-ilm--collect-queue-entries (collection)
-  "Return entries (headings) that form the outstanding queue.
+(defvar org-ilm--query-outstanding
+  `(or
+    (and
+     (todo ,org-ilm-incr-state)
+     (scheduled :to today))
+    (and
+     (todo ,org-ilm-card-state)
+     (org-ilm--ql-card-due))))
 
-Ideally we want to use the (scheduled :to today) predicate instead of
-post-query filtering like we do here, since we do add the :scheduled
-property to card headlines with `org-ilm--ql-headline-action'. However
-because org-ql applies this action after the query filter, this does not
-work."
+(defun org-ilm-query-queue (collection query)
+  ""
   (with-current-buffer (find-file-noselect (cdr collection))
     (let ((entries (org-ql-select (current-buffer)
-                     `(or
-                       (and
-                        (todo ,org-ilm-incr-state)
-                        (scheduled :to today))
-                       (and
-                        (todo ,org-ilm-card-state)
-                        (org-ilm--ql-card-due)))
+                     (cdr query)
                      :action #'org-ilm-parse-headline
                      :sort #'org-ilm--compare-priority)))
       entries)))
+
 
 ;;;;; Queue
 
@@ -880,7 +886,7 @@ work."
 (defun org-ilm-queue-revert ()
   (interactive)
   (vtable-revert-command)
-  (setq header-line-format nil))
+  (setq header-line-format (symbol-name (car (plist-get org-ilm-queue :query)))))
   
 (defun org-ilm--queue-make-vtable ()
   "Build queue vtable.
@@ -939,7 +945,7 @@ A lot of formatting code from org-ql."
                                    (org-add-props it nil 'face 'org-tag))
                               "")))
               )
-   :objects-function (lambda () org-ilm-queue)
+   :objects-function (lambda () (plist-get org-ilm-queue :queue))
    :getter (lambda (object column vtable)
              (pcase (vtable-column vtable column)
                ("Marked" (member (plist-get object :id) org-ilm--queue-marked-objects))
@@ -958,10 +964,22 @@ A lot of formatting code from org-ql."
       (erase-buffer)
       (goto-char (point-min))
       (vtable-insert (org-ilm--queue-make-vtable))
-      (setq header-line-format nil)
+      (setq header-line-format (symbol-name (car (plist-get org-ilm-queue :query))))
       (setq-local buffer-read-only t)
       (goto-char (point-min)))
     (switch-to-buffer buf)))
+
+(defun org-ilm-queue (collection query)
+  "View queue in Agenda-like buffer."
+  (interactive (list
+                (org-ilm--select-collection)
+                (org-ilm--select-query)))
+  (setq org-ilm-queue
+        (list
+         :queue (org-ilm-query-queue collection query)
+         :collection collection
+         :query query))
+  (org-ilm--display-queue))
 
 
 ;;;;; Import
