@@ -931,17 +931,25 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
                   (kill-buffer (current-buffer))))
     (define-key map (kbd "m") #'org-ilm-queue-object-mark)
     (define-key map (kbd "g") #'org-ilm-queue-revert)
+    (define-key map (kbd "M s") #'org-ilm-queue-mark-by-subject)
+    ;; TODO r: Review start command
+    ;; TODO G: query again - undo manual changes
+    ;; TODO C-u G: like G but also select collection
+    ;; TODO RET/space: replicate open like in agenda
+    ;; TODO M :: mark by tag
+    ;; TODO M s: mark by number of days due
+    ;; TODO M j: mark by subject
+    ;; TODO B: bulk commands
     map)
   "Keymap for the queue buffer.")
 
 (defvar org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
 
-(defun org-ilm-queue-object-mark ()
+(defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
-  (interactive)
-  (let* ((object (vtable-current-object))
-         (id (plist-get object :id)))
+  (interactive (list (vtable-current-object)))
+  (let* ((id (plist-get object :id)))
     (if (member id org-ilm--queue-marked-objects)
         ;; not sure why but inconsistent behavior when not setq, even though
         ;; cl-delete is meant to remove destructively.
@@ -951,6 +959,28 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
     ;; (vtable-update-object (vtable-current-table) object)
     (org-ilm-queue-revert)))
+
+(defun org-ilm-queue-mark-by-subject (subject)
+  "Mark all elements in queue that are part of SUBJECT."
+  (interactive
+   (list
+    (org-ilm--select-alist
+     (org-ilm--query-subjects)
+     "Subject: " ; Prompt
+     (lambda (subject) ; Formatter
+       (mapconcat
+        (lambda (crumb) (nth 3 crumb))
+        (cdr (reverse (org-mem-entry-crumbs (org-node-by-id (plist-get subject :id)))))
+        " > ")))))
+
+  (let* ((subject-and-descendants (org-ilm--subjects-get-with-descendant-subjects subject))
+         (desc-ids (mapcar #'car subject-and-descendants)))
+    (dolist (object (plist-get org-ilm-queue :queue))
+      ;; TODO which is faster, check desc in subjs or other way around
+      (when (seq-some
+             (lambda (s) (member s desc-ids))
+             (nth 3 (plist-get object :subjects)))
+        (org-ilm-queue-object-mark object)))))
 
 (defun org-ilm-queue-revert ()
   (interactive)
@@ -1605,7 +1635,7 @@ Contains full subject hierarchy + is cached."
                        (not (assoc subj-id subject-and-descendants)))
               (push subj subject-and-descendants)
               (push subj-id queue))))))
-    (message "%s" subject-and-descendants)
+
     subject-and-descendants))
 
 (defun org-ilm-subject-add ()
