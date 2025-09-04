@@ -505,12 +505,14 @@ TODO org-ql uses following snippet in query action, is it more efficient?
       element)))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
-  "Return headline element from org id."
-  (when-let ((marker (org-id-find org-id t)))
+  "Return headline element from org id.
+
+Since we need to visit location anyway, prefer not to use org-mem."
+  (when-let ((marker (org-id-find org-id 'marker)))
     (save-excursion
       (with-current-buffer (marker-buffer marker)
         (goto-char marker)
-        (org-element-at-point)))))
+        (org-ilm--org-headline-at-point)))))
 
 (defun org-ilm--org-id-from-string (string)
   "Interpret STRING as org-id, link with org-id, or else nil."
@@ -841,7 +843,8 @@ If `HEADLINE' is passed, read it as org-property."
 
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
-  (let* ((headline (org-element-headline-parser (line-end-position)))
+  ;; Don't use (org-element-headline-parser (line-end-position)) as org-ql does, it will fail to return parents correctly.
+  (let* ((headline (org-ilm--org-headline-at-point))
          (todo-keyword (org-element-property :todo-keyword headline))
          (type (cond
                  ((string= todo-keyword org-ilm-card-state) 'card)
@@ -891,16 +894,26 @@ wasteful if headline does not match query."
      (scheduled :to today))
     (and
      (todo ,org-ilm-card-state)
-     (org-ilm--ql-card-due))))
+     (org-ilm--ql-card-due)))
+  "Query for org-ql to retrieve the outstanding elements.")
 
 (defun org-ilm-query-queue (collection query)
-  ""
-  (with-current-buffer (find-file-noselect (cdr collection))
-    (let ((entries (org-ql-select (current-buffer)
-                     (cdr query)
-                     :action #'org-ilm-parse-headline
-                     :sort #'org-ilm--compare-priority)))
-      entries)))
+  "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
+  (let ((entries (org-ql-select (cdr collection)
+                   (cdr query)
+                   :action #'org-ilm-parse-headline
+                   :sort #'org-ilm--compare-priority)))
+    entries))
+
+(defun org-ilm--query-subjects (&optional collection)
+  "Return list of subjects from COLLECTION.
+
+TODO parse-headline pass arg to not sample priority to prevent recusrive subject search?"
+  (let ((collection (or collection (plist-get org-ilm-queue :collection))))
+    (cl-assert collection)
+    (org-ql-select (cdr collection)
+      (cons 'todo org-ilm-subject-states)
+      :action #'org-ilm-parse-headline)))
 
 
 ;;;;; Queue
@@ -1274,8 +1287,9 @@ factor that increases with the number of reviews."
     sample))
 
 ;;;;;; Subject priorities
+
 (defvar org-ilm-priority-subject-cache (make-hash-table :test 'equal)
-  "Map subject org-id -> (priority priority-sum parent-subject-ids)
+  "Map subject org-id -> (priority priority-sum priority-count parent-subject-ids)
 
 Gets reset after org-mem refreshes.")
 
@@ -1283,10 +1297,12 @@ Gets reset after org-mem refreshes.")
   (setq org-ilm-priority-subject-cache (make-hash-table :test 'equal)))
 
 (defun org-ilm--priority-subject-gather (headline-or-id)
-  "Gather recursively given headline's priority and parent subject priorities."
+  "Gather recursively headline's priority and parent subject priorities.
+Headline can be a subject or not."
   (let ((id (if (stringp headline-or-id)
                 headline-or-id
               (org-element-property :ID headline-or-id))))
+    (org-ilm--debug "Gathering subjects for:" id)
     (or (gethash id org-ilm-priority-subject-cache)
         (let* ((parents-data
                 (org-ilm--subjects-get-parent-subjects headline-or-id))
@@ -1298,22 +1314,25 @@ Gets reset after org-mem refreshes.")
                (priority (org-ilm--get-priority headline))
                (priority-sum 0)
                (priority-count 0))
-          ;; Parent/linked subject has been identified, return its priority data
-          ;; by retrieving from cache and if not there, recursive call.
+
+          ;; Recursively call this function on all direct parent subjects to get
+          ;; their priority data.
           (dolist (parent-id parent-ids)
             (let ((parent-priority-data (org-ilm--priority-subject-gather parent-id)))
-              (setq priority-count (+
-                                    priority-count
-                                    (nth 2 parent-priority-data)
-                                    1))
+              (setq priority-count
+                    (+ priority-count (nth 2 parent-priority-data) 1))
               ;; Sum is sum of parent + parent itself
-              (setq priority-sum (+
-                                  priority-sum
-                                  (nth 1 parent-priority-data)
-                                  (nth 0 parent-priority-data)))))
+              (setq priority-sum
+                    (+ priority-sum
+                       (nth 1 parent-priority-data)
+                       (nth 0 parent-priority-data)))))
+
+          ;; Compile data in a list. If this headline is also a subject, add it
+          ;; to the cache as well.
           (let ((priority-data (list priority priority-sum priority-count parent-ids)))
             (when is-subject
               (puthash id priority-data org-ilm-priority-subject-cache))
+            ;; Return data
             priority-data)))))
 
 
@@ -1455,23 +1474,22 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 ;;              (message "%s" args))))
 ;;   (org-ilm--collect-queue-entries (car org-ilm-collections-alist)))
 
-(defun org-ilm--subjects-get-parent-subjects (headline-or-id &optional check-links-recursively include-indirect-ancestors)
+(defun org-ilm--subjects-get-parent-subjects (&optional headline-thing check-links-recursively include-indirect-ancestors)
   "Retrieve parent subjects of a headline.
 
 Processing is done to remove indirect or redundant parents, so that the returned parents form the direct parents of the DAG.
 
 When CHECK-LINKS-RECURSIVELY, repeat process for all linked subjects in SUBJECTS property.
 When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
-  (let* ((headline (if (stringp headline-or-id)
-                       ;; TODO deal with nil
-                       (org-ilm--org-headline-element-from-id headline-or-id)
-                     headline-or-id))
+  (let* ((headline (org-ilm--org-headline-from-thing headline-thing 'assert))
          (headline-id (org-element-property :ID headline))
          (headline-entry (org-node-by-id headline-id))
          (headline-ancestry (org-ilm--org-mem-ancestry-ids headline-entry))
          subject-ids)
 
-    ;; Check for ancestor subject headline.
+    (org-ilm--debug "Ancestory of:" headline-id)
+
+    ;; Check for ancestor subject headline in outline hierarchy.
     ;; TODO skip if `headline-ancestry' is nil?
     (unless
         ;; We don't need to check for ancestors if top-level headline.
@@ -1481,18 +1499,26 @@ When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
           (lambda (element)
             (when (member
                    (org-element-property :todo-keyword element) org-ilm-subject-states)
-              (let ((org-id (org-id-get element t))) ; creates id if not exists
+              ;; TODO creating id might mess up with parsing and cache and
+              ;; whatever as we're updating the buffer during parsing
+              (let ((org-id (org-id-get element 'create)))
                 (cl-pushnew org-id subject-ids :test #'equal)
                 ;; Return non-nil in case we dont want all ancestors
                 org-id)))
         '(headline) nil (not include-indirect-ancestors)))
+
+    (org-ilm--debug "-- Outline ancestors:" subject-ids)
     
     ;; Check for inherited SUBJECTS property.
-    ;; Do this after outline ancestors as former does not have circular problems.
-    ;; Two steps:
-    ;;   1. Gather valid subject-ids
-    ;;   2. Filter if subject-id is ancestor of any other subject-id
-    (when-let ((property-subjects-str (org-entry-get headline "SUBJECTS" t)))
+    
+    ;; This is tricky because parent subjects might link to other subjects in
+    ;; their property, requiring this to be done recursively if we need all
+    ;; subjects. Furthermore test for invalid linking, eg to a descendant or
+    ;; circular links.
+
+    ;; Note: do this after getting outline ancestors as outline does not have
+    ;; aforementioned problems, and properties are inherited.
+    (when-let ((property-subjects-str (org-entry-get headline "SUBJECTS" 'inherit)))
       (let (property-subject-ids property-subject-ancestors)
 
         ;; First we gather valid subject-ids as well as their individual ancestries
@@ -1503,29 +1529,84 @@ When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
                       ;; Skip if ancestor of headline
                       (_ (not (member org-id headline-ancestry)))
                       ;; Should have org id and therefore cached by org-mem
-                      (entry (gethash org-id org-mem--id<>entry))
+                      (entry (org-mem-entry-by-id org-id))
                       ;; Should be subject todo state
                       (_ (member (org-mem-entry-todo-state entry)
                                  org-ilm-subject-states))
-                      ;; Skip if is subject is descendant of headline - this will
-                      ;; lead to circular DAG, causing infinite loops, and doesn't
-                      ;; make sense anyway.
-                      (subject-ancestry (org-ilm--org-mem-ancestry-ids entry t))
-                      (_ (not (member headline-id subject-ancestry))))
+                      ;; Skip if is subject is descendant of headline - this
+                      ;; will lead to circular DAG, causing infinite loops, and
+                      ;; doesn't make sense anyway. Add a root string so
+                      ;; subjects with no org-id parents don't return nil,
+                      ;; terminating the when-let.
+                      (ancestry (org-ilm--org-mem-ancestry-ids entry 'with-root-str))
+                      (_ (not (member headline-id ancestry))))
             (cl-pushnew org-id property-subject-ids :test #'equal)
-            (cl-pushnew subject-ancestry property-subject-ancestors)
+            (cl-pushnew ancestry property-subject-ancestors)
+
+            ;; Recursively handle case where property derived subjects
+            ;; themselves might link to other subjects in their properties.
+            ;; Note, no need to do this for outline ancestors (previous step),
+            ;; as properties are inherited.
             (when check-links-recursively
-              (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id t include-indirect-ancestors)))
+              (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id 'recursive include-indirect-ancestors)))
                 (cl-pushnew parent-id property-subject-ids :test #'equal)
                 (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-subject-ancestors)))))
 
         ;; Filter if subject-id is ancestor of any other subject-id
+        ;; TODO don't do this if `include-indirect-ancestors' non-nil right??
         (let ((ancestries (apply #'append property-subject-ancestors)))
           (dolist (subject-id property-subject-ids)
             (unless (member subject-id ancestries)
               (cl-pushnew subject-id subject-ids :test #'equal))))))
 
+    (org-ilm--debug "-- All ancestors:" subject-ids)
+    
     (cons headline subject-ids)))
+
+(defun org-ilm--subjects-get-with-descendant-subjects (subject)
+  "Retrieve descendant subjects of a headline.
+
+Descendants can be directly in outline or indirectly through property linking.
+
+This function does not have to be fast: Currently only called every now
+and again by `org-ilm-queue-mark-by-subject'.
+
+TODO can perhaps be sped up by utilizing `org-ilm-priority-subject-cache'?
+Contains full subject hierarchy + is cached."
+  (let ((all-subjects (mapcar (lambda (s)
+                                (cons (plist-get s :id) s))
+                              ;; Cached:
+                              (org-ilm--query-subjects)))
+        (queue (list (plist-get subject :id)))
+        (subject-and-descendants (list (cons (plist-get subject :id) subject))))
+    
+    (org-ilm--debug-all
+     all-subjects
+     (lambda (s) (list (plist-get (cdr s) :title)
+                       (car s)
+                       (nth 3 (plist-get (cdr s) :subjects))))
+     "-- Subject: %s (%s)\n       Parents: %s")
+
+    ;; Queue will contain org-ids of SUBJECT and any of its descendants. For
+    ;; each element in the queue, loop over subjects and when one has been found
+    ;; that has as direct parent this queue element, it is a descendant and thus
+    ;; added to the queue. When the loop for the current queue element is
+    ;; finished, we found all its direct children and we thus remove it from the
+    ;; queue. Repeat until exhausted.
+    (while queue
+      (org-ilm--debug "Queue: %s" queue)
+      (let ((current (pop queue)))
+        (org-ilm--debug "-- Queue current: %s" current)
+        (dolist (subj all-subjects)
+          (let ((subj-id (car subj))
+                (subj-parents (nth 3 (plist-get (cdr subj) :subjects))))
+            (org-ilm--debug "-- Subject %s: %s" subj-id subj-parents)
+            (when (and (member current subj-parents)
+                       (not (assoc subj-id subject-and-descendants)))
+              (push subj subject-and-descendants)
+              (push subj-id queue))))))
+    (message "%s" subject-and-descendants)
+    subject-and-descendants))
 
 (defun org-ilm-subject-add ()
   "Annotate headline at point with a subject.
