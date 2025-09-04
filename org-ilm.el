@@ -86,6 +86,11 @@ When set to `attachment', org-transclusion will be used to transclude the conten
                  (const :tag "Attachment" 'attachment))
   :group 'org-ilm)
 
+(defcustom org-ilm-debug nil
+  "Print stuff to message buffer."
+  :type 'boolean
+  :group 'org-ilm)
+
 ;;;; Variables
 
 (defface org-ilm-face-extract
@@ -286,7 +291,24 @@ Will become an attachment Org file that is the child heading of current entry."
 
 ;;;;; Utilities
 
-(defun org-ilm--select-alist (alist &optional prompt)
+(defun org-ilm--debug (&optional fmt &rest args)
+  "Print stuff to message buffer when `org-ilm-debug' non-nil."
+  (let ((fmt (cond
+              ((not fmt) "%s")
+              ((s-contains-p "%s" fmt) fmt)
+              (t (concat fmt " %s")))))
+  (when org-ilm-debug
+    (apply #'message
+           (concat
+            (propertize "[org-ilm] " 'face 'calendar-today)
+            fmt)
+           args))))
+
+(defun org-ilm--debug-all (vals args-func &optional fmt)
+  (dolist (val vals)
+    (apply #'org-ilm--debug fmt (funcall args-func val))))
+
+(defun org-ilm--select-alist (alist &optional prompt formatter)
   "Prompt user for element in alist to select from.
 If empty return nil, and if only one, return it."
   (pcase (length alist)
@@ -295,14 +317,18 @@ If empty return nil, and if only one, return it."
     (t (let* ((choices (mapcar
                         (lambda (thing)
                           (cons
-                           (format "%s %s"
-                                   (propertize
-                                    (symbol-name (car thing))
-                                    'face '(:weight bold))
-                                   (propertize (cdr thing) 'face '(:slant italic)))
+                           (if formatter
+                               (funcall formatter thing)
+                             (format "%s %s"
+                                     (propertize
+                                      (if (symbolp (car thing))
+                                          (symbol-name (car thing))
+                                        (car thing))
+                                      'face '(:weight bold))
+                                     (propertize (nth 1 thing) 'face '(:slant italic))))
                            thing))
                         alist))
-              (choice (completing-read (or prompt "Select: " choices nil t)))
+              (choice (completing-read (or prompt "Select: ") choices nil t))
               (item (cdr (assoc choice choices))))
          item))))
 
@@ -315,58 +341,6 @@ The collections are stored in `org-ilm-collections-alist'."
   "Prompt user for query to select from.
 The queries are stored in `org-ilm-queries-alist'."
   (org-ilm--select-alist org-ilm-queries-alist "Query: "))
-
-(defun org-ilm--parse-logbook (logbook)
-  "Parses the Org contents of a logbook drawer entry."
-  (let ((contents (org-element-contents logbook)))
-    (mapcar
-     ;; If more data is needed, see:
-     ;; https://orgmode.org/worg/dev/org-element-api.html
-     ;; See: Timestamp, Clock
-     (lambda (clock)
-       (let ((timestamp (org-element-property :value clock)))
-         `(:duration-minutes
-           ,(org-duration-to-minutes (org-element-property :duration clock))
-           :status ,(org-element-property :status clock)
-           :day-end ,(org-element-property :day-end timestamp)
-           :day-start ,(org-element-property :day-start timestamp)
-           :month-end ,(org-element-property :month-end timestamp)
-           :month-start ,(org-element-property :month-start timestamp)
-           :year-end ,(org-element-property :year-end timestamp)
-           :year-start ,(org-element-property :year-start timestamp))))
-     contents)))
-    
-(defun org-ilm--read-logbook (&optional headline)
-  "Reads and parses the LOGBOOK drawer of heading at point.
-
-If `HEADLINE' is passed, read it as org-property."
-  (unless headline
-    (setq headline (save-excursion (org-back-to-heading) (org-element-at-point))))
-  (let* ((begin (org-element-property :begin headline))
-         (end (save-excursion
-                (outline-next-heading)
-                (point))))
-    (when (and begin end)
-      (save-excursion
-        (save-restriction
-          (narrow-to-region begin end)
-          (when-let* ((drawers (org-element-map
-                                   (org-element-parse-buffer)
-                                   'drawer #'identity))
-                      (logbook (seq-find
-                                (lambda (drawer)
-                                  (string-equal
-                                   (org-element-property :drawer-name drawer) "LOGBOOK"))
-                                drawers)))
-            (org-ilm--parse-logbook logbook)))))))
-
-(defun org-ilm-get-logbook (&optional headline)
-  "Returns logbook or parses it if not available."
-  ;; Might be nil, but if its a member, it has been parsed before, so don't
-  ;; parse again.
-  (if (and headline (plist-member headline :logbook))
-      (plist-get headline :logbook)
-    (org-ilm--read-logbook headline)))
 
 (defun org-ilm-get-subjects (&optional headline)
   "Returns subjects of headline or parses "
@@ -521,6 +495,15 @@ The callback ON-ABORT is called when capture is cancelled."
                              'org-node-hist))))
     (gethash choice org-node--candidate<>entry)))
 
+(defun org-ilm--org-headline-at-point ()
+  "Return headline at point.
+
+TODO org-ql uses following snippet in query action, is it more efficient?
+(org-element-headline-parser (line-end-position))"
+  (let ((element (org-element-at-point)))
+    (when (eq (car element) 'headline)
+      element)))
+
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
   (when-let ((marker (org-id-find org-id t)))
@@ -538,6 +521,23 @@ The callback ON-ABORT is called when capture is cancelled."
       (when (string-prefix-p "id:" link)
         (substring link 3))))))
 
+(defun org-ilm--org-headline-from-thing (&optional thing assert)
+  "Return headline from THING: org-id, org-id link, headline, nil -> headline at point.
+With non-nil ASSERT, assert headline must be found, else return nil."
+  (let ((headline (cond
+                   ;; Nil, try getting it from point
+                   ((not thing)
+                    (org-ilm--org-headline-at-point))
+                   ;; Org-element, check if headline
+                   ((eq (org-element-type thing) 'headline)
+                    thing)
+                   ;; String, check if is or contains id
+                   ((stringp thing)
+                    (org-ilm--org-headline-element-from-id
+                     (org-ilm--org-id-from-string thing))))))
+    (when assert (cl-assert headline))
+    headline))
+
 (defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
   "Return org ids of ancestors of entry."
   (when-let ((entry (if (stringp entry-or-id)
@@ -550,6 +550,62 @@ The callback ON-ABORT is called when capture is cancelled."
                          ;; cdr to skip itself
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
+
+;;;;; Elements
+
+(defun org-ilm--logbook-parse (logbook)
+  "Parses the Org contents of a logbook drawer entry."
+  (let ((contents (org-element-contents logbook)))
+    (mapcar
+     ;; If more data is needed, see:
+     ;; https://orgmode.org/worg/dev/org-element-api.html
+     ;; See: Timestamp, Clock
+     (lambda (clock)
+       (let ((timestamp (org-element-property :value clock)))
+         `(:duration-minutes
+           ,(org-duration-to-minutes (org-element-property :duration clock))
+           :status ,(org-element-property :status clock)
+           :day-end ,(org-element-property :day-end timestamp)
+           :day-start ,(org-element-property :day-start timestamp)
+           :month-end ,(org-element-property :month-end timestamp)
+           :month-start ,(org-element-property :month-start timestamp)
+           :year-end ,(org-element-property :year-end timestamp)
+           :year-start ,(org-element-property :year-start timestamp))))
+     contents)))
+    
+(defun org-ilm--logbook-read (&optional headline)
+  "Reads and parses the LOGBOOK drawer of heading at point.
+
+If `HEADLINE' is passed, read it as org-property."
+  (unless headline
+    (setq headline (save-excursion (org-back-to-heading) (org-element-at-point))))
+  (let* ((begin (org-element-property :begin headline))
+         (end (save-excursion
+                (outline-next-heading)
+                (point))))
+    (when (and begin end)
+      (save-excursion
+        (save-restriction
+          (narrow-to-region begin end)
+          (when-let* ((drawers (org-element-map
+                                   (org-element-parse-buffer)
+                                   'drawer #'identity))
+                      (logbook (seq-find
+                                (lambda (drawer)
+                                  (string-equal
+                                   (org-element-property :drawer-name drawer) "LOGBOOK"))
+                                drawers)))
+            (org-ilm--logbook-parse logbook)))))))
+
+(defun org-ilm-logbook-get (&optional headline)
+  "Returns logbook or parses it if not available."
+  ;; Might be nil, but if its a member, it has been parsed before, so don't
+  ;; parse again.
+  (if (and headline (plist-member headline :logbook))
+      (plist-get headline :logbook)
+    (org-ilm--logbook-read headline)))
+
+
 
 ;;;;; Attachments
 (defun org-ilm-infer-id-from-attachment-path (path)
@@ -813,7 +869,7 @@ wasteful if headline does not match query."
      :scheduled-relative (when scheduled ; convert from sec to days
                            (/ (ts-diff now scheduled) 86400))
      :type type
-     :logbook (unless is-card (org-ilm--read-logbook headline))
+     :logbook (unless is-card (org-ilm--logbook-read headline))
      :subjects (org-ilm--priority-subject-gather headline)
      :priority-sample (org-ilm--sample-priority-from-headline headline))))
 
@@ -1197,7 +1253,7 @@ factor that increases with the number of reviews."
 (defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
   (let ((priority (org-ilm--get-priority headline))
-        (logbook (org-ilm-get-logbook headline))
+        (logbook (org-ilm-logbook-get headline))
         (subjects (org-ilm-get-subjects headline)))
     (org-ilm--priority-beta-compile priority subjects logbook)))
 
