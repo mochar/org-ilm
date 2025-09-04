@@ -868,8 +868,10 @@ work."
   (let* ((object (vtable-current-object))
          (id (plist-get object :id)))
     (if (member id org-ilm--queue-marked-objects)
-        (cl-delete id org-ilm--queue-marked-objects)
-      (cl-pushnew id org-ilm--queue-marked-objects))
+        ;; not sure why but inconsistent behavior when not setq, even though
+        ;; cl-delete is meant to remove destructively.
+        (setq org-ilm--queue-marked-objects (cl-delete id org-ilm--queue-marked-objects  :test #'equal))
+      (cl-pushnew id org-ilm--queue-marked-objects  :test #'equal))
     ;; TODO gives cache error no idea why
     ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
     ;; (vtable-update-object (vtable-current-table) object)
