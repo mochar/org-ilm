@@ -767,37 +767,47 @@ The callback ON-ABORT is called when capture is cancelled."
 
 ;;;;; Query
 
-;; TODO optimizations: https://github.com/alphapapa/org-ql/issues/88#issuecomment-570473621
+;; Optimizations: https://github.com/alphapapa/org-ql/issues/88#issuecomment-570473621
+;; + If any data is needed in action and query, use org-ql--value-at
+;; + Prefer query over custom predicate
+;; + Use regex preambles to quickly filter candidates
 
-(defun org-ilm--ql-headline-action ()
-  "Add some custom properties to headline when org-ql parses buffer.
+(defun org-ilm-parse-headline ()
+  "Parse org-ilm data of headline at point.
 
-Note these are plist properties placed on the headline element, NOT
-`org-element-property' properties."
-  (let* (;; This part is same as `element-with-markers' action of org-ql.
-         (headline (org-ql--add-markers
-                    (org-element-headline-parser (line-end-position))))
-         (is-card (string-equal (org-element-property :todo-keyword headline)
-                                org-ilm-card-state)))
-    (if is-card
-        ;; If card, set due time of earliest item as scheduled property
-        ;; This is a hack to show due time in days in the agenda view.
-        (when-let* ((due-timestamp-str (org-ilm--srs-earliest-due-timestamp))
-                    (due-timestamp (parse-iso8601-time-string due-timestamp-str))
-                    (due-org-timestamp (org-timestamp-from-time due-timestamp)))
-          (setq headline (org-element-put-property headline :scheduled due-org-timestamp)))
-      ;; If not card, attach logbook as property
-      (let ((logbook (unless is-card (org-ilm--read-logbook headline))))
-        (setq headline (plist-put headline :logbook logbook))))
+Was thinking of org-ql--value-at this whole function, but this is
+wasteful if headline does not match query."
+  (let* ((headline (org-element-headline-parser (line-end-position)))
+         (todo-keyword (org-element-property :todo-keyword headline))
+         (type (cond
+                 ((string= todo-keyword org-ilm-card-state) 'card)
+                 ((string= todo-keyword org-ilm-incr-state) 'incr)
+                 ((member todo-keyword org-ilm-subject-states) 'subj)))
+         (is-card (eq type 'card))
+         (scheduled (if is-card
+                        (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
+                      (ts-parse-org-element (org-element-property :scheduled headline))))
+         (now (ts-now)))
 
-    ;; Add list of subjects
-    (setq headline (plist-put headline :subjects
-                              (org-ilm--priority-subject-gather headline)))
+    (list
+     ;; Basic headline element properties
+     :todo todo-keyword
+     :id (org-element-property :ID headline)
+     :level (org-element-property :level headline)
+     :priority (org-ilm--get-priority headline)
+     :raw-value (org-element-property :raw-value headline)
+     :tags (org-element-property :tags headline)
+     :title (org-no-properties ; Remove text properties from title
+             (org-element-interpret-data (org-element-property :title headline)))
 
-    ;; Sample priority value
-    (let ((sample (org-ilm--sample-priority-from-headline headline)))
-      (setq headline (plist-put headline :priority-sample sample)))
-    headline))
+     ;; Our stuff
+     :scheduled scheduled
+     :scheduled-relative (when scheduled ; convert from sec to days
+                           (/ (ts-diff now scheduled) 86400))
+     :type type
+     :logbook (unless is-card (org-ilm--read-logbook headline))
+     :subjects (org-ilm--priority-subject-gather headline)
+     :priority-sample (org-ilm--sample-priority-from-headline headline))))
 
 (defun org-ilm--compare-priority (first second)
   "Comparator of two headlines by sampled priority."
@@ -808,7 +818,7 @@ Note these are plist properties placed on the headline element, NOT
 (defun org-ilm--ql-card-due ()
   "Check if org-srs earliest card due today, optimized for org-ql query."
   (when-let ((due (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)))
-    (ts<= (ts-parse due) (ts-now))))
+    (ts<= due (ts-now))))
 
 (defun org-ilm--collect-queue-entries (collection)
   "Return entries (headings) that form the outstanding queue.
@@ -827,25 +837,129 @@ work."
                        (and
                         (todo ,org-ilm-card-state)
                         (org-ilm--ql-card-due)))
-                     :action #'org-ilm--ql-headline-action
+                     :action #'org-ilm-parse-headline
                      :sort #'org-ilm--compare-priority)))
       entries)))
 
-;;;; Queue
+;;;;; Queue
 
-(defun org-ilm--format-heading-element (element)
-  "Add priority to heading format on top of what org-ql adds."
-  (let* ((string (org-ql-view--format-element element))
-         (priority (* 100 (plist-get element :priority-sample)))
-         (prefix (propertize (format "%.2f" priority) 'face 'shadow))
-         (new-string (concat "   " prefix " " (string-trim-left string))))
-    ;; Need to add back properties for agenda to work properly
-    (org-add-props new-string (text-properties-at 0 string))))
+(defvar org-ilm-queue-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "p") #'previous-line)
+    (define-key map (kbd "b") #'backward-char)
+    (define-key map (kbd "f") #'forward-char)
+    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "k")
+                (lambda ()
+                  (interactive)
+                  (kill-buffer (current-buffer))))
+    (define-key map (kbd "m") #'org-ilm-queue-object-mark)
+    (define-key map (kbd "g") #'org-ilm-queue-revert)
+    map)
+  "Keymap for the queue buffer.")
+
+(defvar org-ilm--queue-marked-objects nil
+  "Org id of marked objects in queue.")
+
+(defun org-ilm-queue-object-mark ()
+  "Mark the object at point."
+  (interactive)
+  (let* ((object (vtable-current-object))
+         (id (plist-get object :id)))
+    (if (member id org-ilm--queue-marked-objects)
+        (cl-delete id org-ilm--queue-marked-objects)
+      (cl-pushnew id org-ilm--queue-marked-objects))
+    ;; TODO gives cache error no idea why
+    ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
+    ;; (vtable-update-object (vtable-current-table) object)
+    (org-ilm-queue-revert)))
+
+(defun org-ilm-queue-revert ()
+  (interactive)
+  (vtable-revert-command)
+  (setq header-line-format nil))
+  
+(defun org-ilm--queue-make-vtable ()
+  "Build queue vtable.
+
+A lot of formatting code from org-ql."
+  (make-vtable
+   :insert nil ; Return vtable object rather than insert at point
+   :columns `((:name
+               "Marked"
+               :width 3
+               :formatter
+               (lambda (m)
+                 (if m
+                     (propertize " > " 'face 'error)
+                     "   ")))
+              (:name "Priority"
+               :width 6
+               :formatter
+               (lambda (p)
+                 (if p
+                     (propertize (format "%.2f" (* 100 p)) 'face 'shadow)
+                   "")))
+              (:name
+               "Type"
+               :width 5
+               :formatter
+               (lambda (type)
+                 (org-ql-view--add-todo-face (upcase (symbol-name type)))))
+              (:name
+               "Cookie"
+               :width 4
+               :formatter
+               (lambda (p)
+                 (org-ql-view--add-priority-face (format "[#%s]" p))))
+              (:name
+               "Title"
+               :formatter
+               (lambda (title-data)
+                 (let* ((title (nth 0 title-data))
+                        (scheduled-relative (nth 1 title-data))
+                        (due-string
+                         (if scheduled-relative
+                             (org-add-props
+                                 (org-ql-view--format-relative-date (round scheduled-relative))
+                                 nil 'face 'org-ql-view-due-date)
+                           "")))
+                   (concat title " " due-string))))
+              (:name
+               "Tags"
+               :align 'right
+               :formatter (lambda (tags)
+                            (if tags
+                              (--> tags
+                                   (s-join ":" it)
+                                   (s-wrap it ":")
+                                   (org-add-props it nil 'face 'org-tag))
+                              "")))
+              )
+   :objects-function (lambda () org-ilm-queue)
+   :getter (lambda (object column vtable)
+             (pcase (vtable-column vtable column)
+               ("Marked" (member (plist-get object :id) org-ilm--queue-marked-objects))
+               ("Type" (plist-get object :type))
+               ("Priority" (plist-get object :priority-sample))
+               ("Cookie" (plist-get object :priority))
+               ("Title" (list (plist-get object :title) (plist-get object :scheduled-relative)))
+               ("Tags" (plist-get object :tags))))
+   :keymap org-ilm-queue-map))
 
 (defun org-ilm--display-queue ()
-  "Open an Org-ql view of elements in `org-ilm-queue'."
-  (let ((strings (-map #'org-ilm--format-heading-element org-ilm-queue)))
-    (org-ql-view--display :buffer "*Ilm Queue*" :header "Ilm queue" :strings strings)))
+  "Open the active queue."
+  (let ((buf (get-buffer-create "*ilm queue*")))
+    (with-current-buffer buf
+      (setq-local buffer-read-only nil)
+      (erase-buffer)
+      (goto-char (point-min))
+      (vtable-insert (org-ilm--queue-make-vtable))
+      (setq header-line-format nil)
+      (setq-local buffer-read-only t)
+      (goto-char (point-min)))
+    (switch-to-buffer buf)))
 
 
 ;;;;; Import
@@ -1013,6 +1127,7 @@ If no priority is set, return default value of 5."
     ;; When HEADLINE is parsed with org-element, buffer local
     ;; `org-priority-lowest' and highest not respected, returns a high number
     ;; instead that can be converted back to our priority.
+    ;; TODO its a char, use (char-to-string) 
     (if (and (numberp priority) (> priority 48))
         (- priority 48)
       (or
@@ -1238,7 +1353,7 @@ Just a hack by looking at code of `org-srs-item-cloze-item-at-point'."
          (due-timestamps
           (save-excursion
             (mapcar (lambda (item) (apply #'org-srs-item-due-timestamp item)) items))))
-    (apply #'org-srs-timestamp-min due-timestamps)))
+    (ts-parse (apply #'org-srs-timestamp-min due-timestamps))))
 
 (defun org-ilm--srs-review-this ()
   "Start an org-srs review session of just the heading at point.
