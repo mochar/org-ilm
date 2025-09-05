@@ -38,8 +38,12 @@
   :type '(alist :key-type symbol :value-type file)
   :group 'org-ilm)
 
-(defcustom org-ilm-queries-alist `((Outstanding . ,org-ilm--query-outstanding))
-  "Alist mapping query name to org-ql query.")
+(defcustom org-ilm-queries-alist
+  `((Outstanding . org-ilm-query-outstanding))
+  "Alist mapping query name to a function that returns an org-ql query."
+  :type '(alist :key-type symbol :value-type function)
+  :group 'org-ilm)
+
 
 (defcustom org-ilm-id-from-attachment-path-func 'org-ilm-infer-id-from-attachment-path
   "Function that accepts a path to an attachment file and returns the Org id of the header."
@@ -890,20 +894,10 @@ wasteful if headline does not match query."
   (when-let ((due (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)))
     (ts<= due (ts-now))))
 
-(defvar org-ilm--query-outstanding
-  `(or
-    (and
-     (todo ,org-ilm-incr-state)
-     (scheduled :to today))
-    (and
-     (todo ,org-ilm-card-state)
-     (org-ilm--ql-card-due)))
-  "Query for org-ql to retrieve the outstanding elements.")
-
 (defun org-ilm-query-queue (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
   (let ((entries (org-ql-select (cdr collection)
-                   (cdr query)
+                   (funcall (cdr query))
                    :action #'org-ilm-parse-headline
                    :sort #'org-ilm--compare-priority)))
     entries))
@@ -917,6 +911,12 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     (org-ql-select (cdr collection)
       (cons 'todo org-ilm-subject-states)
       :action #'org-ilm-parse-headline)))
+
+(defun org-ilm-query-outstanding ()
+  "Query for org-ql to retrieve the outstanding elements."
+  `(or
+    (and (todo ,org-ilm-incr-state) (scheduled :to today))
+    (and (todo ,org-ilm-card-state) (org-ilm--ql-card-due))))
 
 
 ;;;;; Queue
