@@ -1337,11 +1337,13 @@ If no priority is set, return default value of 5."
        (org-ilm--validated-priority priority)
        5))))
 
-(defun org-ilm--beta-from-priority (priority)
-  "Beta parameters from priority value."
-  (let* ((a priority)
+(defun org-ilm--beta-from-priority (priority &optional scale)
+  "Beta parameters from priority value.
+SCALE influence variance."
+  (let* ((scale (or scale 1.))
+         (a priority)
          (b (+ 1 (- 9 a))))
-    (list a b)))
+    (list (* scale a) (* scale b))))
 
 (defun org-ilm--beta-combine (&rest params-list)
   "Combine multiple Beta distributions."
@@ -1366,7 +1368,8 @@ factor that increases with the number of reviews."
     (if (= 0 (length ancestors))
         params
       (apply #'org-ilm--beta-combine params
-             (mapcar #'org-ilm--beta-from-priority
+             ;; Tighter variance for subjects
+             (mapcar (lambda (p) (org-ilm--beta-from-priority p 5.))
                      (mapcar #'cdr ancestors))))))
 
 (defun org-ilm--priority-beta-compile (priority subjects logbook)
