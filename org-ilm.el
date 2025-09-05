@@ -934,12 +934,17 @@ If point on subject, add all headlines of subject."
     (let ((state (org-element-property :todo-keyword headline)))
       (cond
        ((member state org-ilm-subject-states)
+        
         )))))
 
-(defun org-ilm-queue-refresh ()
+(defun org-ilm-queue-refresh (&optional select-collection)
   "Call the query again."
-  (interactive)
-  (let ((collection (or (plist-get org-ilm-queue :collection) (org-ilm--select-collection)))
+  (interactive "P")
+  (let ((collection (if select-collection
+                        (org-ilm--select-collection)
+                      (or
+                       (plist-get org-ilm-queue :collection)
+                       (org-ilm--select-collection))))
         (query (or (plist-get org-ilm-queue :query) (org-ilm--select-query))))
     (setq org-ilm-queue
           (list
@@ -991,9 +996,14 @@ If point on subject, add all headlines of subject."
 (defvar org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
 
+(defun org-ilm--vtable-get-object (&optional index)
+  "Return queue object at point or by index."
+  (let ((index (or index (vtable-current-object))))
+    (nth index (plist-get org-ilm-queue :queue))))
+
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
-  (interactive (list (vtable-current-object)))
+  (interactive (list (org-ilm--vtable-get-object)))
   (let ((loc (org-id-find (plist-get object :id) 'marker)))
     (with-current-buffer (marker-buffer loc)
       (goto-char loc)
@@ -1001,14 +1011,14 @@ If point on subject, add all headlines of subject."
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
-  (interactive (list (vtable-current-object)))
+  (interactive (list (org-ilm--vtable-get-object)))
   (let ((loc (org-id-find (plist-get object :id) 'marker)))
     (pop-to-buffer (marker-buffer loc))
     (goto-char loc)))
 
 (defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
-  (interactive (list (vtable-current-object)))
+  (interactive (list (org-ilm--vtable-get-object)))
   (let* ((id (plist-get object :id)))
     (if (member id org-ilm--queue-marked-objects)
         ;; Only toggle if called interactively
@@ -1076,11 +1086,16 @@ DAYS can be specified as numeric prefix arg."
          (symbol-name (car (plist-get org-ilm-queue :collection)))
          ")")))
 
-(defun org-ilm-queue-revert ()
-  (interactive)
-  (org-ilm-queue-refresh)  
+(defun org-ilm-queue-revert (&optional select-collection)
+  (interactive "P")
+  (org-ilm-queue-refresh select-collection)
   (vtable-revert-command)
   (org-ilm-queue--set-header))
+
+(defun org-ilm--vtable-format-marked (string marked)
+  (if marked
+      (propertize string 'face '(:inherit default :slant italic :underline t))
+    string))
   
 (defun org-ilm--queue-make-vtable ()
   "Build queue vtable.
@@ -1089,65 +1104,96 @@ A lot of formatting code from org-ql."
   (make-vtable
    :insert nil ; Return vtable object rather than insert at point
    :columns `((:name
-               "Marked"
-               :width 3
+               "Index"
+               :max-width 4
+               :align 'right
                :formatter
-               (lambda (m)
-                 (if m
-                     (propertize " > " 'face 'error)
-                     "   ")))
-              (:name "Priority"
+               (lambda (data)
+                 (pcase-let* ((`(,marked ,index) data)
+                              ;; (index-str (format "%d" index)))
+                              (index-str (format "%4d" index)))
+                   (org-ilm--vtable-format-marked index-str marked))))
+              (:name
+               "Priority"
                :width 6
                :formatter
-               (lambda (p)
-                 (if p
-                     (propertize (format "%.2f" (* 100 p)) 'face 'shadow)
-                   "")))
+               (lambda (data)
+                 (pcase-let ((`(,marked ,p) data))
+                   (if p
+                       (org-ilm--vtable-format-marked
+                        (propertize (format "%.2f" (* 100 p)) 'face 'shadow)
+                        marked)))))
               (:name
                "Type"
                :width 5
                :formatter
-               (lambda (type)
-                 (org-ql-view--add-todo-face (upcase (symbol-name type)))))
-              (:name
-               "Cookie"
-               :width 4
-               :formatter
-               (lambda (p)
-                 (org-ql-view--add-priority-face (format "[#%s]" p))))
+               (lambda (data)
+                 (pcase-let ((`(,marked ,type) data))
+                   (org-ilm--vtable-format-marked
+                    (org-ql-view--add-todo-face (upcase (symbol-name type)))
+                    marked))))
+              ;; (:name
+              ;;  "Cookie"
+              ;;  :width 4
+              ;;  :formatter
+              ;;  (lambda (data)
+              ;;    (pcase-let ((`(,marked ,p) data))
+              ;;      (org-ilm--vtable-format-marked
+              ;;       (org-ql-view--add-priority-face (format "[#%s]" p))
+              ;;       marked))))
               (:name
                "Title"
+               :max-width "50%"
+               :min-width "50%"
                :formatter
-               (lambda (title-data)
-                 (let* ((title (nth 0 title-data))
-                        (scheduled-relative (nth 1 title-data))
-                        (due-string
-                         (if scheduled-relative
-                             (org-add-props
-                                 (org-ql-view--format-relative-date (round scheduled-relative))
-                                 nil 'face 'org-ql-view-due-date)
-                           "")))
-                   (concat title " " due-string))))
+               (lambda (data)
+                 (pcase-let* ((`(,marked ,title) data))
+                   (org-ilm--vtable-format-marked title marked))))
+              (:name
+               "Due"
+               :max-width 8
+               ;; :align 'right
+               :formatter
+               (lambda (data)
+                 (pcase-let* ((`(,marked ,due) data))
+                   (let ((due-str (if due
+                                  (org-add-props
+                                      (org-ql-view--format-relative-date
+                                       (round due))
+                                      nil 'face 'org-ql-view-due-date)
+                                "")))
+                     (org-ilm--vtable-format-marked due-str marked)))))
               (:name
                "Tags"
-               :align 'right
-               :formatter (lambda (tags)
-                            (if tags
-                              (--> tags
-                                   (s-join ":" it)
-                                   (s-wrap it ":")
-                                   (org-add-props it nil 'face 'org-tag))
-                              "")))
+               :formatter
+               (lambda (data)
+                 (pcase-let ((`(,marked ,tags) data))
+                   (if tags
+                       (org-ilm--vtable-format-marked
+                        (--> tags
+                             (s-join ":" it)
+                             (s-wrap it ":")
+                             (org-add-props it nil 'face 'org-tag))
+                        marked)
+                     ""))))
               )
-   :objects-function (lambda () (plist-get org-ilm-queue :queue))
-   :getter (lambda (object column vtable)
-             (pcase (vtable-column vtable column)
-               ("Marked" (member (plist-get object :id) org-ilm--queue-marked-objects))
-               ("Type" (plist-get object :type))
-               ("Priority" (plist-get object :priority-sample))
-               ("Cookie" (plist-get object :priority))
-               ("Title" (list (plist-get object :title) (plist-get object :scheduled-relative)))
-               ("Tags" (plist-get object :tags))))
+   :objects-function
+   (lambda ()
+     (let ((queue (plist-get org-ilm-queue :queue)))
+       (unless (= 0 (length queue))
+         (number-sequence 0 (- (length queue) 1)))))
+   :getter
+   (lambda (row column vtable)
+     (let* ((object (org-ilm--vtable-get-object row))
+            (marked (member (plist-get object :id) org-ilm--queue-marked-objects)))
+       (pcase (vtable-column vtable column)
+         ("Index" (list marked row))
+         ("Type" (list marked (plist-get object :type)))
+         ("Priority" (list marked (plist-get object :priority-sample)))
+         ;; ("Cookie" (list marked (plist-get object :priority)))
+         ("Title" (list marked (plist-get object :title)))
+         ("Due" (list marked (plist-get object :scheduled-relative)))
+         ("Tags" (list marked (plist-get object :tags))))))
    :keymap org-ilm-queue-map))
 
 (defun org-ilm--queue-display ()
