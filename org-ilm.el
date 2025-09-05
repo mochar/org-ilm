@@ -1043,13 +1043,9 @@ If point on subject, add all headlines of subject."
   ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
   ;; descendancy, but this would require a list-to-list comparison eg with
   ;; `seq-some' per object, instead of just an `assoc'.
-  (let* ((subject-and-descendants (org-ilm--subjects-get-with-descendant-subjects subject))
-         (desc-ids (mapcar #'car subject-and-descendants)))
-    (dolist (object (plist-get org-ilm-queue :queue))
-      ;; TODO which is faster, check desc in subjs or other way around
-      (when (seq-some
-             (lambda (s) (member s desc-ids))
-             (nth 3 (plist-get object :subjects)))
+  (dolist (object (plist-get org-ilm-queue :queue))
+    (let ((ancestor-ids (mapcar #'car (car (plist-get object :subjects)))))
+      (when (member (plist-get subject :id) ancestor-ids)
         (org-ilm-queue-object-mark object)))))
 
 (defun org-ilm-queue-mark-by-tag (tag)
