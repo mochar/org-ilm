@@ -316,17 +316,20 @@ If empty return nil, and if only one, return it."
     (1 (nth 0 alist))
     (t (let* ((choices (mapcar
                         (lambda (thing)
-                          (cons
-                           (if formatter
-                               (funcall formatter thing)
-                             (format "%s %s"
-                                     (propertize
-                                      (if (symbolp (car thing))
-                                          (symbol-name (car thing))
-                                        (car thing))
-                                      'face '(:weight bold))
-                                     (propertize (nth 1 thing) 'face '(:slant italic))))
-                           thing))
+                          (let ((second (if (consp (cdr thing))
+                                            (car (cdr thing))
+                                          (cdr thing))))
+                            (cons
+                             (if formatter
+                                 (funcall formatter thing)
+                               (format "%s %s"
+                                       (propertize
+                                        (if (symbolp (car thing))
+                                            (symbol-name (car thing))
+                                          (car thing))
+                                        'face '(:weight bold))
+                                       (propertize second 'face '(:slant italic))))
+                             thing)))
                         alist))
               (choice (completing-read (or prompt "Select: ") choices nil t))
               (item (cdr (assoc choice choices))))
@@ -873,7 +876,8 @@ wasteful if headline does not match query."
                            (/ (ts-diff now scheduled) 86400))
      :type type
      :logbook (unless is-card (org-ilm--logbook-read headline))
-     :subjects (org-ilm--priority-subject-gather headline)
+     ;; cdr to get rid of headline priority in the car - redundant
+     :subjects (cdr (org-ilm--priority-subject-gather headline))
      :priority-sample (org-ilm--sample-priority-from-headline headline))))
 
 (defun org-ilm--compare-priority (first second)
@@ -918,6 +922,44 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
 
 ;;;;; Queue
 
+;;;;;; Building
+
+;; TODO Finish after rewriting subject cache
+(defun org-ilm-queue-add-dwim (arg)
+  "Add element at point to queue. With ARG, reset queue before adding.
+
+If point on headline, add headline and descendants.
+If point on subject, add all headlines of subject."
+  (interactive "P")
+  (when-let ((headline (org-ilm--org-headline-at-point)))
+    (let ((state (org-element-property :todo-keyword headline)))
+      (cond
+       ((member state org-ilm-subject-states)
+        )))))
+
+(defun org-ilm-queue-refresh ()
+  "Call the query again."
+  (interactive)
+  (let ((collection (or (plist-get org-ilm-queue :collection) (org-ilm--select-collection)))
+        (query (or (plist-get org-ilm-queue :query) (org-ilm--select-query))))
+    (setq org-ilm-queue
+          (list
+           :queue (org-ilm-query-queue collection query)
+           :collection collection
+           :query query))))
+
+;;;;;; Commands       
+
+(defun org-ilm-queue (reset)
+  "View queue in Agenda-like buffer."
+  (interactive "P")
+  (if (and org-ilm-queue (not reset))
+      (org-ilm--queue-display)
+    (org-ilm-queue-refresh)
+    (org-ilm--queue-display)))
+
+
+;;;;;; Within queue 
 (defvar org-ilm-queue-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "n")
@@ -997,6 +1039,10 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
         (cdr (reverse (org-mem-entry-crumbs (org-node-by-id (plist-get subject :id)))))
         " > ")))))
 
+  ;; Alternatively, we could have used
+  ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
+  ;; descendancy, but this would require a list-to-list comparison eg with
+  ;; `seq-some' per object, instead of just an `assoc'.
   (let* ((subject-and-descendants (org-ilm--subjects-get-with-descendant-subjects subject))
          (desc-ids (mapcar #'car subject-and-descendants)))
     (dolist (object (plist-get org-ilm-queue :queue))
@@ -1027,10 +1073,19 @@ DAYS can be specified as numeric prefix arg."
       (when (<= (round due) days) 
         (org-ilm-queue-object-mark object)))))
 
+(defun org-ilm-queue--set-header ()
+  (setq header-line-format
+        (concat
+         (symbol-name (car (plist-get org-ilm-queue :query)))
+         " ("
+         (symbol-name (car (plist-get org-ilm-queue :collection)))
+         ")")))
+
 (defun org-ilm-queue-revert ()
   (interactive)
+  (org-ilm-queue-refresh)  
   (vtable-revert-command)
-  (setq header-line-format (symbol-name (car (plist-get org-ilm-queue :query)))))
+  (org-ilm-queue--set-header))
   
 (defun org-ilm--queue-make-vtable ()
   "Build queue vtable.
@@ -1100,7 +1155,7 @@ A lot of formatting code from org-ql."
                ("Tags" (plist-get object :tags))))
    :keymap org-ilm-queue-map))
 
-(defun org-ilm--display-queue ()
+(defun org-ilm--queue-display ()
   "Open the active queue."
   (let ((buf (get-buffer-create "*ilm queue*")))
     (with-current-buffer buf
@@ -1108,22 +1163,10 @@ A lot of formatting code from org-ql."
       (erase-buffer)
       (goto-char (point-min))
       (vtable-insert (org-ilm--queue-make-vtable))
-      (setq header-line-format (symbol-name (car (plist-get org-ilm-queue :query))))
+      (org-ilm-queue--set-header)
       (setq-local buffer-read-only t)
       (goto-char (point-min)))
     (switch-to-buffer buf)))
-
-(defun org-ilm-queue (collection query)
-  "View queue in Agenda-like buffer."
-  (interactive (list
-                (org-ilm--select-collection)
-                (org-ilm--select-query)))
-  (setq org-ilm-queue
-        (list
-         :queue (org-ilm-query-queue collection query)
-         :collection collection
-         :query query))
-  (org-ilm--display-queue))
 
 
 ;;;;; Import
@@ -1322,15 +1365,13 @@ factor that increases with the number of reviews."
 
 (defun org-ilm--priority-adjusted-from-subjects (params subjects)
   "Average the priority out over the subject priorities."
-  (let ((subject-count (nth 2 subjects))
-        (subject-sum (nth 1 subjects)))
-    (if (= 0 subject-count)
+  (let ((ancestors (nth 1 subjects)))
+    (org-ilm--debug nil ancestors)
+    (if (= 0 (length ancestors))
         params
-      (let* ((subjects-avg-priority (/ (float subject-sum) subject-count))
-             (subjects-params (mapcar
-                               (lambda (p) (* p subject-count))
-                               (org-ilm--beta-from-priority subjects-avg-priority))))
-        (org-ilm--beta-combine params subjects-params)))))
+      (apply #'org-ilm--beta-combine params
+             (mapcar #'org-ilm--beta-from-priority
+                     (mapcar #'cdr ancestors))))))
 
 (defun org-ilm--priority-beta-compile (priority subjects logbook)
   "Compile the finale beta parameters from priority value, subjects, and logbook history."
@@ -1363,8 +1404,13 @@ factor that increases with the number of reviews."
 
 ;;;;;; Subject priorities
 
+;; I don't know if we want to add anything to this but we can always just extend
+;; the value list.
+;; TODO Add sum of ancestor priorities?
 (defvar org-ilm-priority-subject-cache (make-hash-table :test 'equal)
-  "Map subject org-id -> (priority priority-sum priority-count parent-subject-ids)
+  "Map subject org-id -> (priority '((ancestor-subject-id . priority)) num-direct-parents)
+
+The direct parent ids are the last num-direct-parents ids in ancestor-subject-ids.
 
 Gets reset after org-mem refreshes.")
 
@@ -1380,6 +1426,7 @@ Headline can be a subject or not."
     (org-ilm--debug "Gathering subjects for:" id)
     (or (gethash id org-ilm-priority-subject-cache)
         (let* ((parents-data
+                ;; Non-recursively, just direct parents in DAG
                 (org-ilm--subjects-get-parent-subjects headline-or-id))
                (headline (car parents-data))
                (is-subject (member
@@ -1387,25 +1434,29 @@ Headline can be a subject or not."
                             org-ilm-subject-states))
                (parent-ids (cdr parents-data))
                (priority (org-ilm--get-priority headline))
-               (priority-sum 0)
-               (priority-count 0))
+               (ancestor-data
+                (mapcar
+                 (lambda (parent-id)
+                   (cons parent-id
+                         (org-ilm--get-priority
+                          (org-ilm--org-headline-element-from-id parent-id))))
+                 parent-ids)))
 
+          (org-ilm--debug nil ancestor-data)
           ;; Recursively call this function on all direct parent subjects to get
           ;; their priority data.
           (dolist (parent-id parent-ids)
-            (let ((parent-priority-data (org-ilm--priority-subject-gather parent-id)))
-              (setq priority-count
-                    (+ priority-count (nth 2 parent-priority-data) 1))
-              ;; Sum is sum of parent + parent itself
-              (setq priority-sum
-                    (+ priority-sum
-                       (nth 1 parent-priority-data)
-                       (nth 0 parent-priority-data)))))
+            (let ((parent-data (org-ilm--priority-subject-gather parent-id)))
+              ;; Add parent's ancestors to list of ancestors
+              (dolist (parent-ancestor (nth 1 parent-data))
+                (unless (assoc parent-ancestor ancestor-data)
+                  (push parent-ancestor ancestor-data)))))
 
           ;; Compile data in a list. If this headline is also a subject, add it
           ;; to the cache as well.
-          (let ((priority-data (list priority priority-sum priority-count parent-ids)))
+          (let ((priority-data (list priority ancestor-data (length parent-ids))))
             (when is-subject
+              ;; (org-ilm--debug "Adding to hash:" id)
               (puthash id priority-data org-ilm-priority-subject-cache))
             ;; Return data
             priority-data)))))
@@ -1542,20 +1593,13 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
 
 ;;;;; Subjects
 
-;; TODO org-ilm--subjects-gather should first org-ql query for all SUBJ then gather priorties. this is because org-ql caches them. to get the cache-key use code below:
-;; (cl-letf (((symbol-function 'org-ql--select-cached)
-;;            (lambda (&rest args)
-;;              (setq org-ilm--subj-query-cache-key args)
-;;              (message "%s" args))))
-;;   (org-ilm--collect-queue-entries (car org-ilm-collections-alist)))
-
-(defun org-ilm--subjects-get-parent-subjects (&optional headline-thing check-links-recursively include-indirect-ancestors)
+(defun org-ilm--subjects-get-parent-subjects (&optional headline-thing all-ancestors)
   "Retrieve parent subjects of a headline.
 
 Processing is done to remove indirect or redundant parents, so that the returned parents form the direct parents of the DAG.
 
-When CHECK-LINKS-RECURSIVELY, repeat process for all linked subjects in SUBJECTS property.
-When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
+When ALL-ANCESTORS, repeat process for all linked subjects in
+ SUBJECTS property."
   (let* ((headline (org-ilm--org-headline-from-thing headline-thing 'assert))
          (headline-id (org-element-property :ID headline))
          (headline-entry (org-node-by-id headline-id))
@@ -1576,11 +1620,12 @@ When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
                    (org-element-property :todo-keyword element) org-ilm-subject-states)
               ;; TODO creating id might mess up with parsing and cache and
               ;; whatever as we're updating the buffer during parsing
-              (let ((org-id (org-id-get element 'create)))
+              (let ((org-id (org-id-get element nil)))
+              ;; (let ((org-id (org-id-get element 'create)))
                 (cl-pushnew org-id subject-ids :test #'equal)
                 ;; Return non-nil in case we dont want all ancestors
                 org-id)))
-        '(headline) nil (not include-indirect-ancestors)))
+        '(headline) nil (not all-ancestors)))
 
     (org-ilm--debug "-- Outline ancestors:" subject-ids)
     
@@ -1592,8 +1637,9 @@ When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
     ;; circular links.
 
     ;; Note: do this after getting outline ancestors as outline does not have
-    ;; aforementioned problems, and properties are inherited.
-    (when-let ((property-subjects-str (org-entry-get headline "SUBJECTS" 'inherit)))
+    ;; aforementioned problems, and properties are inherited (in case we do this
+    ;; recursively).
+    (when-let ((property-subjects-str (org-entry-get headline "SUBJECTS" all-ancestors)))
       (let (property-subject-ids property-subject-ancestors)
 
         ;; First we gather valid subject-ids as well as their individual ancestries
@@ -1622,13 +1668,12 @@ When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
             ;; themselves might link to other subjects in their properties.
             ;; Note, no need to do this for outline ancestors (previous step),
             ;; as properties are inherited.
-            (when check-links-recursively
-              (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id 'recursive include-indirect-ancestors)))
+            (when all-ancestors
+              (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id 'recursive)))
                 (cl-pushnew parent-id property-subject-ids :test #'equal)
                 (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-subject-ancestors)))))
 
         ;; Filter if subject-id is ancestor of any other subject-id
-        ;; TODO don't do this if `include-indirect-ancestors' non-nil right??
         (let ((ancestries (apply #'append property-subject-ancestors)))
           (dolist (subject-id property-subject-ids)
             (unless (member subject-id ancestries)
@@ -1640,14 +1685,23 @@ When INCLUDE-INDIRECT-ANCESTORS, include also non-parent ancestors."
 
 (defun org-ilm--subjects-get-with-descendant-subjects (subject)
   "Retrieve descendant subjects of a headline.
+Descendants can be directly in outline or indirectly through property linking."
+  (let ((id (plist-get subject :id)))
+    (seq-filter
+     (lambda (subj)
+       (let ((ancestory (nth 2 (org-ilm--priority-subject-gather (plist-get subj :id)))))
+         (member id ancestory)))
+     (org-ilm--query-subjects))))
+
+(defun org-ilm--subjects-get-with-descendant-subjects--deprecated (subject)
+  "DEPRECATED now that we save full ancestor list in cache.
+
+Retrieve descendant subjects of a headline.
 
 Descendants can be directly in outline or indirectly through property linking.
 
 This function does not have to be fast: Currently only called every now
-and again by `org-ilm-queue-mark-by-subject'.
-
-TODO can perhaps be sped up by utilizing `org-ilm-priority-subject-cache'?
-Contains full subject hierarchy + is cached."
+and again by `org-ilm-queue-mark-by-subject'."
   (let ((all-subjects (mapcar (lambda (s)
                                 (cons (plist-get s :id) s))
                               ;; Cached:
