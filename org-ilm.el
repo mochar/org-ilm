@@ -469,7 +469,6 @@ The callback ON-ABORT is called when capture is cancelled."
 
 (defun org-ilm--where-am-i ()
   "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
-  ;; TODO
   (let ((collections (mapcar
                       (lambda (c) (expand-file-name (cdr c)))
                       org-ilm-collections-alist)))
@@ -479,7 +478,7 @@ The callback ON-ABORT is called when capture is cancelled."
                   (file-title (file-name-sans-extension
                          (file-name-nondirectory buffer-file-name)))
                   (_ (org-uuidgen-p file-title))
-                  (src-file (org-id-find-id-file file-title)))
+                  (src-file (car (org-id-find file-title))))
         (when (member (expand-file-name src-file) collections)
           (cons 'attachment (list file-title src-file)))))))
 
