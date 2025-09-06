@@ -1673,40 +1673,36 @@ parents, which is defined differently for subjects and extracts/cards:
 
     ;; Check for ancestor subject headline in outline hierarchy. As we explore
     ;; up the hierarchy, store linked subjects of extracts.
-    (unless
-        ;; We don't need to check for ancestors if top-level headline.
-        ;; TODO skip if `headline-ancestry' is nil?
-        (= 1 (org-element-property :level headline))
-      (org-element-lineage-map
-          headline
-          (lambda (element)
-            (let ((is-self (string= (org-element-property :ID element) headline-id))
-                  (state (org-element-property :todo-keyword element)))
-              (cond
-               ;; Headline is self or incremental ancestor, store linked subjects
-               ((or is-self
-                    (and (not headline-is-subj) ; Subject never inherit!
-                         (string= state org-ilm-incr-state)))
-                (when-let ((prop (org-entry-get element "SUBJECTS")))
-                  (setq property-subjects-str
-                        (concat property-subjects-str " " prop))
-                  ;; Return nil so we don't terminate map
-                  nil))
-               
-               ;; Headline is subject, store as outline parent subject
-               ((member state org-ilm-subject-states)
-                ;; We could create id with second arg of org-id-get, but this
-                ;; might mess up with parsing and cache and whatever as we're
-                ;; updating the buffer during parsing
-                (let ((org-id (org-id-get element)))
-                  (cl-pushnew org-id subject-ids :test #'equal)
-                  (unless outline-parent-subject
-                    (setq outline-parent-subject org-id))
-                  ;; Return non-nil in case we dont want all ancestors. This
-                  ;; means we only gather linked subjects of extracts up to
-                  ;; first subject.
-                  org-id)))))
-        '(headline) 'with-self (not all-ancestors)))
+    (org-element-lineage-map
+        headline
+        (lambda (element)
+          (let ((is-self (string= (org-element-property :ID element) headline-id))
+                (state (org-element-property :todo-keyword element)))
+            (cond
+             ;; Headline is self or incremental ancestor, store linked subjects
+             ((or is-self
+                  (and (not headline-is-subj) ; Subject never inherit!
+                       (string= state org-ilm-incr-state)))
+              (when-let ((prop (org-entry-get element "SUBJECTS")))
+                (setq property-subjects-str
+                      (concat property-subjects-str " " prop))
+                ;; Return nil so we don't terminate map
+                nil))
+             
+             ;; Headline is subject, store as outline parent subject
+             ((member state org-ilm-subject-states)
+              ;; We could create id with second arg of org-id-get, but this
+              ;; might mess up with parsing and cache and whatever as we're
+              ;; updating the buffer during parsing
+              (let ((org-id (org-id-get element)))
+                (cl-pushnew org-id subject-ids :test #'equal)
+                (unless outline-parent-subject
+                  (setq outline-parent-subject org-id))
+                ;; Return non-nil in case we dont want all ancestors. This
+                ;; means we only gather linked subjects of extracts up to
+                ;; first subject.
+                org-id)))))
+      '(headline) 'with-self (not all-ancestors))
 
     (org-ilm--debug "-- Outline ancestors:" subject-ids)
     
