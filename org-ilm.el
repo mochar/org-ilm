@@ -44,6 +44,10 @@
   :type '(alist :key-type symbol :value-type function)
   :group 'org-ilm)
 
+(defcustom org-ilm-custom-queries-alist nil
+  "Do not edit. Auto saved user added queries. See `org-ilm-queries-alist'."
+  :type '(alist :key-type symbol :value-type function)
+  :group 'org-ilm)
 
 (defcustom org-ilm-id-from-attachment-path-func 'org-ilm-infer-id-from-attachment-path
   "Function that accepts a path to an attachment file and returns the Org id of the header."
@@ -57,6 +61,7 @@
                  (const :tag "Copy" 'cp))
   :group 'org-ilm)
 
+;; 40 days in supermemo
 (defcustom org-ilm-schedule-max-days 60
   "Maximum number of days that a topic may be scheduled."
   :type 'number
@@ -385,54 +390,48 @@ The callback ON-ABORT is called when capture is cancelled."
                 (when on-abort
                   (funcall on-abort))
               (when on-success
-                (funcall on-success)))))
-         (org-capture-templates
-          `(("i" "Import"
-             entry ,target
-             ,(format "* %s [#5] %s %s" state title "%?")
-             ;; :unnarrowed ; TODO for extracts might be nice?
-             :hook (lambda ()
-                     (org-entry-put nil "ID" ,org-id)
+                (funcall on-success))))))
+    ;; (cl-letf (((symbol-value 'org-capture-templates)
+    (let ((org-capture-templates
+           `(("i" "Import"
+              entry ,target
+              ,(format "* %s [#5] %s %s" state title "%?")
+              :hook (lambda ()
+                      ;; Regardless of type, every headline will have an id.
+                      (org-entry-put nil "ID" ,org-id)
 
-                     ;; If this is a source header where the attachments will
-                     ;; live, we need to set the DIR property, otherwise for
-                     ;; some reason org-attach on children doesn't detect that
-                     ;; there is a parent attachment header, even with a non-nil
-                     ;; `org-attach-use-inheritance'.
-                     ;; (when (eq ',type 'source)
-                       ;; (org-entry-put
-                        ;; nil "DIR"
-                        ;; (abbreviate-file-name (org-attach-dir-get-create))))
+                      ;; Scheduling. We do not add a schedule for cards, as that
+                      ;; info is parsed with
+                      ;; `org-ilm--srs-earliest-due-timestamp'.
+                      (unless (eq ',type 'card)
+                        ;; Set initial schedule data based on priortiy
+                        (org-ilm--set-schedule-from-priority)
 
-                     ;; Schedule the header. We do not add a schedule for cards,
-                     ;; as that info is parsed with
-                     ;; `org-ilm--srs-earliest-due-timestamp'.
-                     (unless (eq ',type 'card)
-                       (org-ilm--set-schedule-from-priority)
+                        ;; Add advice around priority change to automatically
+                        ;; update schedule, but remove advice as soon as capture
+                        ;; is finished.
+                        (advice-add 'org-priority
+                                    :around #'org-ilm--update-from-priority-change)
+                        (add-hook 'kill-buffer-hook
+                                  (lambda ()
+                                    (advice-remove 'org-priority
+                                                   #'org-ilm--update-from-priority-change))
+                                  nil t))
 
-                       ;; Add advice around priority change to automatically
-                       ;; update schedule, but remove advice as soon as capture
-                       ;; is finished.
-                       (advice-add 'org-priority
-                                   :around #'org-ilm--update-from-priority-change)
-                       (add-hook 'kill-buffer-hook
-                                 (lambda ()
-                                   (advice-remove 'org-priority
-                                                  #'org-ilm--update-from-priority-change))
-                                 nil t))
-
-                     ;; For cards, need to transclude the contents in order for
-                     ;; org-srs to detect the clozes.
-                     ;; TODO `org-transclusion-add' super slow!!
-                     (when (eq ',type 'card)
-                       (save-excursion
-                         (org-ilm--transclusion-goto ,tmp-file-path 'create)
-                         (org-transclusion-add)
-                         (org-srs-item-new 'cloze)
-                         (org-ilm--transclusion-goto ,tmp-file-path 'delete))))
-             :before-finalize ,before-finalize
-             :after-finalize ,after-finalize))))
-    (org-capture nil "i")))
+                      ;; For cards, need to transclude the contents in order for
+                      ;; org-srs to detect the clozes.
+                      ;; TODO `org-transclusion-add' super slow!!
+                      (when (eq ',type 'card)
+                        ;; TODO this can be a nice macro
+                        ;; `org-ilm-with-attachment-transcluded'
+                        (save-excursion
+                          (org-ilm--transclusion-goto ,tmp-file-path 'create)
+                          (org-transclusion-add)
+                          (org-srs-item-new 'cloze)
+                          (org-ilm--transclusion-goto ,tmp-file-path 'delete))))
+              :before-finalize ,before-finalize
+              :after-finalize ,after-finalize))))
+      (org-capture nil "i"))))
 
 (defun org-ilm--current-date-utc ()
   "Current date in UTC as string."
