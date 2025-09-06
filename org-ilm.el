@@ -1113,80 +1113,98 @@ DAYS can be specified as numeric prefix arg."
 A lot of formatting code from org-ql."
   (make-vtable
    :insert nil ; Return vtable object rather than insert at point
-   :columns `((:name
-               "Index"
-               :max-width 4
-               :align 'right
-               :formatter
-               (lambda (data)
-                 (pcase-let* ((`(,marked ,index) data)
-                              ;; (index-str (format "%d" index)))
-                              (index-str (format "%4d" index)))
-                   (org-ilm--vtable-format-marked index-str marked))))
-              (:name
-               "Priority"
-               :width 6
-               :formatter
-               (lambda (data)
-                 (pcase-let ((`(,marked ,p) data))
-                   (if p
-                       (org-ilm--vtable-format-marked
-                        (propertize (format "%.2f" (* 100 p)) 'face 'shadow)
-                        marked)))))
-              (:name
-               "Type"
-               :width 5
-               :formatter
-               (lambda (data)
-                 (pcase-let ((`(,marked ,type) data))
-                   (org-ilm--vtable-format-marked
-                    (org-ql-view--add-todo-face (upcase (symbol-name type)))
-                    marked))))
-              ;; (:name
-              ;;  "Cookie"
-              ;;  :width 4
-              ;;  :formatter
-              ;;  (lambda (data)
-              ;;    (pcase-let ((`(,marked ,p) data))
-              ;;      (org-ilm--vtable-format-marked
-              ;;       (org-ql-view--add-priority-face (format "[#%s]" p))
-              ;;       marked))))
-              (:name
-               "Title"
-               :max-width "50%"
-               :min-width "50%"
-               :formatter
-               (lambda (data)
-                 (pcase-let* ((`(,marked ,title) data))
-                   (org-ilm--vtable-format-marked title marked))))
-              (:name
-               "Due"
-               :max-width 8
-               ;; :align 'right
-               :formatter
-               (lambda (data)
-                 (pcase-let* ((`(,marked ,due) data))
-                   (let ((due-str (if due
-                                  (org-add-props
-                                      (org-ql-view--format-relative-date
-                                       (round due))
-                                      nil 'face 'org-ql-view-due-date)
-                                "")))
-                     (org-ilm--vtable-format-marked due-str marked)))))
-              (:name
-               "Tags"
-               :formatter
-               (lambda (data)
-                 (pcase-let ((`(,marked ,tags) data))
-                   (if tags
-                       (org-ilm--vtable-format-marked
-                        (--> tags
-                             (s-join ":" it)
-                             (s-wrap it ":")
-                             (org-add-props it nil 'face 'org-tag))
-                        marked)
-                     ""))))
-              )
+   :columns
+   `((:name
+      "Index"
+      :max-width 4
+      :align 'right
+      :formatter
+      (lambda (data)
+        (pcase-let* ((`(,marked ,index) data)
+                     ;; (index-str (format "%d" index)))
+                     (index-str (format "%4d" index)))
+          (org-ilm--vtable-format-marked index-str marked))))
+     (:name
+      "Priority"
+      :width 6
+      :formatter
+      (lambda (data)
+        (pcase-let ((`(,marked ,p) data))
+          (if p
+              (org-ilm--vtable-format-marked
+               (propertize (format "%.2f" (* 100 p)) 'face 'shadow)
+               marked)))))
+     (:name
+      "Type"
+      :width 5
+      :formatter
+      (lambda (data)
+        (pcase-let ((`(,marked ,type) data))
+          (org-ilm--vtable-format-marked
+           (org-ql-view--add-todo-face (upcase (symbol-name type)))
+           marked))))
+     ;; (:name
+     ;;  "Cookie"
+     ;;  :width 4
+     ;;  :formatter
+     ;;  (lambda (data)
+     ;;    (pcase-let ((`(,marked ,p) data))
+     ;;      (org-ilm--vtable-format-marked
+     ;;       (org-ql-view--add-priority-face (format "[#%s]" p))
+     ;;       marked))))
+     (:name
+      "Title"
+      ;; :max-width "50%"
+      :min-width "50%"
+      :max-width "55%"
+      :formatter
+      (lambda (data)
+        (pcase-let* ((`(,marked ,title) data))
+          (org-ilm--vtable-format-marked title marked))))
+     (:name
+      "Due"
+      :max-width 8
+      ;; :align 'right
+      :formatter
+      (lambda (data)
+        (pcase-let* ((`(,marked ,due) data))
+          (let ((due-str (if due
+                             (org-add-props
+                                 (org-ql-view--format-relative-date
+                                  (round due))
+                                 nil 'face 'org-ql-view-due-date)
+                           "")))
+            (org-ilm--vtable-format-marked due-str marked)))))
+     ;; (:name
+     ;;  "Tags"
+     ;;  :formatter
+     ;;  (lambda (data)
+     ;;    (pcase-let ((`(,marked ,tags) data))
+     ;;      (if tags
+     ;;          (org-ilm--vtable-format-marked
+     ;;           (--> tags
+     ;;                (s-join ":" it)
+     ;;                (s-wrap it ":")
+     ;;                (org-add-props it nil 'face 'org-tag))
+     ;;           marked)
+     ;;        ""))))
+     (:name
+      "Subjects"
+      :max-width 15
+      :formatter
+      (lambda (data)
+        (pcase-let ((`(,marked ,subjects) data))
+          (if subjects
+              (let ((names
+                     (mapcar
+                      (lambda (subject)
+                        (let ((title (org-mem-entry-title subject)))
+                          (substring title 0 (min (length title) 5))))
+                      subjects)))
+                (org-ilm--vtable-format-marked
+                 (org-add-props (s-join ", " names) nil 'face 'org-tag)
+                 marked))
+                "")))))
    :objects-function
    (lambda ()
      (let ((queue (plist-get org-ilm-queue :queue)))
@@ -1195,7 +1213,9 @@ A lot of formatting code from org-ql."
    :getter
    (lambda (row column vtable)
      (let* ((object (org-ilm--vtable-get-object row))
-            (marked (member (plist-get object :id) org-ilm--queue-marked-objects)))
+            (id (plist-get object :id))
+            (marked (member id org-ilm--queue-marked-objects))
+            (subjects (plist-get object :subjects)))
        (pcase (vtable-column vtable column)
          ("Index" (list marked row))
          ("Type" (list marked (plist-get object :type)))
@@ -1203,7 +1223,12 @@ A lot of formatting code from org-ql."
          ;; ("Cookie" (list marked (plist-get object :priority)))
          ("Title" (list marked (plist-get object :title)))
          ("Due" (list marked (plist-get object :scheduled-relative)))
-         ("Tags" (list marked (plist-get object :tags))))))
+         ;; ("Tags" (list marked (plist-get object :tags)))
+         ("Subjects"
+          (list marked
+                (when (nth 0 subjects)
+                  (mapcar (lambda (s) (org-mem-entry-by-id (car s)))
+                          (last (nth 0 subjects) (nth 1 subjects)))))))))
    :keymap org-ilm-queue-map))
 
 (defun org-ilm--queue-display ()
