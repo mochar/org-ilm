@@ -162,67 +162,6 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   ""
   (interactive "sURL: "))
 
-(defun org-ilm-extract ()
-  "Extract text in region.
-
-Will become an attachment Org file that is the child heading of current entry."
-  (interactive)
-  (unless (use-region-p) (user-error "No region active."))
-  (let* ((file-buf (current-buffer))
-         (file-path buffer-file-name)
-         (file-name (file-name-sans-extension
-                     (file-name-nondirectory
-                      file-path)))
-         (attach-org-id (car (org-ilm--attachment-data)))
-         (attach-org-id-marker (org-id-find attach-org-id t))
-         (file-org-id file-name)
-         (file-org-id-marker (org-id-find file-org-id t)))
-    (unless attach-org-id-marker
-      (error "Current file is not an attachment, or failed to parse org ID."))
-    (unless file-org-id-marker
-      (error "Current file name not org ID, or failed to find it."))
-    
-    (let* ((region-begin (region-beginning))
-           (region-end (region-end))
-           (region-text (org-ilm--buffer-text-clean region-begin region-end))
-           (snippet (org-ilm--generate-text-snippet region-text))
-           (extract-org-id (org-id-new))
-           (extract-tmp-path (expand-file-name
-                              (format "%s.org" extract-org-id)
-                              temporary-file-directory)))
-
-      ;; Save region content into tmp file and move it as attachment to main
-      ;; heading.
-      (write-region region-text nil extract-tmp-path)
-      (org-ilm--capture
-       'extract
-       `(id ,file-org-id)
-       extract-org-id
-       extract-tmp-path
-       snippet
-       (lambda ()
-         ;; Wrap region with targets.
-         (with-current-buffer file-buf
-           (save-excursion
-             (let* ((is-begin-line (or (= region-begin 0)
-                                       (eq (char-before region-begin) ?\n)))
-                    (target-template (format "<<extract:%s:%s>>" "%s" extract-org-id))
-                    (target-begin (concat
-                                   (format target-template "begin")
-                                   ;; Region starts at beginning of line: insert
-                                   ;; on new line above
-                                   (when is-begin-line "\n")))
-                    (target-end (format target-template "end")))
-               ;; Insert target before region
-               (goto-char region-begin)
-               (insert target-begin)
-
-               ;; Insert target after region, adjusting for start target length
-               (goto-char (+ region-end (length target-begin)))
-               (insert target-end)))
-           (save-buffer)
-           (org-ilm-recreate-overlays)))))))
-
 (defun org-ilm-prepare-buffer ()
   "Recreate overlays if current buffer is an attachment Org file."
   (interactive)
@@ -295,10 +234,18 @@ Will become an attachment Org file that is the child heading of current entry."
   (if (org-ilm--srs-in-cloze-p)
       (org-srs-item-uncloze-dwim)
     (org-srs-item-cloze-dwim)))
-  
-;;;; Functions
 
-;;;;; Utilities
+(defun org-ilm-extract-dwim ()
+  "Extract region depending on file."
+  (interactive)
+  (cond
+   ((eq major-mode 'org-mode)
+    (org-ilm-org-extract))
+   ((or (eq major-mode 'pdf-view-mode)
+        (eq major-mode 'pdf-virtual-view-mode))
+    (org-ilm-pdf-extract))))
+  
+;;;; Utilities
 
 (defun org-ilm--debug (&optional fmt &rest args)
   "Print stuff to message buffer when `org-ilm-debug' non-nil."
@@ -344,11 +291,6 @@ If empty return nil, and if only one, return it."
               (item (cdr (assoc choice choices))))
          item))))
 
-(defun org-ilm--select-collection ()
-  "Prompt user for collection to select from.
-The collections are stored in `org-ilm-collections-alist'."
-  (org-ilm--select-alist org-ilm-collections-alist "Collection: "))
-
 (defun org-ilm--select-query ()
   "Prompt user for query to select from.
 The queries are stored in `org-ilm-queries-alist'."
@@ -359,79 +301,6 @@ The queries are stored in `org-ilm-queries-alist'."
   (if (and headline (plist-member headline :subjects))
       (plist-get headline :subjects)
     (org-ilm--priority-subject-gather headline)))
-
-(defun org-ilm--capture (type target org-id tmp-file-path &optional title on-success on-abort)
-  "Make an org capture to make a new source heading, extract, or card.
-
-The callback ON-SUCCESS is called when capture is saved.
-The callback ON-ABORT is called when capture is cancelled."
-  (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
-         (before-finalize
-          (lambda ()
-            ;; If this is a source header where the attachments will
-            ;; live, we need to set the DIR property, otherwise for
-            ;; some reason org-attach on children doesn't detect that
-            ;; there is a parent attachment header, even with a non-nil
-            ;; `org-attach-use-inheritance'.
-            (when (eq type 'source)
-              (org-entry-put
-               nil "DIR"
-               (abbreviate-file-name (org-attach-dir-get-create))))
-            
-            ;; Attach the file. We always use 'mv because we are
-            ;; importing the file from the tmp dir.
-            (org-attach-attach tmp-file-path nil 'mv)))
-         (after-finalize
-          (lambda ()
-            ;; Deal with success and aborted capture. This can be detected in
-            ;; after-finalize hook with the `org-note-abort' flag set to t in
-            ;; `org-capture-kill'.
-            (if org-note-abort
-                (when on-abort
-                  (funcall on-abort))
-              (when on-success
-                (funcall on-success))))))
-    ;; (cl-letf (((symbol-value 'org-capture-templates)
-    (let ((org-capture-templates
-           `(("i" "Import"
-              entry ,target
-              ,(format "* %s [#5] %s %s" state title "%?")
-              :hook (lambda ()
-                      ;; Regardless of type, every headline will have an id.
-                      (org-entry-put nil "ID" ,org-id)
-
-                      ;; Scheduling. We do not add a schedule for cards, as that
-                      ;; info is parsed with
-                      ;; `org-ilm--srs-earliest-due-timestamp'.
-                      (unless (eq ',type 'card)
-                        ;; Set initial schedule data based on priortiy
-                        (org-ilm--set-schedule-from-priority)
-
-                        ;; Add advice around priority change to automatically
-                        ;; update schedule, but remove advice as soon as capture
-                        ;; is finished.
-                        (advice-add 'org-priority
-                                    :around #'org-ilm--update-from-priority-change)
-                        (add-hook 'kill-buffer-hook
-                                  (lambda ()
-                                    (advice-remove 'org-priority
-                                                   #'org-ilm--update-from-priority-change))
-                                  nil t))
-
-                      ;; For cards, need to transclude the contents in order for
-                      ;; org-srs to detect the clozes.
-                      ;; TODO `org-transclusion-add' super slow!!
-                      (when (eq ',type 'card)
-                        ;; TODO this can be a nice macro
-                        ;; `org-ilm-with-attachment-transcluded'
-                        (save-excursion
-                          (org-ilm--transclusion-goto ,tmp-file-path 'create)
-                          (org-transclusion-add)
-                          (org-srs-item-new 'cloze)
-                          (org-ilm--transclusion-goto ,tmp-file-path 'delete))))
-              :before-finalize ,before-finalize
-              :after-finalize ,after-finalize))))
-      (org-capture nil "i"))))
 
 (defun org-ilm--current-date-utc ()
   "Current date in UTC as string."
@@ -471,7 +340,7 @@ The callback ON-ABORT is called when capture is cancelled."
     (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
 
 (defun org-ilm--where-am-i ()
-  "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
+  "returns one of ('collection collection), ('attachment (org-id collection)), nil."
   (let ((collections (mapcar
                       (lambda (c) (expand-file-name (cdr c)))
                       org-ilm-collections-alist)))
@@ -568,8 +437,15 @@ With non-nil ASSERT, assert headline must be found, else return nil."
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
-;;;;; Elements
+;;;; Elements
 
+(defun org-ilm--select-collection ()
+  "Prompt user for collection to select from.
+The collections are stored in `org-ilm-collections-alist'."
+  (org-ilm--select-alist org-ilm-collections-alist "Collection: "))
+
+
+;;;;; Logbook
 (defun org-ilm--logbook-parse (logbook)
   "Parses the Org contents of a logbook drawer entry."
   (let ((contents (org-element-contents logbook)))
@@ -624,7 +500,252 @@ If `HEADLINE' is passed, read it as org-property."
 
 
 
-;;;;; Attachments
+;;;; Capture
+
+(defun org-ilm--capture (type target org-id tmp-file-path &optional title on-success on-abort)
+  "Make an org capture to make a new source heading, extract, or card.
+
+The callback ON-SUCCESS is called when capture is saved.
+The callback ON-ABORT is called when capture is cancelled."
+  (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
+         (before-finalize
+          (lambda ()
+            ;; If this is a source header where the attachments will
+            ;; live, we need to set the DIR property, otherwise for
+            ;; some reason org-attach on children doesn't detect that
+            ;; there is a parent attachment header, even with a non-nil
+            ;; `org-attach-use-inheritance'.
+            (when (eq type 'source)
+              (org-entry-put
+               nil "DIR"
+               (abbreviate-file-name (org-attach-dir-get-create))))
+            
+            ;; Attach the file. We always use 'mv because we are
+            ;; importing the file from the tmp dir.
+            (org-attach-attach tmp-file-path nil 'mv)))
+         (after-finalize
+          (lambda ()
+            ;; Deal with success and aborted capture. This can be detected in
+            ;; after-finalize hook with the `org-note-abort' flag set to t in
+            ;; `org-capture-kill'.
+            (if org-note-abort
+                (when on-abort
+                  (funcall on-abort))
+              (when on-success
+                (funcall on-success))))))
+    ;; (cl-letf (((symbol-value 'org-capture-templates)
+    (let ((org-capture-templates
+           `(("i" "Import"
+              entry ,target
+              ,(format "* %s [#5] %s %s" state title "%?")
+              :hook (lambda ()
+                      ;; Regardless of type, every headline will have an id.
+                      (org-entry-put nil "ID" ,org-id)
+
+                      ;; Scheduling. We do not add a schedule for cards, as that
+                      ;; info is parsed with
+                      ;; `org-ilm--srs-earliest-due-timestamp'.
+                      (unless (eq ',type 'card)
+                        ;; Set initial schedule data based on priortiy
+                        (org-ilm--set-schedule-from-priority)
+
+                        ;; Add advice around priority change to automatically
+                        ;; update schedule, but remove advice as soon as capture
+                        ;; is finished.
+                        (advice-add 'org-priority
+                                    :around #'org-ilm--update-from-priority-change)
+                        (add-hook 'kill-buffer-hook
+                                  (lambda ()
+                                    (advice-remove 'org-priority
+                                                   #'org-ilm--update-from-priority-change))
+                                  nil t))
+
+                      ;; For cards, need to transclude the contents in order for
+                      ;; org-srs to detect the clozes.
+                      ;; TODO `org-transclusion-add' super slow!!
+                      (when (eq ',type 'card)
+                        ;; TODO this can be a nice macro
+                        ;; `org-ilm-with-attachment-transcluded'
+                        (save-excursion
+                          (org-ilm--transclusion-goto ,tmp-file-path 'create)
+                          (org-transclusion-add)
+                          (org-srs-item-new 'cloze)
+                          (org-ilm--transclusion-goto ,tmp-file-path 'delete))))
+              :before-finalize ,before-finalize
+              :after-finalize ,after-finalize))))
+      (org-capture nil "i"))))
+
+;;;; Org source
+;; Org mode attachments
+
+(defun org-ilm-org-extract ()
+  "Extract text in region.
+
+Will become an attachment Org file that is the child heading of current entry."
+  (interactive)
+  (unless (use-region-p) (user-error "No region active."))
+  (let* ((file-buf (current-buffer))
+         (file-path buffer-file-name)
+         (file-name (file-name-sans-extension
+                     (file-name-nondirectory
+                      file-path)))
+         (attach-org-id (car (org-ilm--attachment-data)))
+         (attach-org-id-marker (org-id-find attach-org-id t))
+         (file-org-id file-name)
+         (file-org-id-marker (org-id-find file-org-id t)))
+    (unless attach-org-id-marker
+      (error "Current file is not an attachment, or failed to parse org ID."))
+    (unless file-org-id-marker
+      (error "Current file name not org ID, or failed to find it."))
+    
+    (let* ((region-begin (region-beginning))
+           (region-end (region-end))
+           (region-text (org-ilm--buffer-text-clean region-begin region-end))
+           (snippet (org-ilm--generate-text-snippet region-text))
+           (extract-org-id (org-id-new))
+           (extract-tmp-path (expand-file-name
+                              (format "%s.org" extract-org-id)
+                              temporary-file-directory)))
+
+      ;; Save region content into tmp file and move it as attachment to main
+      ;; heading.
+      (write-region region-text nil extract-tmp-path)
+      (org-ilm--capture
+       'extract
+       `(id ,file-org-id)
+       extract-org-id
+       extract-tmp-path
+       snippet
+       (lambda ()
+         ;; Wrap region with targets.
+         (with-current-buffer file-buf
+           (save-excursion
+             (let* ((is-begin-line (or (= region-begin 0)
+                                       (eq (char-before region-begin) ?\n)))
+                    (target-template (format "<<extract:%s:%s>>" "%s" extract-org-id))
+                    (target-begin (concat
+                                   (format target-template "begin")
+                                   ;; Region starts at beginning of line: insert
+                                   ;; on new line above
+                                   (when is-begin-line "\n")))
+                    (target-end (format target-template "end")))
+               ;; Insert target before region
+               (goto-char region-begin)
+               (insert target-begin)
+
+               ;; Insert target after region, adjusting for start target length
+               (goto-char (+ region-end (length target-begin)))
+               (insert target-end)))
+           (save-buffer)
+           (org-ilm-recreate-overlays)))))))
+
+
+;;;; PDF source
+;; PDF tools
+
+(defun org-ilm-pdf-extract ()
+  "Extract PDF pages, sections, region, and text."
+  (interactive)
+  (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))
+  
+  )
+
+
+;; PDF range. One of:
+;; - Page range:
+;;   (start . end)
+;; - Area
+;;   (page . (left top right bottom))
+;; - Range with area
+;;   ((start . area) . (end . area))
+;;   ((start . area) . end)
+;;   (start . (end . area))
+(defun org-ilm--pdf-range-to-string (begin end)
+  ""
+  (format "(%s %s)"
+          (prin1-to-string begin)
+          (prin1-to-string end)))
+
+(defun org-ilm--pdf-range-from-string (string)
+  ""
+  (let* ((begin-data (read-from-string string))
+         (begin (car begin-data)))
+    (if (= (length string) (cdr begin-data))
+        begin
+      (cons begin (car (read-from-string string (cdr begin-data)))))))
+
+(defun org-ilm-pdf-outline-split ()
+  "Turn PDF outline into a child headings."
+  (interactive)
+  (let ((location (org-ilm--where-am-i))
+        org-id attachment collection headline org-outline)
+    (cond
+     ((eq (car location) 'attachment)
+      (setq org-id (nth 0 (cdr location))
+            collection (nth 1 (cdr location))))
+     ((eq (car location) 'collection)
+      (setq org-id (org-id-get)
+            collection (cdr location)))
+     (t (error "Not in attachment or on collection element.")))
+    (setq attachment (concat org-id ".pdf"))
+    (unless (file-exists-p attachment)
+      (error "PDF file not found (%s)" attachment))
+    (setq headline (org-ilm--org-headline-element-from-id org-id))
+    (unless headline
+      (error "Collection element not found"))
+
+    (with-current-buffer (find-file-noselect attachment)
+      (let ((headline-level (org-element-property :level headline))
+            (outline (pdf-info-outline))
+            (num-pages (pdf-info-number-of-pages)))
+        (unless outline (error "No outline found"))
+        (setq org-outline
+              (with-temp-buffer
+                (dotimes (i (length outline))
+                  (let* ((current-item (nth i outline))
+                         (title (alist-get 'title current-item))
+                         (page (alist-get 'page current-item))
+                         (top (alist-get 'top current-item))
+                         (depth (alist-get 'depth current-item))
+                         (level (+ depth headline-level))
+                         (begin (list page 0 top 1 1))
+                         next-item end
+
+                     
+                         (interval (org-ilm--schedule-interval-from-priority 5))
+                         (schedule (ts-adjust 'day interval (ts-now)))
+                         (schedule-str (org-format-time-string
+                                        (org-time-stamp-format)
+                                        (ts-unix schedule))))
+
+                    ;; Find the next item at the same or a shallower depth
+                    (dolist (j (number-sequence (1+ i) (- (length outline) 1)))
+                      (let ((potential-next (nth j outline)))
+                        (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
+                          (setq next-item potential-next))))
+                    (unless next-item (setq next-item (nth (1+ i) outline)))
+
+                    (setq end
+                          (if next-item
+                              (list (alist-get 'page next-item) 0 0 1 (alist-get 'top next-item))
+                            (list (or num-pages page) 0 0 1 1)))
+                    
+                    (insert (make-string level ?*) " INCR " title "\n")
+                    (insert "SCHEDULED: " schedule-str "\n")
+                    (insert ":PROPERTIES:\n")
+                    (insert (format ":ID: %s\n" (org-id-new)))
+                    (insert (format ":PDF_RANGE: %s\n"
+                                    (org-ilm--pdf-range-to-string begin end)))
+                    (insert ":END:\n")))
+                  (buffer-string)))))
+
+    (let ((org-capture-templates
+           `(("c" "Capture" entry (id ,org-id) ,org-outline))))
+      (org-capture nil "c"))))
+    
+    
+
+;;;; Attachments
 (defun org-ilm-infer-id-from-attachment-path (path)
   "Attempt parsing the org-id from the attachment path, return (id . location)."
   (when path
@@ -649,7 +770,7 @@ If `HEADLINE' is passed, read it as org-property."
     (when (or (not if-exists) (file-exists-p path))
       path)))
 
-;;;;; Transclusion
+;;;; Transclusion
 
 (defun org-ilm--transclusion-goto (file-path &optional action)
   ""
@@ -695,7 +816,7 @@ If `HEADLINE' is passed, read it as org-property."
     (org-transclusion-add)))
 
 
-;;;;; Targets
+;;;; Targets
 
 (defun org-ilm--target-parse-string (string &optional with-brackets)
   "Parse and return parts of target string as specified in `org-ilm-target-value-regexp'."
@@ -766,7 +887,7 @@ If `HEADLINE' is passed, read it as org-property."
     
 
 
-;;;;; Overlays
+;;;; Overlays
 
 (defun org-ilm--ov-block-edit (ov after beg end &optional len)
   (unless (or after org-ilm--targets-editable)
@@ -846,7 +967,7 @@ If `HEADLINE' is passed, read it as org-property."
         (find-file attachment))
     id))
 
-;;;;; Query
+;;;; Query
 
 ;; Optimizations: https://github.com/alphapapa/org-ql/issues/88#issuecomment-570473621
 ;; + If any data is needed in action and query, use org-ql--value-at
@@ -928,9 +1049,9 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     (and (todo ,org-ilm-card-state) (org-ilm--ql-card-due))))
 
 
-;;;;; Queue
+;;;; Queue
 
-;;;;;; Building
+;;;;; Building
 
 ;; TODO Finish after rewriting subject cache
 (defun org-ilm-queue-add-dwim (arg)
@@ -961,7 +1082,7 @@ If point on subject, add all headlines of subject."
            :collection collection
            :query query))))
 
-;;;;;; Commands       
+;;;;; Commands       
 
 (defun org-ilm-queue (reset)
   "View queue in Agenda-like buffer."
@@ -972,7 +1093,7 @@ If point on subject, add all headlines of subject."
     (org-ilm--queue-display)))
 
 
-;;;;;; Within queue 
+;;;;; Within queue 
 (defvar org-ilm-queue-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "n")
@@ -1201,7 +1322,7 @@ A lot of formatting code from org-ql."
                           (substring title 0 (min (length title) 5))))
                       subjects)))
                 (org-ilm--vtable-format-marked
-                 (org-add-props (s-join ", " names) nil 'face 'org-tag)
+                 (org-add-props (s-join "," names) nil 'face 'org-tag)
                  marked))
                 "")))))
    :objects-function
@@ -1244,7 +1365,7 @@ A lot of formatting code from org-ql."
     (switch-to-buffer buf)))
 
 
-;;;;; Import
+;;;; Import
 
 (defun org-ilm--select-import-method (&optional force-ask)
   "Ask user to choose whether to copy or move file when importing.
@@ -1279,7 +1400,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
     (org-ilm--capture 'source `(file ,(cdr collection)) org-id file-tmp-path)))
 
-;;;;; Stats
+;;;; Stats
 ;; Functions to work with e.g. the beta distribution.
 ;; Random generation code from Claude.
 
@@ -1387,7 +1508,7 @@ If SEED is provided, sets the random seed first for reproducible results."
         (list alpha beta)))))
 
 
-;;;;; Priority
+;;;; Priority
 
 (defun org-ilm--validated-priority (priority)
   "Returns numeric value of priority if valid value, else nil."
@@ -1480,7 +1601,7 @@ factor that increases with the number of reviews."
               (sample (org-ilm--sample-priority beta seed)))
     sample))
 
-;;;;;; Subject priorities
+;;;;; Subject priorities
 
 ;; I don't know if we want to add anything to this but we can always just extend
 ;; the value list.
@@ -1540,7 +1661,11 @@ Headline can be a subject or not."
             priority-data)))))
 
 
-;;;;; Scheduling
+;;;; Scheduling
+
+(defun org-ilm--days-from-now (days)
+  "Return ts object representing DAYS from now."
+  (ts-adjust 'day -1 (ts-now)))
 
 (defun org-ilm--schedule-interval-from-priority (priority)
   "Calculate a schedule interval from priority value."
@@ -1565,7 +1690,7 @@ Headline can be a subject or not."
     (let ((new-priority (org-ilm--get-priority)))
       (org-ilm--set-schedule-from-priority))))
 
-;;;;; SRS
+;;;; SRS
 ;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
 ;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
 ;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
@@ -1669,7 +1794,7 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
   (org-srs-review-start))
 
 
-;;;;; Subjects
+;;;; Subjects
 
 ;; TODO Probably still incredibly inefficient as we have to go up the hierarchy
 ;; everytime. A better option might be to use org-ql to find all headlines with
