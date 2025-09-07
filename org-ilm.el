@@ -232,12 +232,14 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defun org-ilm-extract-dwim ()
   "Extract region depending on file."
   (interactive)
-  (cond
-   ((eq major-mode 'org-mode)
-    (org-ilm-org-extract))
-   ((or (eq major-mode 'pdf-view-mode)
-        (eq major-mode 'pdf-virtual-view-mode))
-    (org-ilm-pdf-extract))))
+  (if (eq 'attachment (car (org-ilm--where-am-i)))
+    (cond
+     ((eq major-mode 'org-mode)
+      (org-ilm-org-extract))
+     ((or (eq major-mode 'pdf-view-mode)
+          (eq major-mode 'pdf-virtual-view-mode))
+      (org-ilm-pdf-extract)))
+    (message "Extracts can only be made from within an attachment")))
   
 ;;;; Utilities
 
@@ -431,6 +433,12 @@ With non-nil ASSERT, assert headline must be found, else return nil."
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
+(defun org-ilm--interval-to-schedule-string (interval)
+  "Turn INTERVAL (days) into a date string used in in org headline SCHEDULED."
+  (org-format-time-string
+   (org-time-stamp-format)
+   (ts-unix (ts-adjust 'day interval (ts-now)))))
+
 ;;;; Elements
 
 (defun org-ilm--select-collection ()
@@ -569,7 +577,7 @@ The callback ON-ABORT is called when capture is cancelled."
               :after-finalize ,after-finalize))))
       (org-capture nil "i"))))
 
-;;;; Org source
+;;;; Org attachment
 ;; Org mode attachments
 
 (defun org-ilm-org-extract ()
@@ -634,14 +642,186 @@ Will become an attachment Org file that is the child heading of current entry."
            (org-ilm-recreate-overlays)))))))
 
 
-;;;; PDF
+;;;; PDF attachment
 ;; PDF tools
+
+;;;;; Extract
 
 (defun org-ilm-pdf-extract ()
   "Extract PDF pages, sections, region, and text."
   (interactive)
-  (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))  
-  )
+  (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))
+  (if (pdf-view-active-region-p)
+    (let ((region (pdf-view-active-region)))
+      (org-ilm--debug "Extract region:" region))
+    (let* ((options '(("Page" . page)
+                      ("Outline" . outline)
+                      ("Region" . region)
+                      ("Section" . section)))
+           (choice (cdr (assoc (completing-read "Extract: " options nil t) options))))
+      (org-ilm--debug "Extract:" choice)
+      (pcase choice
+        ('page (org-ilm-pdf-extract-page))
+        ('outline (org-ilm-pdf-extract-outline))
+        ('region)
+        ('section (org-ilm-pdf-extract-section))
+        )
+      )))
+
+(defun org-ilm--pdf-extract-prepare ()
+  "Groundwork to do an extract."
+  (let ((location (org-ilm--where-am-i))
+        org-id attachment collection headline)
+
+    ;; Handle both when current buffer is PDF or headine in
+    ;; collection. Furthermore we need the headline level to indent the outline
+    ;; headlines appropriately.
+    (cond
+     ((eq (car location) 'attachment)
+      (setq org-id (nth 0 (cdr location))
+            collection (nth 1 (cdr location))))
+     ((eq (car location) 'collection)
+      (setq org-id (org-id-get)
+            collection (cdr location)))
+     (t (error "Not in attachment or on collection element.")))
+    (setq attachment (concat org-id ".pdf"))
+    (unless (file-exists-p attachment)
+      (error "PDF file not found (%s)" attachment))
+    (setq headline (org-ilm--org-headline-element-from-id org-id))
+    (unless headline
+      (error "Collection element not found"))
+    (list org-id attachment collection headline)))
+
+;; TODO All these extract functions can be simplified a LOT
+;; Lots of code duplication but I'm tired..
+
+(defun org-ilm-pdf-extract-outline ()
+  "Turn PDF outline items into a extracts."
+  (interactive)
+  (cl-destructuring-bind (org-id attachment collection headline)
+      (org-ilm--pdf-extract-prepare)
+
+    (with-current-buffer (find-file-noselect attachment)
+      (let ((outline (pdf-info-outline))
+            (num-pages (pdf-info-number-of-pages))
+            (parent-level (org-element-property :level headline))
+            org-outline)
+        (unless outline (error "No outline found"))
+        (with-temp-buffer
+          (dotimes (i (length outline))
+            (org-ilm--pdf-insert-outline-node-as-extract
+             outline num-pages i parent-level))
+          (setq org-outline (buffer-string)))
+
+        (let* ((org-capture-templates
+                `(("c" "Capture" entry (id ,org-id) ,org-outline))))
+          (org-capture nil "c"))))))
+
+(defun org-ilm-pdf-extract-section ()
+  "Extract current section of outline."
+  (interactive)
+    (cl-destructuring-bind (org-id attachment collection headline)
+        (org-ilm--pdf-extract-prepare)
+      (let ((outline (pdf-info-outline))
+            (num-pages (pdf-info-number-of-pages))
+            (parent-level (org-element-property :level headline))
+            (current-page (pdf-view-current-page))
+            outline-index org-heading-str)
+        (unless outline (error "No outline found"))
+
+        ;; Find the outline section of the current page. If page overlaps
+        ;; multiple sections, prompt user to select.
+        (let ((within-indices
+               (seq-filter (lambda (i)
+                             (let ((page-start (alist-get 'page (nth i outline)))
+                                   (page-end (if (= i (1- (length outline)))
+                                                 num-pages
+                                               (alist-get 'page (nth (1+ i) outline)))))
+                               (and (>= current-page page-start)
+                                    (<= current-page page-end))))
+                           (number-sequence 0 (1- (length outline))))))
+          (cond
+           ((= 1 (length within-indices))
+            (setq outline-index (car within-indices)))
+           ((> (length within-indices) 1)
+            (let* ((choices (mapcar (lambda (i)
+                                      (cons (alist-get 'title (nth i outline)) i))
+                                    within-indices))
+                   (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
+              (setq outline-index choice)))
+           (t (error "Current page not within (known) section"))))
+        
+        (with-temp-buffer
+          (org-ilm--pdf-insert-outline-node-as-extract
+           outline num-pages outline-index parent-level)
+          (setq org-heading-str (buffer-string)))
+
+        (let* ((org-capture-templates
+                `(("c" "Capture" entry (id ,org-id) ,org-heading-str))))
+          (org-capture nil "c")))))
+
+(defun org-ilm-pdf-extract-page ()
+  "Turn PDF page into an extract."
+  (interactive)
+  (cl-destructuring-bind (org-id attachment collection headline)
+      (org-ilm--pdf-extract-prepare)
+
+    (with-current-buffer (find-file-noselect attachment)
+      (let* ((current-page (pdf-view-current-page))
+             (parent-level (org-element-property :level headline))
+             (interval (org-ilm--schedule-interval-from-priority 5))
+             (schedule-str (org-ilm--interval-to-schedule-string interval))
+             org-headline)
+        (with-temp-buffer
+          (org-ilm--pdf-insert-section-as-extract
+           (1+ parent-level) (format "Page %s%s" current-page "%?")
+           schedule-str current-page)
+          (setq org-headline (buffer-string)))
+
+        (let* ((org-capture-templates
+                `(("c" "Capture" entry (id ,org-id) ,org-headline))))
+          (org-capture nil "c"))))))
+
+(defun org-ilm--pdf-insert-outline-node-as-extract (outline num-pages index level-offset)
+  "Turns a PDF outline node into an ilm extract-formatted Org headline."
+  (let* ((current-item (nth index outline))
+         (title (alist-get 'title current-item))
+         (page (alist-get 'page current-item))
+         (top (alist-get 'top current-item))
+         (depth (alist-get 'depth current-item))
+         (level (+ depth level-offset))
+         (begin (list page 0 top 1 1))
+         next-item end
+         
+         (interval (org-ilm--schedule-interval-from-priority 5))
+         (schedule-str (org-ilm--interval-to-schedule-string interval)))
+
+    ;; Find the next item at the same or a shallower depth
+    (dolist (j (number-sequence (1+ index) (- (length outline) 1)))
+      (let ((potential-next (nth j outline)))
+        (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
+          (setq next-item potential-next))))
+    (unless next-item (setq next-item (nth (1+ index) outline)))
+
+    (setq end
+          (if next-item
+              (list (alist-get 'page next-item) 0 0 1 (alist-get 'top next-item))
+            (list (or num-pages page) 0 0 1 1)))
+
+    (org-ilm--pdf-insert-section-as-extract level title schedule-str begin end)))
+
+(defun org-ilm--pdf-insert-section-as-extract (level title schedule-str begin &optional end org-id)
+  "If END nil, BEGIN is assumed to be just a page number."
+  (insert (make-string level ?*) " INCR " title "\n")
+  (insert "SCHEDULED: " schedule-str "\n")
+  (insert ":PROPERTIES:\n")
+  (insert (format ":ID: %s\n" (org-id-new)))
+  (insert (format ":PDF_RANGE: %s\n"
+                  (if end
+                      (org-ilm--pdf-range-to-string begin end)
+                    begin)))
+  (insert ":END:\n"))
+
 
 ;;;;; Virtual
 ;; PDF range. One of:
@@ -761,76 +941,16 @@ Will become an attachment Org file that is the child heading of current entry."
     (pop-to-buffer (current-buffer))
     (current-buffer)))
 
-(defun org-ilm-pdf-outline-split ()
-  "Turn PDF outline into a child headings."
-  (interactive)
-  (let ((location (org-ilm--where-am-i))
-        org-id attachment collection headline org-outline)
-    (cond
-     ((eq (car location) 'attachment)
-      (setq org-id (nth 0 (cdr location))
-            collection (nth 1 (cdr location))))
-     ((eq (car location) 'collection)
-      (setq org-id (org-id-get)
-            collection (cdr location)))
-     (t (error "Not in attachment or on collection element.")))
-    (setq attachment (concat org-id ".pdf"))
-    (unless (file-exists-p attachment)
-      (error "PDF file not found (%s)" attachment))
-    (setq headline (org-ilm--org-headline-element-from-id org-id))
-    (unless headline
-      (error "Collection element not found"))
-
-    (with-current-buffer (find-file-noselect attachment)
-      (let ((headline-level (org-element-property :level headline))
-            (outline (pdf-info-outline))
-            (num-pages (pdf-info-number-of-pages)))
-        (unless outline (error "No outline found"))
-        (setq org-outline
-              (with-temp-buffer
-                (dotimes (i (length outline))
-                  (let* ((current-item (nth i outline))
-                         (title (alist-get 'title current-item))
-                         (page (alist-get 'page current-item))
-                         (top (alist-get 'top current-item))
-                         (depth (alist-get 'depth current-item))
-                         (level (+ depth headline-level))
-                         (begin (list page 0 top 1 1))
-                         next-item end
-
-                     
-                         (interval (org-ilm--schedule-interval-from-priority 5))
-                         (schedule (ts-adjust 'day interval (ts-now)))
-                         (schedule-str (org-format-time-string
-                                        (org-time-stamp-format)
-                                        (ts-unix schedule))))
-
-                    ;; Find the next item at the same or a shallower depth
-                    (dolist (j (number-sequence (1+ i) (- (length outline) 1)))
-                      (let ((potential-next (nth j outline)))
-                        (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
-                          (setq next-item potential-next))))
-                    (unless next-item (setq next-item (nth (1+ i) outline)))
-
-                    (setq end
-                          (if next-item
-                              (list (alist-get 'page next-item) 0 0 1 (alist-get 'top next-item))
-                            (list (or num-pages page) 0 0 1 1)))
-                    
-                    (insert (make-string level ?*) " INCR " title "\n")
-                    (insert "SCHEDULED: " schedule-str "\n")
-                    (insert ":PROPERTIES:\n")
-                    (insert (format ":ID: %s\n" (org-id-new)))
-                    (insert (format ":PDF_RANGE: %s\n"
-                                    (org-ilm--pdf-range-to-string begin end)))
-                    (insert ":END:\n")))
-                  (buffer-string)))))
-
-    (let ((org-capture-templates
-           `(("c" "Capture" entry (id ,org-id) ,org-outline))))
-      (org-capture nil "c"))))
-    
-    
+(defun org-ilm--pdf-open-page (pdf-path page-number buffer-name)
+  "Open a virtual pdf buffer with a single page."
+  (with-current-buffer (generate-new-buffer buffer-name)
+    (insert ";; %VPDF 1.0\n\n")
+    (org-ilm--debug nil page-number)
+    (insert "((\"" pdf-path "\" " (number-to-string page-number) " ))\n")
+    (pdf-virtual-view-mode)
+    (pop-to-buffer (current-buffer))
+    (current-buffer)))
+        
 
 ;;;; Attachments
 (defun org-ilm-infer-id-from-attachment-path (path)
@@ -845,7 +965,7 @@ Will become an attachment Org file that is the child heading of current entry."
       (when location (cons potential-id location)))))
 
 (defun org-ilm--attachment-data ()
-  "Returns (org-id collection-path) if current buffer is collection attachment file."
+  "Returns (org-id collection) if current buffer is collection attachment file."
   (when-let ((location (org-ilm--where-am-i)))
     (when (eq 'attachment (car location))
       (cdr location))))
@@ -880,11 +1000,16 @@ Will become an attachment Org file that is the child heading of current entry."
       (progn
         (run-hook-with-args 'org-attach-open-hook path)
         (org-open-file path 'in-emacs))
-    (if-let ((pdf-range (org-entry-get nil "PDF_RANGE"))
-             (attachment (org-ilm--attachment-find-ancestor "pdf")))
-        (org-ilm--pdf-open-ranges
-         (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
-         (concat (org-id-get) ".pdf"))
+    (if-let* ((pdf-range (org-entry-get nil "PDF_RANGE"))
+              ;; Returns 0 if not a number
+              (pdf-page-maybe (string-to-number pdf-range))
+              (attachment (org-ilm--attachment-find-ancestor "pdf"))
+              (buffer-name (concat (org-id-get) ".pdf")))
+        (if (not (= pdf-page-maybe 0))
+            (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
+          (org-ilm--pdf-open-ranges
+           (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
+           buffer-name))
       (error "Attachment not found"))))
 
 
