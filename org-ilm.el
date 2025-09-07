@@ -20,11 +20,13 @@
 (require 'org-attach)
 (require 'org-element)
 (require 'org-ql)
+(require 'org-ql-view)
 (require 'org-srs)
 (require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
 (require 'ts)
+(require 'vtable)
 
 ;;;; Customization
 (defgroup org-ilm nil
