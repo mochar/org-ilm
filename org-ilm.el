@@ -343,20 +343,40 @@ The queries are stored in `org-ilm-queries-alist'."
   (save-excursion
     (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
 
+(defun org-ilm--collection-file (&optional file collection)
+  "Return collection of which file belongs to.
+A collection symbol COLLECTION can be passed to test if file belongs to
+ that collection."
+  (when-let ((file (or file buffer-file-name))
+             (path (expand-file-name file))
+             (test (lambda (f place)
+                     (if (f-directory-p place)
+                         (file-in-directory-p f place)
+                       (file-equal-p f place)))))
+    (if collection
+        (when-let ((col (pcase (type-of collection)
+                          ('symbol
+                           (assoc collection org-ilm-collections-alist))
+                          ('string
+                           (seq-find
+                            (lambda (c) (file-equal-p collection (cdr c)))
+                            org-ilm-collections-alist))
+                          ('cons collection))))
+          (when (funcall test path (cdr col)) col))
+      (seq-find (lambda (c) (funcall test path (cdr c))) org-ilm-collections-alist))))
+
 (defun org-ilm--where-am-i ()
-  "returns one of ('collection collection), ('attachment (org-id collection)), nil."
-  (let ((collections (mapcar
-                      (lambda (c) (expand-file-name (cdr c)))
-                      org-ilm-collections-alist)))
-    (if (member buffer-file-name collections)
-        (cons 'collection buffer-file-name)
-      (when-let* ((_ buffer-file-name)
-                  (file-title (file-name-sans-extension
-                         (file-name-nondirectory buffer-file-name)))
-                  (_ (org-ilm--org-id-p file-title))
-                  (src-file (car (org-id-find file-title))))
-        (when (member (expand-file-name src-file) collections)
-          (cons 'attachment (list file-title src-file)))))))
+  "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
+  (if-let ((collection (org-ilm--collection-file buffer-file-name)))
+      (cons 'collection collection)
+    (when-let* ((file-title (file-name-sans-extension
+                             (file-name-nondirectory
+                              ;; Allow for non-file buffer: pdf virtual view
+                              (or buffer-file-name (buffer-name)))))
+                (_ (org-ilm--org-id-p file-title))
+                (src-file (car (org-id-find file-title))))
+      (when-let (collection (org-ilm--collection-file (expand-file-name src-file)))
+        (list 'attachment file-title collection)))))
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
   "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
@@ -651,35 +671,41 @@ Will become an attachment Org file that is the child heading of current entry."
 
 
 ;;;; PDF attachment
-;; PDF tools
+
+;; TODO keymap for pdf. Prefix A(ttachment) or I(lm)
+;; I default bound to popup info buffer but i dont find that useful
+;; But A better because in image mode, A also unused.
+
+;; Nice functions/macros:
+;; pdf-util-track-mouse-dragging
+;; pdf-view-display-region
 
 ;;;;; Extract
+
+;; TODO with C-u, extract the text contents to org file
+;; TODO C-u C-u, extract image
 
 (defun org-ilm-pdf-extract ()
   "Extract PDF pages, sections, region, and text."
   (interactive)
   (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))
   (if (pdf-view-active-region-p)
-    (let ((region (pdf-view-active-region)))
-      (org-ilm--debug "Extract region:" region))
+      (org-ilm-pdf-region-extract)
     (let* ((options '(("Page" . page)
                       ("Outline" . outline)
                       ("Region" . region)
                       ("Section" . section)))
            (choice (cdr (assoc (completing-read "Extract: " options nil t) options))))
-      (org-ilm--debug "Extract:" choice)
       (pcase choice
-        ('page (org-ilm-pdf-extract-page))
-        ('outline (org-ilm-pdf-extract-outline))
-        ('region)
-        ('section (org-ilm-pdf-extract-section))
-        )
-      )))
+        ('page (org-ilm-pdf-page-extract))
+        ('outline (org-ilm-pdf-outline-extract))
+        ('region (org-ilm-pdf-region-extract))
+        ('section (org-ilm-pdf-section-extract))))))
 
 (defun org-ilm--pdf-extract-prepare ()
   "Groundwork to do an extract."
   (let ((location (org-ilm--where-am-i))
-        org-id attachment collection headline)
+        org-id attachment buffer collection headline)
 
     ;; Handle both when current buffer is PDF or headine in
     ;; collection. Furthermore we need the headline level to indent the outline
@@ -693,46 +719,101 @@ Will become an attachment Org file that is the child heading of current entry."
             collection (cdr location)))
      (t (error "Not in attachment or on collection element.")))
     (setq attachment (concat org-id ".pdf"))
-    (unless (file-exists-p attachment)
-      (error "PDF file not found (%s)" attachment))
+    (if-let ((buf (get-buffer attachment)))
+        (setq buffer buf)
+      (if (file-exists-p attachment)
+          (setq buffer (find-file-noselect attachment))
+        (error "PDF file not found (%s)" attachment)))
     (setq headline (org-ilm--org-headline-element-from-id org-id))
     (unless headline
       (error "Collection element not found"))
-    (list org-id attachment collection headline)))
+    (list org-id attachment buffer collection headline
+          (org-element-property :level headline)
+          (org-ilm--interval-to-schedule-string
+           (org-ilm--schedule-interval-from-priority 5)))))
 
-;; TODO All these extract functions can be simplified a LOT
+;; TODO All these extract functions can be simplified a LOT!!!!!!!!!!!!!!
 ;; Lots of code duplication but I'm tired..
 
-(defun org-ilm-pdf-extract-outline ()
-  "Turn PDF outline items into a extracts."
+(defun org-ilm-pdf-page-extract ()
+  "Turn PDF page into an extract."
   (interactive)
-  (cl-destructuring-bind (org-id attachment collection headline)
+  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
-    (with-current-buffer (find-file-noselect attachment)
+    (with-current-buffer buffer
+      (let* ((current-page (pdf-view-current-page))
+             org-headline)
+        (with-temp-buffer
+          (org-ilm--pdf-insert-section-as-extract
+           (1+ level) (format "Page %s%s" current-page "%?")
+           schedule-str current-page)
+          (setq org-headline (buffer-string)))
+
+        (let* ((org-capture-templates
+                `(("c" "Capture" entry (id ,org-id) ,org-headline))))
+          (org-capture nil "c"))))))
+
+
+(defun org-ilm-pdf-region-extract ()
+  "Turn selected PDF region into an extract.
+
+TODO When extracting text, use add-variable-watcher to watch for changes
+in pdf-view-active-region as it has no hooks. it allow buffer local and
+set only (not let)."
+  (interactive)
+  (cl-assert (pdf-view-active-region-p))
+  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+      (org-ilm--pdf-extract-prepare)
+
+    ;; NOTE Orginally used `with-current-buffer' but throws an error on virtual
+    ;; page buffers when calling `pdf-view-current-page' (something to do with
+    ;; the `save-buffer' or `set-buffer' call in `with-current-buffer'). Since
+    ;; it works fine when virtual page buffer is active, just do that.
+    (switch-to-buffer buffer)
+    (let* ((current-page (pdf-view-current-page))
+           ;; Not sure why pdf-tools stores it in a list!!!
+           (region (car (pdf-view-active-region)))
+           org-headline)
+      (with-temp-buffer
+        (org-ilm--pdf-insert-section-as-extract
+         (1+ level) (format "Page %s region %s" current-page "%?")
+         schedule-str current-page region)
+        (setq org-headline (buffer-string)))
+
+      (let* ((org-capture-templates
+              `(("c" "Capture" entry (id ,org-id) ,org-headline))))
+        (org-capture nil "c")))))
+
+(defun org-ilm-pdf-outline-extract ()
+  "Turn PDF outline items into a extracts."
+  (interactive)
+  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+      (org-ilm--pdf-extract-prepare)
+
+    (with-current-buffer buffer
       (let ((outline (pdf-info-outline))
             (num-pages (pdf-info-number-of-pages))
-            (parent-level (org-element-property :level headline))
             org-outline)
         (unless outline (error "No outline found"))
         (with-temp-buffer
           (dotimes (i (length outline))
             (org-ilm--pdf-insert-outline-node-as-extract
-             outline num-pages i parent-level))
+             outline num-pages i level))
           (setq org-outline (buffer-string)))
 
         (let* ((org-capture-templates
                 `(("c" "Capture" entry (id ,org-id) ,org-outline))))
           (org-capture nil "c"))))))
 
-(defun org-ilm-pdf-extract-section ()
+(defun org-ilm-pdf-section-extract ()
   "Extract current section of outline."
   (interactive)
-    (cl-destructuring-bind (org-id attachment collection headline)
-        (org-ilm--pdf-extract-prepare)
+  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+      (org-ilm--pdf-extract-prepare)
+    (with-current-buffer buffer
       (let ((outline (pdf-info-outline))
             (num-pages (pdf-info-number-of-pages))
-            (parent-level (org-element-property :level headline))
             (current-page (pdf-view-current-page))
             outline-index org-heading-str)
         (unless outline (error "No outline found"))
@@ -761,33 +842,11 @@ Will become an attachment Org file that is the child heading of current entry."
         
         (with-temp-buffer
           (org-ilm--pdf-insert-outline-node-as-extract
-           outline num-pages outline-index parent-level)
+           outline num-pages outline-index level)
           (setq org-heading-str (buffer-string)))
 
         (let* ((org-capture-templates
                 `(("c" "Capture" entry (id ,org-id) ,org-heading-str))))
-          (org-capture nil "c")))))
-
-(defun org-ilm-pdf-extract-page ()
-  "Turn PDF page into an extract."
-  (interactive)
-  (cl-destructuring-bind (org-id attachment collection headline)
-      (org-ilm--pdf-extract-prepare)
-
-    (with-current-buffer (find-file-noselect attachment)
-      (let* ((current-page (pdf-view-current-page))
-             (parent-level (org-element-property :level headline))
-             (interval (org-ilm--schedule-interval-from-priority 5))
-             (schedule-str (org-ilm--interval-to-schedule-string interval))
-             org-headline)
-        (with-temp-buffer
-          (org-ilm--pdf-insert-section-as-extract
-           (1+ parent-level) (format "Page %s%s" current-page "%?")
-           schedule-str current-page)
-          (setq org-headline (buffer-string)))
-
-        (let* ((org-capture-templates
-                `(("c" "Capture" entry (id ,org-id) ,org-headline))))
           (org-capture nil "c"))))))
 
 (defun org-ilm--pdf-insert-outline-node-as-extract (outline num-pages index level-offset)
@@ -856,9 +915,13 @@ Will become an attachment Org file that is the child heading of current entry."
       (cons begin (car (read-from-string string (cdr begin-data)))))))
 
 (defun org-ilm--pdf-area-p (area)
-  "Test if  AREA is (page . left top right bottom)."
-  (and (listp area) (integerp (car area))
-       (listp (cdr area)) (= (length (cdr area)) 4)))
+  "Test if  AREA is (page . (left top right bottom)) or ."
+  (and (listp area)
+       (integerp (car area))
+       (listp (cdr area))
+       (or (= 5 (length area))
+           (and (listp (cadr area))
+                (= (length (cadr area)) 4)))))
 
 (defun org-ilm--pdf-parse-spec (spec)
   "Parse SPEC for viewing in virtual PDF buffers."
