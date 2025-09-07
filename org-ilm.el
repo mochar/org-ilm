@@ -168,16 +168,10 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   (when (org-ilm--attachment-data)
     (org-ilm-recreate-overlays)))
 
-(defun org-ilm-open ()
-  "Open element at point."
+(defun org-ilm-open-attachment ()
+  "Open attachment of item at point."
   (interactive)
-  (if-let* ((attach-dir (org-attach-dir))
-            (org-id (org-id-get))
-            (path (expand-file-name (format "%s.org" org-id) attach-dir)))
-      (progn
-        (run-hook-with-args 'org-attach-open-hook path)
-        (org-open-file path 'in-emacs))
-      (error "No attachment directory exist, no Org id at current heading, or no attachment file associated with Org id.")))
+  (org-ilm--attachment-open))
 
 (defun org-ilm-open-highlight ()
   "Open element associated with highlight at point."
@@ -217,7 +211,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   (interactive)
   (let ((location (org-ilm--where-am-i)))
     (pcase (car location)
-     ('collection (org-ilm-open))
+     ('collection (org-ilm-open-attachment))
      ('attachment
       (unless (org-ilm-open-highlight)
         (org-ilm-open-collection)))
@@ -640,17 +634,16 @@ Will become an attachment Org file that is the child heading of current entry."
            (org-ilm-recreate-overlays)))))))
 
 
-;;;; PDF source
+;;;; PDF
 ;; PDF tools
 
 (defun org-ilm-pdf-extract ()
   "Extract PDF pages, sections, region, and text."
   (interactive)
-  (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))
-  
+  (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))  
   )
 
-
+;;;;; Virtual
 ;; PDF range. One of:
 ;; - Page range:
 ;;   (start . end)
@@ -661,18 +654,112 @@ Will become an attachment Org file that is the child heading of current entry."
 ;;   ((start . area) . end)
 ;;   (start . (end . area))
 (defun org-ilm--pdf-range-to-string (begin end)
-  ""
+  "Convert PDF page area from lisp to a string format."
   (format "(%s %s)"
           (prin1-to-string begin)
           (prin1-to-string end)))
 
 (defun org-ilm--pdf-range-from-string (string)
-  ""
+  "Read STRING that represent a PDF page area to lisp."
   (let* ((begin-data (read-from-string string))
          (begin (car begin-data)))
     (if (= (length string) (cdr begin-data))
         begin
       (cons begin (car (read-from-string string (cdr begin-data)))))))
+
+(defun org-ilm--pdf-area-p (area)
+  "Test if  AREA is (page . left top right bottom)."
+  (and (listp area) (integerp (car area))
+       (listp (cdr area)) (= (length (cdr area)) 4)))
+
+(defun org-ilm--pdf-parse-spec (spec)
+  "Parse SPEC for viewing in virtual PDF buffers."
+  (org-ilm--debug "Spec:" spec)
+  (let ((file (car spec))
+        (first (cadr spec))
+        (second (caddr spec))
+        type begin-page begin-area end-page end-area)
+    (cond
+     ;; Page range
+     ;; (begin . end)
+     ((and (integerp first) (integerp second))
+      (setq type 'range-pages
+            begin-page first
+            end-page second))
+     ;; Area
+     ;; (page . (left top right bottom))
+     ((org-ilm--pdf-area-p (cdr spec))
+      (setq type 'area-page
+            begin-page first
+            begin-area second))
+     ;; Range with area
+     ;; (start . (end . area))
+     ((and (integerp first) (org-ilm--pdf-area-p second))
+      (setq type 'range-area-pages
+            begin-page first
+            end-page (car second)
+            end-area (cdr second)))
+     ;; Range with area
+     ;; ((start . area) . end)
+     ((and (integerp second) (org-ilm--pdf-area-p first))
+      (setq type 'range-area-pages
+            begin-page (car first)
+            begin-area (cdr first)
+            end-page second))
+     ;; Range with area
+     ;; ((start . area) . (end . area))
+     ((and (org-ilm--pdf-area-p first) (org-ilm--pdf-area-p second))
+      (setq type 'range-area-pages
+            begin-page (car first)
+            begin-area (cdr first)
+            end-page (car second)
+            end-area (cdr second)))
+     (t (error "Spec invalid")))
+
+    (list :file file
+          :type type
+          :begin-page begin-page
+          :begin-area begin-area
+          :end-page end-page
+          :end-area end-area)))
+
+(defun org-ilm--pdf-open-ranges (specs buffer-name)
+  "Open a virtual pdf buffer wit the given SPECS."
+  (with-current-buffer (generate-new-buffer buffer-name)
+    (insert ";; %VPDF 1.0\n\n")  
+    (insert "(")
+    (dolist (spec specs)
+      (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area)
+          (org-ilm--pdf-parse-spec spec)
+        (insert "(\"" file "\"")
+        (pcase type
+          ('range-pages
+           (insert (format "(%s . %s)" begin-page end-page)))
+          ('area-page
+           (insert (format "(%s . %s)" begin-page begin-area)))
+          ('range-area-pages
+           ;; Begin
+           (if begin-area
+               (insert (format " (%s . %s) " begin-page begin-area))
+             (insert (format " %s " begin-page)))
+           ;; Pages in between begin and end
+           (let ((distance (- end-page begin-page)))
+             (cond
+              ((> 1)
+               (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
+              ((= 1)
+               (insert (format " %s " (1+ begin-page))))))
+           ;; End
+           (if end-area
+               (insert (format " (%s . %s) " end-page end-area))
+             (insert (format " %s " end-page))))))
+      (insert ")"))
+    (insert ")\n")
+      
+    ;; (pdf-virtual-edit-mode)
+    (pdf-virtual-view-mode)
+    (pop-to-buffer (current-buffer))
+    (current-buffer)))
 
 (defun org-ilm-pdf-outline-split ()
   "Turn PDF outline into a child headings."
@@ -769,6 +856,37 @@ Will become an attachment Org file that is the child heading of current entry."
               (path (org-attach-expand (format "%s.org" org-id))))
     (when (or (not if-exists) (file-exists-p path))
       path)))
+
+(defun org-ilm--attachment-find (&optional type org-id)
+  ""
+  (when-let* ((attach-dir (org-attach-dir))
+              (org-id (or org-id (org-id-get)))
+              (type (or type (org-entry-get nil "ILM_TYPE" 'inherit) "org"))
+              (path (expand-file-name (concat org-id "." type) attach-dir)))
+      (when (file-exists-p path)
+        path)))
+
+(defun org-ilm--attachment-find-ancestor (type &optional headline)
+  ""
+  (let ((crumbs (cdr (org-mem-entry-crumbs (org-node-at-point))))
+        attachment)
+    (while (and crumbs (not attachment))
+      (setq attachment (org-ilm--attachment-find type (nth 4 (pop crumbs)))))
+    attachment))
+
+(defun org-ilm--attachment-open ()
+  ""
+  (if-let* ((path (org-ilm--attachment-find)))
+      (progn
+        (run-hook-with-args 'org-attach-open-hook path)
+        (org-open-file path 'in-emacs))
+    (if-let ((pdf-range (org-entry-get nil "PDF_RANGE"))
+             (attachment (org-ilm--attachment-find-ancestor "pdf")))
+        (org-ilm--pdf-open-ranges
+         (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
+         (concat (org-id-get) ".pdf"))
+      (error "Attachment not found"))))
+
 
 ;;;; Transclusion
 
@@ -1137,7 +1255,7 @@ If point on subject, add all headlines of subject."
   (let ((loc (org-id-find (plist-get object :id) 'marker)))
     (with-current-buffer (marker-buffer loc)
       (goto-char loc)
-      (org-ilm-open))))
+      (org-ilm-open-attachment))))
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
