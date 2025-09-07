@@ -113,7 +113,15 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defvar org-ilm-queue nil
   "List of org headings that form the queue.")
 
-(defvar org-ilm-map (make-sparse-keymap)
+(defvar org-ilm-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "o") #'org-ilm-open-dwim)
+    (define-key map (kbd "x") #'org-ilm-extract-dwim)
+    (define-key map (kbd "z") #'org-ilm-cloze)
+    (define-key map (kbd "c") #'org-ilm-cloze-toggle-this)
+    (define-key map (kbd "j") #'org-ilm-subject-add)
+    (define-key map (kbd "q q") #'org-ilm-queue)
+    map)
   "Keymap for `org-ilm-global-mode'.")
 
 (defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
