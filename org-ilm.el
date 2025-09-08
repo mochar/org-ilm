@@ -248,7 +248,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
       (org-ilm-org-extract))
      ((or (eq major-mode 'pdf-view-mode)
           (eq major-mode 'pdf-virtual-view-mode))
-      (org-ilm-pdf-extract)))
+      (call-interactively #'org-ilm-pdf-extract)))
     (message "Extracts can only be made from within an attachment")))
   
 ;;;; Utilities
@@ -705,28 +705,44 @@ Will become an attachment Org file that is the child heading of current entry."
 ;; Nice functions/macros:
 ;; pdf-util-track-mouse-dragging
 ;; pdf-view-display-region
+;; pdf-virtual-document-page: normalized virtual page + range -> actual
 
 ;;;;; Extract
 
-;; TODO with C-u, extract the text contents to org file
-;; TODO C-u C-u, extract image
+;; TODO All these extract functions can be simplified a LOT!!!!!!!!!!!!!!
+;; Lots of code duplication but I'm tired..
 
-(defun org-ilm-pdf-extract ()
+(defun org-ilm-pdf-extract (extent &optional output-type)
   "Extract PDF pages, sections, region, and text."
-  (interactive)
+  (interactive
+   (list
+    (if (pdf-view-active-region-p)
+        'region
+      (let* ((options '(("Page" . page)
+                        ("Outline" . outline)
+                        ("Region" . region)
+                        ("Section" . section))))
+        (cdr (assoc (completing-read "Extract: " options nil t) options))))
+    current-prefix-arg))
   (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))
-  (if (pdf-view-active-region-p)
-      (org-ilm-pdf-region-extract)
-    (let* ((options '(("Page" . page)
-                      ("Outline" . outline)
-                      ("Region" . region)
-                      ("Section" . section)))
-           (choice (cdr (assoc (completing-read "Extract: " options nil t) options))))
-      (pcase choice
-        ('page (org-ilm-pdf-page-extract))
-        ('outline (org-ilm-pdf-outline-extract))
-        ('region (org-ilm-pdf-region-extract))
-        ('section (org-ilm-pdf-section-extract))))))
+  (cl-assert (memq extent '(page outline region section)))
+  
+  (when (and output-type (called-interactively-p))
+    (setq output-type
+          (let* ((options '(("Image" . image)
+                            ("Text" . text)
+                            ("Virtual view" . virtual)
+                            ("PDF" . pdf)
+                            ("Converted to Org" . converted))))
+            (cdr (assoc (completing-read "Extract as: " options nil t) options)))))
+
+  (unless output-type (setq output-type 'virtual))
+  
+  (pcase extent
+    ('page (org-ilm-pdf-page-extract output-type))
+    ('outline (org-ilm-pdf-outline-extract))
+    ('region (org-ilm-pdf-region-extract output-type))
+    ('section (org-ilm-pdf-section-extract output-type))))
 
 (defun org-ilm--pdf-extract-prepare ()
   "Groundwork to do an extract."
@@ -758,30 +774,31 @@ Will become an attachment Org file that is the child heading of current entry."
           (org-ilm--interval-to-schedule-string
            (org-ilm--schedule-interval-from-priority 5)))))
 
-;; TODO All these extract functions can be simplified a LOT!!!!!!!!!!!!!!
-;; Lots of code duplication but I'm tired..
-
-(defun org-ilm-pdf-page-extract ()
+(defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
-  (interactive)
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
     (with-current-buffer buffer
-      (let* ((current-page (pdf-view-current-page))
-             org-headline)
-        (with-temp-buffer
-          (org-ilm--pdf-insert-section-as-extract
-           (1+ level) (format "Page %s%s" current-page "%?")
-           schedule-str current-page)
-          (setq org-headline (buffer-string)))
+      (let ((current-page (pdf-view-current-page))
+            (current-page-real (org-ilm--pdf-page-current)))
 
-        (let* ((org-capture-templates
-                `(("c" "Capture" entry (id ,org-id) ,org-headline))))
-          (org-capture nil "c"))))))
+        (pcase output-type
+          ('virtual
+           (with-temp-buffer
+             (org-ilm--pdf-insert-range-as-extract
+              current-page (format "Page %s%s" current-page-real "%?") (1+ level) )
+             (let* ((org-capture-templates
+                     `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
+               (org-capture nil "c"))))
+          ('text
+           (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
+             (org-ilm--capture
+              'extract
+              org-id
+              (list :content text :type "org")))))))))
 
-
-(defun org-ilm-pdf-region-extract ()
+(defun org-ilm-pdf-region-extract (output-type)
   "Turn selected PDF region into an extract.
 
 TODO When extracting text, use add-variable-watcher to watch for changes
@@ -792,24 +809,36 @@ set only (not let)."
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
-    ;; NOTE Orginally used `with-current-buffer' but throws an error on virtual
-    ;; page buffers when calling `pdf-view-current-page' (something to do with
-    ;; the `save-buffer' or `set-buffer' call in `with-current-buffer'). Since
-    ;; it works fine when virtual page buffer is active, just do that.
+    ;; Orginally used `with-current-buffer' but throws an error on virtual page
+    ;; buffers when calling `pdf-view-current-page' (something to do with the
+    ;; `save-buffer' or `set-buffer' call in `with-current-buffer'). Since it
+    ;; works fine when virtual page buffer is active, just do that.
     (switch-to-buffer buffer)
-    (let* ((current-page (pdf-view-current-page))
+    (let* ((current-page-real (org-ilm--pdf-page-current))
+           (current-page (pdf-view-current-page))
            ;; Not sure why pdf-tools stores it in a list!!!
            (region (car (pdf-view-active-region)))
            org-headline)
-      (with-temp-buffer
-        (org-ilm--pdf-insert-section-as-extract
-         (1+ level) (format "Page %s region %s" current-page "%?")
-         schedule-str current-page region)
-        (setq org-headline (buffer-string)))
 
-      (let* ((org-capture-templates
-              `(("c" "Capture" entry (id ,org-id) ,org-headline))))
-        (org-capture nil "c")))))
+      (pcase output-type
+        ('virtual
+         (with-temp-buffer
+           (org-ilm--pdf-insert-range-as-extract
+            (list current-page-real region)
+            (format "Page %s region %s" current-page-real "%?")
+            (1+ level))
+           (setq org-headline (buffer-string)))
+
+         (let* ((org-capture-templates
+                 `(("c" "Capture" entry (id ,org-id) ,org-headline))))
+           (org-capture nil "c")))
+        ('text
+         (let* ((text (car (pdf-view-active-region-text))))
+           (org-ilm--capture
+            'extract
+            org-id
+            (list :content text :type "org"))))
+         ))))
 
 (defun org-ilm-pdf-outline-extract ()
   "Turn PDF outline items into a extracts."
@@ -817,107 +846,164 @@ set only (not let)."
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
-    (with-current-buffer buffer
-      (let ((outline (pdf-info-outline))
-            (num-pages (pdf-info-number-of-pages))
-            org-outline)
-        (unless outline (error "No outline found"))
-        (with-temp-buffer
-          (dotimes (i (length outline))
-            (org-ilm--pdf-insert-outline-node-as-extract
-             outline num-pages i level))
-          (setq org-outline (buffer-string)))
+    (let ((outline (org-ilm--pdf-outline-get buffer))
+          org-outline)
+      (unless outline (error "No outline found"))
+      
+      (with-temp-buffer
+        (dolist (section outline)
+          (org-ilm--pdf-insert-section-as-extract section level))
+        (setq org-outline (buffer-string)))
 
-        (let* ((org-capture-templates
-                `(("c" "Capture" entry (id ,org-id) ,org-outline))))
-          (org-capture nil "c"))))))
+      (let* ((org-capture-templates
+              `(("c" "Capture" entry (id ,org-id) ,org-outline))))
+        (org-capture nil "c")))))
 
-(defun org-ilm-pdf-section-extract ()
+(defun org-ilm-pdf-section-extract (output-type)
   "Extract current section of outline."
-  (interactive)
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
-    (with-current-buffer buffer
-      (let ((outline (pdf-info-outline))
-            (num-pages (pdf-info-number-of-pages))
-            (current-page (pdf-view-current-page))
-            outline-index org-heading-str)
-        (unless outline (error "No outline found"))
+    (let (section)
+      (with-current-buffer buffer
+        (let ((outline (org-ilm--pdf-outline-get buffer)) ; TODO pass orginial file if in virtual
+              (num-pages (pdf-info-number-of-pages))
+              (current-page (org-ilm--pdf-page-current))
+              outline-index org-heading-str)
+          (unless outline (error "No outline found"))
 
-        ;; Find the outline section of the current page. If page overlaps
-        ;; multiple sections, prompt user to select.
-        (let ((within-indices
-               (seq-filter (lambda (i)
-                             (let ((page-start (alist-get 'page (nth i outline)))
-                                   (page-end (if (= i (1- (length outline)))
-                                                 num-pages
-                                               (alist-get 'page (nth (1+ i) outline)))))
-                               (and (>= current-page page-start)
-                                    (<= current-page page-end))))
-                           (number-sequence 0 (1- (length outline))))))
-          (cond
-           ((= 1 (length within-indices))
-            (setq outline-index (car within-indices)))
-           ((> (length within-indices) 1)
-            (let* ((choices (mapcar (lambda (i)
-                                      (cons (alist-get 'title (nth i outline)) i))
-                                    within-indices))
-                   (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
-              (setq outline-index choice)))
-           (t (error "Current page not within (known) section"))))
-        
-        (with-temp-buffer
-          (org-ilm--pdf-insert-outline-node-as-extract
-           outline num-pages outline-index level)
-          (setq org-heading-str (buffer-string)))
+          ;; Find the outline section of the current page. If page overlaps
+          ;; multiple sections, prompt user to select.
+          (let ((within-indices
+                 (seq-filter (lambda (i)
+                               (let ((page-start (alist-get 'page (nth i outline)))
+                                     (page-end (if (= i (1- (length outline)))
+                                                   num-pages
+                                                 (alist-get 'page (nth (1+ i) outline)))))
+                                 (and (>= current-page page-start)
+                                      (<= current-page page-end))))
+                             (number-sequence 0 (1- (length outline))))))
+            (cond
+             ((= 1 (length within-indices))
+              (setq outline-index (car within-indices)))
+             ((> (length within-indices) 1)
+              (let* ((choices (mapcar (lambda (i)
+                                        (cons (alist-get 'title (nth i outline)) i))
+                                      within-indices))
+                     (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
+                (setq outline-index choice)))
+             (t (error "Current page not within (known) section"))))
+          
+          (setq section (nth outline-index outline))))
 
-        (let* ((org-capture-templates
-                `(("c" "Capture" entry (id ,org-id) ,org-heading-str))))
-          (org-capture nil "c"))))))
+        (pcase output-type
+          ('virtual
+           (with-temp-buffer
+             (org-ilm--pdf-insert-section-as-extract section level)
 
-(defun org-ilm--pdf-insert-outline-node-as-extract (outline num-pages index level-offset)
-  "Turns a PDF outline node into an ilm extract-formatted Org headline."
-  (let* ((current-item (nth index outline))
-         (title (alist-get 'title current-item))
-         (page (alist-get 'page current-item))
-         (top (alist-get 'top current-item))
-         (depth (alist-get 'depth current-item))
-         (level (+ depth level-offset))
-         (begin (list page 0 top 1 1))
-         next-item end
-         
-         (interval (org-ilm--schedule-interval-from-priority 5))
+             (let* ((org-capture-templates
+                     `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
+               (org-capture nil "c"))))
+          ('text
+           ;; TODO This currently extracts the actual PDF data lol
+           (with-temp-buffer
+             (let ((range (alist-get 'range section)))
+               (if (= (length range) 2)
+                   (insert (pdf-info-gettext (car range) (cdr range) nil buffer) "\n")
+                 (let* ((range-begin (car range))
+                        (range-end (cdr range))
+                        (page-begin (car range-begin))
+                        (page-end (car range-end)))
+                   (dolist (page (number-sequence page-begin page-end))
+                     (insert (pdf-info-gettext
+                              page
+                              (cond
+                               ((= page page-begin) (cdr range-begin))
+                               ((= page page-end) (cdr range-end))
+                               (t '(0 0 1 1)))
+                              'word buffer)
+                             "\n"))))))
+                                                           
+             (org-ilm--capture
+              'extract
+              org-id
+              (list :content (buffer-string) :title (alist-get 'title section) :type "org")))
+           )
+          )))
+
+(defun org-ilm--pdf-insert-section-as-extract (section level &optional data)
+  (let ((range (alist-get 'range section))
+        (depth (alist-get 'depth section))
+        (title (or (plist-get data :title) (alist-get 'title section))))
+    (org-ilm--pdf-insert-range-as-extract range title (+ level depth) data)))
+
+(defun org-ilm--pdf-insert-range-as-extract (range title level &optional data)
+  (let* ((priority (or (plist-get data :priority) 5))
+         (interval (or (plist-get data :interval)
+                       (org-ilm--schedule-interval-from-priority priority)))
+         (org-id (or (plist-get data :id) (org-id-new)))
          (schedule-str (org-ilm--interval-to-schedule-string interval)))
+    (insert (make-string level ?*) " INCR " title "\n")
+    (insert "SCHEDULED: " schedule-str "\n")
+    (insert ":PROPERTIES:\n")
+    (insert (format ":ID: %s\n" org-id))
+    (insert (format ":PDF_RANGE: %s\n" range))
+    (insert ":END:\n")))
 
-    ;; Find the next item at the same or a shallower depth
-    (dolist (j (number-sequence (1+ index) (- (length outline) 1)))
-      (let ((potential-next (nth j outline)))
-        (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
-          (setq next-item potential-next))))
-    (unless next-item (setq next-item (nth (1+ index) outline)))
+;;;;; Data
+;; Like outline and stuff
 
-    (setq end
-          (if next-item
-              (list (alist-get 'page next-item) 0 0 1 (alist-get 'top next-item))
-            (list (or num-pages page) 0 0 1 1)))
+(defun org-ilm--pdf-outline-get (&optional file-or-buffer)
+  "Parse outline of the PDF in FILE-OR-BUFFER or current buffer.
+Same as `pdf-info-outline' but adds in each section info about the next section at the same or shallower depth."
+  (let ((outline (pdf-info-outline file-or-buffer))
+         (num-pages (pdf-info-number-of-pages file-or-buffer)))
+    (dotimes (index (length outline))
+      (let* ((current-item (nth index outline))
+             (title (alist-get 'title current-item))
+             (page (alist-get 'page current-item))
+             (top (alist-get 'top current-item))
+             (depth (alist-get 'depth current-item))
+             (begin (list page 0 top 1 1))
+             next-item range)
 
-    (org-ilm--pdf-insert-section-as-extract level title schedule-str begin end)))
+        ;; Find the next item at the same or a shallower depth
+        (dolist (j (number-sequence (1+ index) (- (length outline) 1)))
+          (let ((potential-next (nth j outline)))
+            (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
+              (setf (alist-get 'next current-item) j)
+              (setq next-item potential-next))))
+        ;; (unless (and next-item (= (length outline) (1+ index)))
+          ;; (setf (alist-get 'next current-item) (1+ index))
+          ;; (setq next-item (nth (1+ index) outline)))
+        
+        (let* ((next-page (or (alist-get 'page next-item) num-pages))
+               (next-top (or (alist-get 'top next-item) 1))
+               ;; Range depends on whether or not the next section as on same page
+               (range (if (= next-page page)
+                          (list page 0 top 1 (if next-item next-top 1))
+                        (cons (list page 0 top 1 1) (list next-page 0 0 1 next-top)))))
+          (setf (alist-get 'next-page current-item) next-page
+                (alist-get 'next-top current-item) next-top
+                (alist-get 'range current-item) range))
 
-(defun org-ilm--pdf-insert-section-as-extract (level title schedule-str begin &optional end org-id)
-  "If END nil, BEGIN is assumed to be just a page number."
-  (insert (make-string level ?*) " INCR " title "\n")
-  (insert "SCHEDULED: " schedule-str "\n")
-  (insert ":PROPERTIES:\n")
-  (insert (format ":ID: %s\n" (org-id-new)))
-  (insert (format ":PDF_RANGE: %s\n"
-                  (if end
-                      (org-ilm--pdf-range-to-string begin end)
-                    begin)))
-  (insert ":END:\n"))
+        (setf (nth index outline) current-item)))
+    outline))
 
+(defun org-ilm--pdf-page-current ()
+  "Current page, normalizes if in virtual.
+
+TODO `pdf-virtual-document-page' also normalizes section area."
+  (cond
+   ((eq major-mode 'pdf-view-mode)
+    (pdf-view-current-page))
+   ((eq major-mode 'pdf-virtual-view-mode)
+    (nth 1 (pdf-virtual-document-page (pdf-view-current-page))))
+   (t (error "Not in a PDF buffer"))))
 
 ;;;;; Virtual
 ;; PDF range. One of:
+;; - Page:
+;;   number
 ;; - Page range:
 ;;   (start . end)
 ;; - Area
@@ -954,7 +1040,7 @@ set only (not let)."
   (org-ilm--debug "Spec:" spec)
   (let ((file (car spec))
         (first (cadr spec))
-        (second (caddr spec))
+        (second (cddr spec))
         type begin-page begin-area end-page end-area)
     (cond
      ;; Page range
@@ -1001,7 +1087,9 @@ set only (not let)."
           :end-area end-area)))
 
 (defun org-ilm--pdf-open-ranges (specs buffer-name)
-  "Open a virtual pdf buffer wit the given SPECS."
+  "Open a virtual pdf buffer wit the given SPECS.
+
+TODO Handle two column layout"
   (with-current-buffer (generate-new-buffer buffer-name)
     (insert ";; %VPDF 1.0\n\n")  
     (insert "(")
@@ -1019,13 +1107,9 @@ set only (not let)."
            (if begin-area
                (insert (format " (%s . %s) " begin-page begin-area))
              (insert (format " %s " begin-page)))
-           ;; Pages in between begin and end
-           (let ((distance (- end-page begin-page)))
-             (cond
-              ((> 1)
-               (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
-              ((= 1)
-               (insert (format " %s " (1+ begin-page))))))
+           ;; Pages in between begin and endn
+           (when (> (- end-page begin-page) 1)
+             (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
            ;; End
            (if end-area
                (insert (format " (%s . %s) " end-page end-area))
@@ -1047,6 +1131,12 @@ set only (not let)."
     (pdf-virtual-view-mode)
     (pop-to-buffer (current-buffer))
     (current-buffer)))
+
+;;;;; To org
+
+(defun org-ilm-pdf-to-org ()
+  "Store the contents of the PDF doc to an Org file attachment."
+  (interactive))
         
 
 ;;;; Attachments
