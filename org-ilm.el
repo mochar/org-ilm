@@ -543,7 +543,7 @@ The callback ON-ABORT is called when capture is cancelled."
          (target (if (stringp target-or-id) `(id ,target-or-id) target-or-id))
          (title (plist-get data :title))
          (id (or (plist-get data :id) (org-id-new)))
-         (attachment-type (or (plist-get data :type) "org"))
+         (attachment-type (plist-get data :type))
          (content (plist-get data :content))
          (file (plist-get data :file))
          (priority (plist-get data :priority))
@@ -582,8 +582,10 @@ The callback ON-ABORT is called when capture is cancelled."
       (error "Cannot capture without content or file."))
     (unless file
       (setq file (expand-file-name
-                  (format "%s.%s" id attachment-type)
+                  (format "%s.%s" id (or attachment-type "org"))
                   temporary-file-directory))
+
+      ;; TODO set MUSTBENEW to t?
       (write-region content nil file))
     
     (let ((org-capture-templates
@@ -599,8 +601,8 @@ The callback ON-ABORT is called when capture is cancelled."
                       ;; Regardless of type, every headline will have an id.
                       (org-entry-put nil "ID" ,id)
 
-                      ;; Attachment type if other than org
-                      (unless (string= ,attachment-type "org")
+                      ;; Attachment type if specified
+                      (when ,attachment-type
                         (org-entry-put nil "ILM_TYPE" ,attachment-type))
 
                       ;; Scheduling. We do not add a schedule for cards, as that
