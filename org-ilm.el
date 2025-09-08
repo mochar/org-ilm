@@ -534,12 +534,19 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
-(defun org-ilm--capture (type target org-id tmp-file-path &optional title on-success on-abort)
+(defun org-ilm--capture (type target-or-id data &optional on-success on-abort)
   "Make an org capture to make a new source heading, extract, or card.
 
 The callback ON-SUCCESS is called when capture is saved.
 The callback ON-ABORT is called when capture is cancelled."
   (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
+         (target (if (stringp target-or-id) `(id ,target-or-id) target-or-id))
+         (title (plist-get data :title))
+         (id (or (plist-get data :id) (org-id-new)))
+         (attachment-type (or (plist-get data :type) "org"))
+         (content (plist-get data :content))
+         (file (plist-get data :file))
+         (priority (plist-get data :priority))
          (before-finalize
           (lambda ()
             ;; If this is a source header where the attachments will
@@ -554,7 +561,7 @@ The callback ON-ABORT is called when capture is cancelled."
             
             ;; Attach the file. We always use 'mv because we are
             ;; importing the file from the tmp dir.
-            (org-attach-attach tmp-file-path nil 'mv)))
+            (org-attach-attach file nil 'mv)))
          (after-finalize
           (lambda ()
             ;; Deal with success and aborted capture. This can be detected in
@@ -565,14 +572,36 @@ The callback ON-ABORT is called when capture is cancelled."
                   (funcall on-abort))
               (when on-success
                 (funcall on-success))))))
-    ;; (cl-letf (((symbol-value 'org-capture-templates)
+
+    ;; Generate title from content if no title provided
+    (when (and (not title) content)
+      (setq title (org-ilm--generate-text-snippet content)))
+
+    ;; Save content in a temporary file if no file provided
+    (unless (or content file)
+      (error "Cannot capture without content or file."))
+    (unless file
+      (setq file (expand-file-name
+                  (format "%s.%s" id attachment-type)
+                  temporary-file-directory))
+      (write-region content nil file))
+    
     (let ((org-capture-templates
            `(("i" "Import"
               entry ,target
-              ,(format "* %s [#5] %s %s" state title "%?")
+              ;; ,(format "* %s [#5] %s %s" state title "%?")
+              ,(format "* %s %s %s %s"
+                       state
+                       (if priority (format "[#%s]" priority) "")
+                       (or title "")
+                       "%?")
               :hook (lambda ()
                       ;; Regardless of type, every headline will have an id.
-                      (org-entry-put nil "ID" ,org-id)
+                      (org-entry-put nil "ID" ,id)
+
+                      ;; Attachment type if other than org
+                      (unless (string= ,attachment-type "org")
+                        (org-entry-put nil "ILM_TYPE" ,attachment-type))
 
                       ;; Scheduling. We do not add a schedule for cards, as that
                       ;; info is parsed with
@@ -599,10 +628,10 @@ The callback ON-ABORT is called when capture is cancelled."
                         ;; TODO this can be a nice macro
                         ;; `org-ilm-with-attachment-transcluded'
                         (save-excursion
-                          (org-ilm--transclusion-goto ,tmp-file-path 'create)
+                          (org-ilm--transclusion-goto ,file 'create)
                           (org-transclusion-add)
                           (org-srs-item-new 'cloze)
-                          (org-ilm--transclusion-goto ,tmp-file-path 'delete))))
+                          (org-ilm--transclusion-goto ,file 'delete))))
               :before-finalize ,before-finalize
               :after-finalize ,after-finalize))))
       (org-capture nil "i"))))
@@ -633,21 +662,14 @@ Will become an attachment Org file that is the child heading of current entry."
     (let* ((region-begin (region-beginning))
            (region-end (region-end))
            (region-text (org-ilm--buffer-text-clean region-begin region-end))
-           (snippet (org-ilm--generate-text-snippet region-text))
-           (extract-org-id (org-id-new))
-           (extract-tmp-path (expand-file-name
-                              (format "%s.org" extract-org-id)
-                              temporary-file-directory)))
+           (extract-org-id (org-id-new)))
 
       ;; Save region content into tmp file and move it as attachment to main
       ;; heading.
-      (write-region region-text nil extract-tmp-path)
       (org-ilm--capture
        'extract
-       `(id ,file-org-id)
-       extract-org-id
-       extract-tmp-path
-       snippet
+       file-org-id
+       (list :id extract-org-id :content region-text)
        (lambda ()
          ;; Wrap region with targets.
          (with-current-buffer file-buf
@@ -1714,7 +1736,10 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       ('cp (copy-file file file-tmp-path))
       (t (error "Parameter METHOD must be one of 'mv or 'cp.")))
 
-    (org-ilm--capture 'source `(file ,(cdr collection)) org-id file-tmp-path)))
+    (org-ilm--capture
+     'source
+     `(file ,(cdr collection))
+     (list :id org-id :file file-tmp-path))))
 
 ;;;; Stats
 ;; Functions to work with e.g. the beta distribution.
@@ -2022,9 +2047,6 @@ command."
 
   (let* ((file-buf (current-buffer))
          (card-org-id (org-id-new))
-         (card-tmp-path (expand-file-name
-                         (format "%s.org" card-org-id)
-                         temporary-file-directory))
          (file-org-id (file-name-sans-extension
                        (file-name-nondirectory
                         buffer-file-name)))
@@ -2046,14 +2068,10 @@ command."
     (setq buffer-text (org-ilm--buffer-text-clean nil nil t)
           snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text-clean)))
 
-    (write-region buffer-text nil card-tmp-path)
-
     (org-ilm--capture
      'card
-     `(id ,file-org-id)
-     card-org-id
-     card-tmp-path
-     snippet
+     file-org-id
+     (list :id card-org-id :content buffer-text :title snippet)
      (lambda ()
        ;; Success callback. Go through each cloze in the source file and replace
        ;; it with our target tags. Render them by recreating overlays.
@@ -2078,8 +2096,7 @@ command."
        ;; Abort callback. Undo cloze if made automatically by this function.
        (when auto-clozed
          (with-current-buffer file-buf
-           (org-srs-item-uncloze-dwim))))
-     )))
+           (org-srs-item-uncloze-dwim)))))))
 
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
