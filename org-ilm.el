@@ -115,16 +115,14 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defvar org-ilm-queue nil
   "List of org headings that form the queue.")
 
-(defvar org-ilm-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "o") #'org-ilm-open-dwim)
-    (define-key map (kbd "x") #'org-ilm-extract-dwim)
-    (define-key map (kbd "z") #'org-ilm-cloze)
-    (define-key map (kbd "c") #'org-ilm-cloze-toggle-this)
-    (define-key map (kbd "j") #'org-ilm-subject-add)
-    (define-key map (kbd "q q") #'org-ilm-queue)
-    map)
-  "Keymap for `org-ilm-global-mode'.")
+(defvar-keymap org-ilm-map
+  :doc "Keymap for `org-ilm-global-mode'."
+  "o" #'org-ilm-open-dwim
+  "x" #'org-ilm-extract-dwim
+  "z" #'org-ilm-cloze
+  "c" #'org-ilm-cloze-toggle-this
+  "j" #'org-ilm-subject-add
+  "q" #'org-ilm-queue)
 
 (defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
   "Regexp to match values of targets enclosing extracts and clozes.")
@@ -147,7 +145,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   :global t
   :lighter nil ;; String to display in mode line
   :group 'org-ilm
-  :keymap org-ilm-map
+  ;; :keymap org-ilm-map
   (if org-ilm-global-mode
       ;; Enable
       (progn
@@ -1054,7 +1052,7 @@ TODO `pdf-virtual-document-page' also normalizes section area."
      ((org-ilm--pdf-area-p (cdr spec))
       (setq type 'area-page
             begin-page first
-            begin-area second))
+            begin-area (car second)))
      ;; Range with area
      ;; (start . (end . area))
      ((and (integerp first) (org-ilm--pdf-area-p second))
