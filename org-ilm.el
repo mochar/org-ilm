@@ -97,12 +97,6 @@ When set to `attachment', org-transclusion will be used to transclude the conten
                  (const :tag "Attachment" 'attachment))
   :group 'org-ilm)
 
-(defcustom org-ilm-pdf-minimum-virtual-page-size '(1 . 1)
-  "The minimum size of the area to create a virtual PDF extract."
-  :type '(cons (symbol :tag "Width")
-               (symbol :tag "Height"))
-  :group 'org-ilm)
-
 (defcustom org-ilm-debug nil
   "Print stuff to message buffer."
   :type 'boolean
@@ -593,7 +587,7 @@ The callback ON-ABORT is called when capture is cancelled."
 
       ;; TODO set MUSTBENEW to t?
       (write-region content nil file))
-    
+
     (let ((org-capture-templates
            `(("i" "Import"
               entry ,target
@@ -715,7 +709,14 @@ Will become an attachment Org file that is the child heading of current entry."
 
 (defvar-keymap org-ilm-pdf-map
   :doc "Keymap for PDF attachments."
-  "d" #'org-ilm-pdf-open-full-document)
+  "d" #'org-ilm-pdf-open-full-document
+  "x" #'org-ilm-pdf-extract)
+
+(defcustom org-ilm-pdf-minimum-virtual-page-size '(1 . 1)
+  "The minimum size of the area to create a virtual PDF extract."
+  :type '(cons (symbol :tag "Width")
+               (symbol :tag "Height"))
+  :group 'org-ilm)
 
 (defun org-ilm-pdf-open-full-document ()
   "Open the full PDF document from an extracted virtual view, jump to current page.
@@ -729,9 +730,10 @@ TODO Cute if we can use numeric prefix to jump to that page number"
               (org-id (file-name-base pdf-path))
               (headline (org-ilm--org-headline-element-from-id org-id))
               (page (org-ilm--pdf-page-normalized)))
-    (org-with-point-at headline
-      (org-ilm--attachment-open)
-      (pdf-view-goto-page page))))
+    (save-excursion
+      (org-with-point-at headline
+        (org-ilm--attachment-open)
+        (pdf-view-goto-page page)))))
 
 ;;;;; Utilities
 
@@ -827,12 +829,19 @@ When MIN-SIZE is nil, compare to `org-ilm-pdf-minimum-virtual-page-size'."
 
       (pcase output-type
         ('virtual
-         (with-temp-buffer
-           (org-ilm--pdf-insert-range-as-extract
-            current-page-real (format "Page %s%s" current-page-real "%?") (1+ level) )
-           (let* ((org-capture-templates
-                   `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
-             (org-capture nil "c"))))
+         (let ((excerpt (org-ilm--generate-text-snippet
+                         (pdf-info-gettext current-page '(0 0 1 1)))))
+           (with-temp-buffer
+             (org-ilm--pdf-insert-range-as-extract
+              current-page-real
+              (concat "Page "
+                      (number-to-string current-page-real)
+                      (when excerpt (concat ": " excerpt))
+                      " %?")
+              (1+ level))
+             (let* ((org-capture-templates
+                     `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
+               (org-capture nil "c")))))
         ('text
          (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
            (org-ilm--capture 
@@ -847,7 +856,9 @@ TODO When extracting text, use add-variable-watcher to watch for changes
 in pdf-view-active-region as it has no hooks. it allow buffer local and
 set only (not let)."
   (interactive)
-  (cl-assert (pdf-view-active-region-p))
+  (unless (pdf-view-active-region-p)
+    (user-error "No active region."))
+  
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
@@ -859,6 +870,7 @@ set only (not let)."
     (let* ((current-page-real (org-ilm--pdf-page-normalized))
            (current-page (pdf-view-current-page))
            (region (org-ilm--pdf-region-normalized))
+           (region-text (car (pdf-view-active-region-text)))
            org-headline)
 
       ;; TODO Would be nice to prompt for other output-type and repeat the
@@ -873,7 +885,11 @@ set only (not let)."
          (with-temp-buffer
            (org-ilm--pdf-insert-range-as-extract
             (cons current-page-real region)
-            (format "Page %s region %s" current-page-real "%?")
+            (concat
+             "Page " (number-to-string current-page-real)
+             " region"
+             (when region-text (concat ": " (org-ilm--generate-text-snippet region-text)))
+             "%?")
             (1+ level))
            (setq org-headline (buffer-string)))
 
@@ -881,11 +897,10 @@ set only (not let)."
                  `(("c" "Capture" entry (id ,org-id) ,org-headline))))
            (org-capture nil "c")))
         ('text
-         (let* ((text (car (pdf-view-active-region-text))))
-           (org-ilm--capture
-            'extract
-            org-id
-            (list :content text :type "org"))))
+         (org-ilm--capture
+          'extract
+          org-id
+          (list :content region-text :type "org")))
          ))))
 
 (defun org-ilm-pdf-outline-extract ()
@@ -969,19 +984,22 @@ set only (not let)."
                                ((= page page-end) (cdr range-end))
                                (t '(0 0 1 1)))
                               'word buffer)
-                             "\n"))))))
-                                                           
+                             "\n")))))
+
              (org-ilm--capture
               'extract
               org-id
-              (list :content (buffer-string) :title (alist-get 'title section) :type "org")))
+              (list :content (buffer-string)
+                    :title (concat "Section: " (alist-get 'title section))
+                    :type "org"))))
            )
           )))
 
 (defun org-ilm--pdf-insert-section-as-extract (section level &optional data)
   (let ((range (alist-get 'range section))
         (depth (alist-get 'depth section))
-        (title (or (plist-get data :title) (alist-get 'title section))))
+        (title (concat "Section: "
+                       (or (plist-get data :title) (alist-get 'title section)))))
     (org-ilm--pdf-insert-range-as-extract range title (+ level depth) data)))
 
 (defun org-ilm--pdf-insert-range-as-extract (range title level &optional data)
