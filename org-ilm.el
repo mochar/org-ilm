@@ -560,7 +560,8 @@ The callback ON-ABORT is called when capture is cancelled."
             
             ;; Attach the file. We always use 'mv because we are
             ;; importing the file from the tmp dir.
-            (org-attach-attach file nil 'mv)))
+            (let ((org-attach-auto-tag (if (eq type 'source) org-attach-auto-tag nil)))
+              (org-attach-attach file nil 'mv))))
          (after-finalize
           (lambda ()
             ;; Deal with success and aborted capture. This can be detected in
@@ -1172,6 +1173,9 @@ view (`org-ilm--pdf-open-ranges')."
         
 
 ;;;; Attachments
+
+;; org-attach-delete-all
+
 (defun org-ilm-infer-id-from-attachment-path (path)
   "Attempt parsing the org-id from the attachment path, return (id . location)."
   (when path
