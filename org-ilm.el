@@ -710,7 +710,8 @@ Will become an attachment Org file that is the child heading of current entry."
 (defvar-keymap org-ilm-pdf-map
   :doc "Keymap for PDF attachments."
   "d" #'org-ilm-pdf-open-full-document
-  "x" #'org-ilm-pdf-extract)
+  "x" #'org-ilm-pdf-extract
+  "n" #'org-ilm-pdf-toggle-narrow)
 
 (defcustom org-ilm-pdf-minimum-virtual-page-size '(1 . 1)
   "The minimum size of the area to create a virtual PDF extract."
@@ -718,22 +719,25 @@ Will become an attachment Org file that is the child heading of current entry."
                (symbol :tag "Height"))
   :group 'org-ilm)
 
+;;;;; Commands
+
 (defun org-ilm-pdf-open-full-document ()
   "Open the full PDF document from an extracted virtual view, jump to current page.
 
 TODO Cute if we can use numeric prefix to jump to that page number"
   (interactive)
-  ;; Hack to get the ID of the ancestor with full PDF: get the file path which
-  ;; is returned as first element in list returned by
-  ;; `pdf-virtual-document-page'.
-  (when-let* ((pdf-path (car (pdf-virtual-document-page 1)))
-              (org-id (file-name-base pdf-path))
-              (headline (org-ilm--org-headline-element-from-id org-id))
-              (page (org-ilm--pdf-page-normalized)))
-    (save-excursion
-      (org-with-point-at headline
-        (org-ilm--attachment-open)
-        (pdf-view-goto-page page)))))
+  (save-excursion
+    (org-ilm--pdf-with-point-on-collection-headline 'of-document
+     (org-ilm--attachment-open)
+     (pdf-view-goto-page page))))
+
+(defun org-ilm-pdf-toggle-narrow ()
+  "When in virtual view that specifies an area, toggle between the area and whole page."
+  (interactive)
+  (save-excursion
+    (org-ilm--pdf-with-point-on-collection-headline nil
+     (org-ilm--attachment-open region)
+     (pdf-view-goto-page virtual-page))))
 
 ;;;;; Utilities
 
@@ -749,7 +753,19 @@ When MIN-SIZE is nil, compare to `org-ilm-pdf-minimum-virtual-page-size'."
     (org-ilm--debug "W: %s H: %s" region-width region-height)
     (or (< region-width (car min-size))
         (< region-height (cdr min-size)))))
-  
+
+(defmacro org-ilm--pdf-with-point-on-collection-headline (of-document &rest body)
+  "Place point on the headline belonging to this PDF attachment.
+When OF-DOCUMENT non-nil, jump to headline which has the orginal document as attachment."
+  `(let* ((virtual-page (pdf-view-current-page))
+          (document (pdf-virtual-document-page virtual-page))
+          (pdf-path (nth 0 document))
+          (page (nth 1 document))
+          (region (nth 2 document)))
+     (when-let* ((org-id (file-name-base (if ,of-document pdf-path (buffer-name))))
+                 (headline (org-ilm--org-headline-element-from-id org-id)))
+       (org-with-point-at headline
+         ,@body))))
 
 ;;;;; Extract
 
@@ -1170,43 +1186,51 @@ When not specified, REGION is active region."
           :end-page end-page
           :end-area end-area)))
 
-(defun org-ilm--pdf-open-ranges (specs buffer-name)
-  "Open a virtual pdf buffer wit the given SPECS.
+(defun org-ilm--pdf-open-ranges (specs buffer-name &optional no-region)
+  "Open a virtual pdf buffer with the given SPECS.
+With NO-REGION non-nil, view entire page instead of zooming to specified region.
 
 TODO Handle two column layout"
-  (with-current-buffer (get-buffer-create buffer-name)
-    (pdf-virtual-edit-mode)
-    (erase-buffer)
-    (insert ";; %VPDF 1.0\n\n")  
-    (insert "(")
-    (dolist (spec specs)
-      (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area)
-          (org-ilm--pdf-parse-spec spec)
-        (insert "(\"" file "\"")
-        (pcase type
-          ('range-pages
-           (insert (format "(%s . %s)" begin-page end-page)))
-          ('area-page
-           (insert (format "(%s . %s)" begin-page begin-area)))
-          ('range-area-pages
-           ;; Begin
-           (if begin-area
-               (insert (format " (%s . %s) " begin-page begin-area))
-             (insert (format " %s " begin-page)))
-           ;; Pages in between begin and endn
-           (when (> (- end-page begin-page) 1)
-             (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
-           ;; End
-           (if end-area
-               (insert (format " (%s . %s) " end-page end-area))
-             (insert (format " %s " end-page))))))
-      (insert ")"))
-    (insert ")\n")
-      
-    ;; (pdf-virtual-edit-mode)
-    (pdf-virtual-view-mode)
-    (pop-to-buffer (current-buffer))
-    (current-buffer)))
+  ;; We use pop-to-buffer instead of with-current-buffer -> pop-to-buffer
+  ;; because the same buffer can be edited on demand when this function is
+  ;; called. If done the other way, with-current-buffer will deem the original
+  ;; buffer damaged.
+  ;; TODO Maybe there is a way to make virtual-edit-mode invisible so it appears
+  ;; less janky.
+  (pop-to-buffer (get-buffer-create buffer-name))
+  (pdf-virtual-edit-mode)
+  (erase-buffer)
+  (insert ";; %VPDF 1.0\n\n")  
+  (insert "(")
+  (dolist (spec specs)
+    (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area)
+        (org-ilm--pdf-parse-spec spec)
+      (insert "(\"" file "\"")
+      (pcase type
+        ('range-pages
+         (insert (format "(%s . %s)" begin-page end-page)))
+        ('area-page
+         (if no-region
+             (insert (format " %s " begin-page))
+           (insert (format "(%s . %s)" begin-page begin-area))))
+        ('range-area-pages
+         ;; Begin
+         (if (and begin-area (not no-region))
+             (insert (format " (%s . %s) " begin-page begin-area))
+           (insert (format " %s " begin-page)))
+         ;; Pages in between begin and endn
+         (when (> (- end-page begin-page) 1)
+           (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
+         ;; End
+         (if (and end-area (not no-region))
+             (insert (format " (%s . %s) " end-page end-area))
+           (insert (format " %s " end-page))))))
+    (insert ")"))
+  (insert ")\n")
+  
+  ;; (pdf-virtual-edit-mode)
+  (pdf-virtual-view-mode)
+  (current-buffer))
 
 (defun org-ilm--pdf-open-virtual (pdf-path buffer-name)
   "Open PDF in virtual view mode.
@@ -1282,7 +1306,7 @@ view (`org-ilm--pdf-open-ranges')."
       (setq attachment (org-ilm--attachment-find type (nth 4 (pop crumbs)))))
     attachment))
 
-(defun org-ilm--attachment-open ()
+(defun org-ilm--attachment-open (&optional pdf-no-region)
   ""
   (if-let* ((path (org-ilm--attachment-find)))
       (progn
@@ -1297,7 +1321,8 @@ view (`org-ilm--pdf-open-ranges')."
             (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
           (org-ilm--pdf-open-ranges
            (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
-           buffer-name))
+           buffer-name
+           pdf-no-region))
       (error "Attachment not found"))))
 
 
