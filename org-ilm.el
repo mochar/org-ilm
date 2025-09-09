@@ -468,6 +468,12 @@ With non-nil ASSERT, assert headline must be found, else return nil."
    (org-time-stamp-format)
    (ts-unix (ts-adjust 'day interval (ts-now)))))
 
+(defun org-ilm--invert-alist (alist)
+  "Turn car into cdr and vice versa for each cons in ALIST."
+  (mapcar (lambda (pair)
+            (cons (cdr pair) (car pair)))
+          alist))
+
 ;;;; Elements
 
 (defun org-ilm--select-collection ()
@@ -769,8 +775,23 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
 
 ;;;;; Extract
 
-;; TODO All these extract functions can be simplified a LOT!!!!!!!!!!!!!!
-;; Lots of code duplication but I'm tired..
+(defconst org-ilm--pdf-output-types
+  '((virtual . "Virtual view")
+    (text . "Text")
+    (image . "Image")
+    (converted . "Converted to Org")))
+
+(defconst org-ilm--pdf-extract-options
+  '((page . "Page")
+    (outline . "Outline")
+    (region . "Region")
+    (section . "Section")))
+
+(defconst org-ilm--pdf-extract-option-to-types
+  '((page . (virtual text image converted))
+    (outline . (virtual))
+    (region . (virtual text image converted))
+    (section . (virtual text converted))))
 
 (defun org-ilm-pdf-extract (extent &optional output-type)
   "Extract PDF pages, sections, region, and text."
@@ -778,23 +799,23 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
    (list
     (if (pdf-view-active-region-p)
         'region
-      (let* ((options '(("Page" . page)
-                        ("Outline" . outline)
-                        ("Region" . region)
-                        ("Section" . section))))
+      (let* ((options (org-ilm--invert-alist org-ilm--pdf-extract-options)))
         (cdr (assoc (completing-read "Extract: " options nil t) options))))
     current-prefix-arg))
   (cl-assert (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode)))
   (cl-assert (memq extent '(page outline region section)))
   
-  (when (and output-type (called-interactively-p))
+  ;; (when (and output-type (called-interactively-p))
+  (unless output-type
     (setq output-type
-          (let* ((options '(("Image" . image)
-                            ("Text" . text)
-                            ("Virtual view" . virtual)
-                            ("PDF" . pdf)
-                            ("Converted to Org" . converted))))
-            (cdr (assoc (completing-read "Extract as: " options nil t) options)))))
+          (let ((options (seq-filter
+                          (lambda (option)
+                            (member (cdr option)
+                                    (assoc extent org-ilm--pdf-extract-option-to-types)))
+                          (org-ilm--invert-alist org-ilm--pdf-output-types))))
+            (if (= 1 (length options))
+                (cdr (car options))
+              (cdr (assoc (completing-read "Extract as: " options nil t) options))))))
 
   (unless output-type (setq output-type 'virtual))
   
