@@ -544,11 +544,12 @@ If `HEADLINE' is passed, read it as org-property."
 
 The callback ON-SUCCESS is called when capture is saved.
 The callback ON-ABORT is called when capture is cancelled."
+  (cl-assert (member type '(extract card source)))
   (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
          (target (if (stringp target-or-id) `(id ,target-or-id) target-or-id))
          (title (plist-get data :title))
          (id (or (plist-get data :id) (org-id-new)))
-         (attachment-type (plist-get data :type))
+         (attachment-ext (plist-get data :ext))
          (content (plist-get data :content))
          (file (plist-get data :file))
          (priority (plist-get data :priority))
@@ -583,12 +584,18 @@ The callback ON-ABORT is called when capture is cancelled."
     (when (and (not title) content)
       (setq title (org-ilm--generate-text-snippet content)))
 
+    ;; Set extension from file when set to t
+    (when (eq attachment-ext t)
+      (if file
+          (setq attachment-ext (file-name-extension file))
+        (error "Cannot infer extension when no file provided (:ext=t)")))
+
     ;; Save content in a temporary file if no file provided
     (unless (or content file)
       (error "Cannot capture without content or file."))
     (unless file
       (setq file (expand-file-name
-                  (format "%s.%s" id (or attachment-type "org"))
+                  (format "%s.%s" id (or attachment-ext "org"))
                   temporary-file-directory))
 
       ;; TODO set MUSTBENEW to t?
@@ -607,9 +614,9 @@ The callback ON-ABORT is called when capture is cancelled."
                       ;; Regardless of type, every headline will have an id.
                       (org-entry-put nil "ID" ,id)
 
-                      ;; Attachment type if specified
-                      (when ,attachment-type
-                        (org-entry-put nil "ILM_TYPE" ,attachment-type))
+                      ;; Attachment extension if specified
+                      (when ,attachment-ext
+                        (org-entry-put nil "ILM_EXT" ,attachment-ext))
 
                       ;; Scheduling. We do not add a schedule for cards, as that
                       ;; info is parsed with
@@ -773,6 +780,45 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
        (org-with-point-at headline
          ,@body))))
 
+(defun org-ilm--pdf-insert-section-as-extract (section level &optional data)
+  (let ((range (alist-get 'range section))
+        (depth (alist-get 'depth section))
+        (title (concat "Section: "
+                       (or (plist-get data :title) (alist-get 'title section)))))
+    (org-ilm--pdf-insert-range-as-extract range title (+ level depth) data)))
+
+(defun org-ilm--pdf-insert-range-as-extract (range title level &optional data)
+  (let* ((priority (or (plist-get data :priority) 5))
+         (interval (or (plist-get data :interval)
+                       (org-ilm--schedule-interval-from-priority priority)))
+         (org-id (or (plist-get data :id) (org-id-new)))
+         (schedule-str (org-ilm--interval-to-schedule-string interval)))
+    (insert (make-string level ?*) " INCR " title "\n")
+    (insert "SCHEDULED: " schedule-str "\n")
+    (insert ":PROPERTIES:\n")
+    (insert (format ":ID: %s\n" org-id))
+    (insert (format ":PDF_RANGE: %s\n" range))
+    (insert ":END:\n")))
+
+(defun org-ilm--pdf-image-export (filename &optional region page)
+  ""
+  (let ((region (or region '(0 0 1 1)))
+        (img-buffer (get-buffer-create "*Org Ilm PDF Image*"))
+        img-type img-ext img-path)
+    ;; TODO Supports combining multiple regions as one image, might be nice for
+    ;; region export
+    (pdf-view-extract-region-image
+     (list region) page nil img-buffer 'no-display)
+    (with-current-buffer img-buffer
+      (setq img-type (image-type-from-buffer)
+            img-ext (symbol-name img-type) ;; TODO ???
+            img-path (expand-file-name
+                      (concat filename "." img-ext)
+                      temporary-file-directory))
+      (write-region (point-min) (point-max) img-path))
+    (kill-buffer img-buffer)
+    img-path))
+
 ;;;;; Extract
 
 (defconst org-ilm--pdf-output-types
@@ -884,7 +930,19 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
            (org-ilm--capture 
             'extract
             org-id
-            (list :content text :type "org"))))))))
+            (list :content text :ext "org"))))
+        ('image
+         (let* ((extract-org-id (org-id-new))
+                (img-path (org-ilm--pdf-image-export extract-org-id)))
+           (org-ilm--capture
+            'extract
+            org-id
+            (list :file img-path
+                  :title (format "Page %s" current-page-real)
+                  :id extract-org-id
+                  :ext t))))
+           )
+         )))
 
 (defun org-ilm-pdf-region-extract (output-type)
   "Turn selected PDF region into an extract.
@@ -908,6 +966,11 @@ set only (not let)."
            (current-page (pdf-view-current-page))
            (region (org-ilm--pdf-region-normalized))
            (region-text (car (pdf-view-active-region-text)))
+           (title
+            (concat
+             "Page " (number-to-string current-page-real)
+             " region"
+             (when region-text (concat ": " (org-ilm--generate-text-snippet region-text))) ))
            org-headline)
 
       ;; TODO Would be nice to prompt for other output-type and repeat the
@@ -922,11 +985,7 @@ set only (not let)."
          (with-temp-buffer
            (org-ilm--pdf-insert-range-as-extract
             (cons current-page-real region)
-            (concat
-             "Page " (number-to-string current-page-real)
-             " region"
-             (when region-text (concat ": " (org-ilm--generate-text-snippet region-text)))
-             "%?")
+            (concat title "%?")
             (1+ level))
            (setq org-headline (buffer-string)))
 
@@ -937,7 +996,17 @@ set only (not let)."
          (org-ilm--capture
           'extract
           org-id
-          (list :content region-text :type "org")))
+          (list :title title :content region-text :ext "org")))
+        ('image
+         (let* ((extract-org-id (org-id-new))
+                (img-path (org-ilm--pdf-image-export extract-org-id region)))
+           (org-ilm--capture
+            'extract
+            org-id
+            (list :file img-path
+                  :title title
+                  :id extract-org-id
+                  :ext t))))
          ))))
 
 (defun org-ilm-pdf-outline-extract ()
@@ -1028,29 +1097,9 @@ set only (not let)."
               org-id
               (list :content (buffer-string)
                     :title (concat "Section: " (alist-get 'title section))
-                    :type "org"))))
+                    :ext "org"))))
            )
           )))
-
-(defun org-ilm--pdf-insert-section-as-extract (section level &optional data)
-  (let ((range (alist-get 'range section))
-        (depth (alist-get 'depth section))
-        (title (concat "Section: "
-                       (or (plist-get data :title) (alist-get 'title section)))))
-    (org-ilm--pdf-insert-range-as-extract range title (+ level depth) data)))
-
-(defun org-ilm--pdf-insert-range-as-extract (range title level &optional data)
-  (let* ((priority (or (plist-get data :priority) 5))
-         (interval (or (plist-get data :interval)
-                       (org-ilm--schedule-interval-from-priority priority)))
-         (org-id (or (plist-get data :id) (org-id-new)))
-         (schedule-str (org-ilm--interval-to-schedule-string interval)))
-    (insert (make-string level ?*) " INCR " title "\n")
-    (insert "SCHEDULED: " schedule-str "\n")
-    (insert ":PROPERTIES:\n")
-    (insert (format ":ID: %s\n" org-id))
-    (insert (format ":PDF_RANGE: %s\n" range))
-    (insert ":END:\n")))
 
 ;;;;; Data
 ;; Like outline and stuff
@@ -1311,13 +1360,12 @@ view (`org-ilm--pdf-open-ranges')."
       path)))
 
 (defun org-ilm--attachment-find (&optional type org-id)
-  ""
+  "Return attachment file of the headline."
   (when-let* ((attach-dir (org-attach-dir))
               (org-id (or org-id (org-id-get)))
-              (type (or type (org-entry-get nil "ILM_TYPE" 'inherit) "org"))
+              (type (or type (org-entry-get nil "ILM_EXT" 'inherit) "org"))
               (path (expand-file-name (concat org-id "." type) attach-dir)))
-      (when (file-exists-p path)
-        path)))
+      (when (file-exists-p path) path)))
 
 (defun org-ilm--attachment-find-ancestor (type &optional headline)
   ""
@@ -1328,7 +1376,7 @@ view (`org-ilm--pdf-open-ranges')."
     attachment))
 
 (defun org-ilm--attachment-open (&optional pdf-no-region)
-  ""
+  "Open the attachemnt of collection element at point."
   (if-let* ((path (org-ilm--attachment-find)))
       (progn
         (run-hook-with-args 'org-attach-open-hook path)
