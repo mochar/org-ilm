@@ -865,7 +865,7 @@ set only (not let)."
       ;; function from here. Can do so with a while loop around the pcase
       ;; below. Could then be generalized to macro so I can reuse it in all
       ;; extract functions.
-      (when (org-ilm--pdf-region-below-min-size-p current-page-real region)
+      (when (org-ilm--pdf-region-below-min-size-p current-page region)
         (user-error "Region smaller than minimum size. Try extracting as text or image."))
 
       (pcase output-type
