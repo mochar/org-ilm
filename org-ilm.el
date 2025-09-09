@@ -1564,6 +1564,13 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
 
 ;;;; Queue
 
+
+(defcustom org-ilm-queue-subject-nchar 6
+  "Truncation size of subject names as displayed in the queue.
+If available, the last alias in the ROAM_ALIASES property will be used."
+  :type 'integer
+  :group 'org-ilm)
+
 ;;;;; Building
 
 ;; TODO Finish after rewriting subject cache
@@ -1831,8 +1838,11 @@ A lot of formatting code from org-ql."
               (let ((names
                      (mapcar
                       (lambda (subject)
-                        (let ((title (org-mem-entry-title subject)))
-                          (substring title 0 (min (length title) 5))))
+                        (let ((title (or
+                                      (car (last (org-mem-entry-roam-aliases subject)))
+                                      (org-mem-entry-title subject))))
+                          (substring title 0 (min (length title)
+                                                  org-ilm-queue-subject-nchar))))
                       subjects)))
                 (org-ilm--vtable-format-marked
                  (org-add-props (s-join "," names) nil 'face 'org-tag)
