@@ -732,6 +732,24 @@ Will become an attachment Org file that is the child heading of current entry."
                (symbol :tag "Height"))
   :group 'org-ilm)
 
+(defconst org-ilm--pdf-output-types
+  '((virtual . "Virtual view")
+    (text . "Text")
+    (image . "Image")
+    (converted . "Converted to Org")))
+
+(defconst org-ilm--pdf-extract-options
+  '((page . "Page")
+    (outline . "Outline")
+    (region . "Region")
+    (section . "Section")))
+
+(defconst org-ilm--pdf-extract-option-to-types
+  '((page . (virtual text image converted))
+    (outline . (virtual))
+    (region . (virtual text image converted))
+    (section . (virtual text converted))))
+
 ;;;;; Commands
 
 (defun org-ilm-pdf-open-full-document ()
@@ -819,25 +837,231 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (kill-buffer img-buffer)
     img-path))
 
+
+;;;;; Data
+;; Like outline and stuff
+
+(defun org-ilm--pdf-outline-get (&optional file-or-buffer)
+  "Parse outline of the PDF in FILE-OR-BUFFER or current buffer.
+Same as `pdf-info-outline' but adds in each section info about the next section at the same or shallower depth."
+  (let ((outline (pdf-info-outline file-or-buffer))
+         (num-pages (pdf-info-number-of-pages file-or-buffer)))
+    (dotimes (index (length outline))
+      (let* ((current-item (nth index outline))
+             (title (alist-get 'title current-item))
+             (page (alist-get 'page current-item))
+             (top (alist-get 'top current-item))
+             (depth (alist-get 'depth current-item))
+             (begin (list page 0 top 1 1))
+             next-item range)
+
+        ;; Find the next item at the same or a shallower depth
+        (dolist (j (number-sequence (1+ index) (- (length outline) 1)))
+          (let ((potential-next (nth j outline)))
+            (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
+              (setf (alist-get 'next current-item) j)
+              (setq next-item potential-next))))
+        ;; (unless (and next-item (= (length outline) (1+ index)))
+          ;; (setf (alist-get 'next current-item) (1+ index))
+          ;; (setq next-item (nth (1+ index) outline)))
+        
+        (let* ((next-page (or (alist-get 'page next-item) num-pages))
+               (next-top (or (alist-get 'top next-item) 1))
+               ;; Range depends on whether or not the next section as on same page
+               (range (if (= next-page page)
+                          (list page 0 top 1 (if next-item next-top 1))
+                        (cons (list page 0 top 1 1) (list next-page 0 0 1 next-top)))))
+          (setf (alist-get 'next-page current-item) next-page
+                (alist-get 'next-top current-item) next-top
+                (alist-get 'range current-item) range))
+
+        (setf (nth index outline) current-item)))
+    outline))
+
+(defun org-ilm--pdf-page-normalized (&optional page)
+  "If in virtual mode, maps virtual PAGE to document page, else return as is.
+When not specified, PAGE is current page."
+  (let ((page (or page (pdf-view-current-page))))
+    (cond
+     ((eq major-mode 'pdf-view-mode) page)
+     ((eq major-mode 'pdf-virtual-view-mode)
+      (nth 1 (pdf-virtual-document-page page)))
+     (t (error "Not in a PDF buffer")))))
+
+(defun org-ilm--pdf-region-normalized (&optional region virtual-page)
+  "If in virtual mode, maps virtual REGION to document region, else return as is.
+When not specified, REGION is active region."
+  (let ((region (or region (car (pdf-view-active-region)))))
+    (cond
+     ((eq major-mode 'pdf-view-mode) region)
+     ((eq major-mode 'pdf-virtual-view-mode)
+      (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
+             (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
+        (pcase-let* ((`(,LE ,TO, RI, BO) page-region)
+                     (`(,le ,to ,ri ,bo) region)
+                     (w (- RI LE))
+                     (h (- BO TO)))
+          (list (+ LE (* le w))
+                (+ TO (* to h))
+                (+ LE (* ri w))
+                (+ TO (* bo h))))))
+     (t (error "Not in a PDF buffer")))))
+
+;;;;; Virtual
+;; PDF range. One of:
+;; - Page:
+;;   number
+;; - Page range:
+;;   (start . end)
+;; - Area
+;;   (page . (left top right bottom))
+;; - Range with area
+;;   ((start . area) . (end . area))
+;;   ((start . area) . end)
+;;   (start . (end . area))
+(defun org-ilm--pdf-range-to-string (begin end)
+  "Convert PDF page area from lisp to a string format."
+  (format "(%s %s)"
+          (prin1-to-string begin)
+          (prin1-to-string end)))
+
+(defun org-ilm--pdf-range-from-string (string)
+  "Read STRING that represent a PDF page area to lisp."
+  (let* ((begin-data (read-from-string string))
+         (begin (car begin-data)))
+    (if (= (length string) (cdr begin-data))
+        begin
+      (cons begin (car (read-from-string string (cdr begin-data)))))))
+
+(defun org-ilm--pdf-area-p (area)
+  "Test if  AREA is (page . (left top right bottom)) or ."
+  (and (listp area)
+       (integerp (car area))
+       (listp (cdr area))
+       (or (= 5 (length area))
+           (and (listp (cadr area))
+                (= (length (cadr area)) 4)))))
+
+(defun org-ilm--pdf-parse-spec (spec)
+  "Parse SPEC for viewing in virtual PDF buffers."
+  (org-ilm--debug "Spec:" spec)
+  (let ((file (car spec))
+        (first (cadr spec))
+        (second (cddr spec))
+        type begin-page begin-area end-page end-area)
+    (cond
+     ;; Page range
+     ;; (begin . end)
+     ((and (integerp first) (integerp second))
+      (setq type 'range-pages
+            begin-page first
+            end-page second))
+     ;; Area
+     ;; (page . (left top right bottom))
+     ((org-ilm--pdf-area-p (cdr spec))
+      (setq type 'area-page
+            begin-page first
+            begin-area second))
+     ;; Range with area
+     ;; (start . (end . area))
+     ((and (integerp first) (org-ilm--pdf-area-p second))
+      (setq type 'range-area-pages
+            begin-page first
+            end-page (car second)
+            end-area (cdr second)))
+     ;; Range with area
+     ;; ((start . area) . end)
+     ((and (integerp second) (org-ilm--pdf-area-p first))
+      (setq type 'range-area-pages
+            begin-page (car first)
+            begin-area (cdr first)
+            end-page second))
+     ;; Range with area
+     ;; ((start . area) . (end . area))
+     ((and (org-ilm--pdf-area-p first) (org-ilm--pdf-area-p second))
+      (setq type 'range-area-pages
+            begin-page (car first)
+            begin-area (cdr first)
+            end-page (car second)
+            end-area (cdr second)))
+     (t (error "Spec invalid")))
+
+    (list :file file
+          :type type
+          :begin-page begin-page
+          :begin-area begin-area
+          :end-page end-page
+          :end-area end-area)))
+
+(defun org-ilm--pdf-open-ranges (specs buffer-name &optional no-region)
+  "Open a virtual pdf buffer with the given SPECS.
+With NO-REGION non-nil, view entire page instead of zooming to specified region.
+
+TODO Handle two column layout"
+  ;; We use pop-to-buffer instead of with-current-buffer -> pop-to-buffer
+  ;; because the same buffer can be edited on demand when this function is
+  ;; called. If done the other way, with-current-buffer will deem the original
+  ;; buffer damaged.
+  ;; TODO Maybe there is a way to make virtual-edit-mode invisible so it appears
+  ;; less janky.
+  (pop-to-buffer (get-buffer-create buffer-name))
+  (pdf-virtual-edit-mode)
+  (erase-buffer)
+  (insert ";; %VPDF 1.0\n\n")  
+  (insert "(")
+  (dolist (spec specs)
+    (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area)
+        (org-ilm--pdf-parse-spec spec)
+      (insert "(\"" file "\"")
+      (pcase type
+        ('range-pages
+         (insert (format "(%s . %s)" begin-page end-page)))
+        ('area-page
+         (if no-region
+             (insert (format " %s " begin-page))
+           (insert (format "(%s . %s)" begin-page begin-area))))
+        ('range-area-pages
+         ;; Begin
+         (if (and begin-area (not no-region))
+             (insert (format " (%s . %s) " begin-page begin-area))
+           (insert (format " %s " begin-page)))
+         ;; Pages in between begin and endn
+         (when (> (- end-page begin-page) 1)
+           (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
+         ;; End
+         (if (and end-area (not no-region))
+             (insert (format " (%s . %s) " end-page end-area))
+           (insert (format " %s " end-page))))))
+    (insert ")"))
+  (insert ")\n")
+  
+  ;; (pdf-virtual-edit-mode)
+  (pdf-virtual-view-mode)
+  (current-buffer))
+
+(defun org-ilm--pdf-open-virtual (pdf-path buffer-name)
+  "Open PDF in virtual view mode.
+The main purpose is to toggle into a widened (this func) and narrowed
+view (`org-ilm--pdf-open-ranges')."
+  (with-current-buffer (get-buffer-create buffer-name)
+    (erase-buffer)
+    (insert ";; %VPDF 1.0\n\n")  
+    (insert "((" pdf-path "))")
+    (pdf-virtual-view-mode)
+    (pop-to-buffer (current-buffer))
+    (current-buffer)))
+
+(defun org-ilm--pdf-open-page (pdf-path page-number buffer-name)
+  "Open a virtual pdf buffer with a single page."
+  (with-current-buffer (generate-new-buffer buffer-name)
+    (insert ";; %VPDF 1.0\n\n")
+    (org-ilm--debug nil page-number)
+    (insert "((\"" pdf-path "\" " (number-to-string page-number) " ))\n")
+    (pdf-virtual-view-mode)
+    (pop-to-buffer (current-buffer))
+    (current-buffer)))
+
 ;;;;; Extract
-
-(defconst org-ilm--pdf-output-types
-  '((virtual . "Virtual view")
-    (text . "Text")
-    (image . "Image")
-    (converted . "Converted to Org")))
-
-(defconst org-ilm--pdf-extract-options
-  '((page . "Page")
-    (outline . "Outline")
-    (region . "Region")
-    (section . "Section")))
-
-(defconst org-ilm--pdf-extract-option-to-types
-  '((page . (virtual text image converted))
-    (outline . (virtual))
-    (region . (virtual text image converted))
-    (section . (virtual text converted))))
 
 (defun org-ilm-pdf-extract (extent &optional output-type)
   "Extract PDF pages, sections, region, and text."
@@ -1101,235 +1325,9 @@ set only (not let)."
            )
           )))
 
-;;;;; Data
-;; Like outline and stuff
+;;;;; Convert
 
-(defun org-ilm--pdf-outline-get (&optional file-or-buffer)
-  "Parse outline of the PDF in FILE-OR-BUFFER or current buffer.
-Same as `pdf-info-outline' but adds in each section info about the next section at the same or shallower depth."
-  (let ((outline (pdf-info-outline file-or-buffer))
-         (num-pages (pdf-info-number-of-pages file-or-buffer)))
-    (dotimes (index (length outline))
-      (let* ((current-item (nth index outline))
-             (title (alist-get 'title current-item))
-             (page (alist-get 'page current-item))
-             (top (alist-get 'top current-item))
-             (depth (alist-get 'depth current-item))
-             (begin (list page 0 top 1 1))
-             next-item range)
 
-        ;; Find the next item at the same or a shallower depth
-        (dolist (j (number-sequence (1+ index) (- (length outline) 1)))
-          (let ((potential-next (nth j outline)))
-            (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
-              (setf (alist-get 'next current-item) j)
-              (setq next-item potential-next))))
-        ;; (unless (and next-item (= (length outline) (1+ index)))
-          ;; (setf (alist-get 'next current-item) (1+ index))
-          ;; (setq next-item (nth (1+ index) outline)))
-        
-        (let* ((next-page (or (alist-get 'page next-item) num-pages))
-               (next-top (or (alist-get 'top next-item) 1))
-               ;; Range depends on whether or not the next section as on same page
-               (range (if (= next-page page)
-                          (list page 0 top 1 (if next-item next-top 1))
-                        (cons (list page 0 top 1 1) (list next-page 0 0 1 next-top)))))
-          (setf (alist-get 'next-page current-item) next-page
-                (alist-get 'next-top current-item) next-top
-                (alist-get 'range current-item) range))
-
-        (setf (nth index outline) current-item)))
-    outline))
-
-(defun org-ilm--pdf-page-normalized (&optional page)
-  "If in virtual mode, maps virtual PAGE to document page, else return as is.
-When not specified, PAGE is current page."
-  (let ((page (or page (pdf-view-current-page))))
-    (cond
-     ((eq major-mode 'pdf-view-mode) page)
-     ((eq major-mode 'pdf-virtual-view-mode)
-      (nth 1 (pdf-virtual-document-page page)))
-     (t (error "Not in a PDF buffer")))))
-
-(defun org-ilm--pdf-region-normalized (&optional region virtual-page)
-  "If in virtual mode, maps virtual REGION to document region, else return as is.
-When not specified, REGION is active region."
-  (let ((region (or region (car (pdf-view-active-region)))))
-    (cond
-     ((eq major-mode 'pdf-view-mode) region)
-     ((eq major-mode 'pdf-virtual-view-mode)
-      (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
-             (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
-        (pcase-let* ((`(,LE ,TO, RI, BO) page-region)
-                     (`(,le ,to ,ri ,bo) region)
-                     (w (- RI LE))
-                     (h (- BO TO)))
-          (list (+ LE (* le w))
-                (+ TO (* to h))
-                (+ LE (* ri w))
-                (+ TO (* bo h))))))
-     (t (error "Not in a PDF buffer")))))
-
-;;;;; Virtual
-;; PDF range. One of:
-;; - Page:
-;;   number
-;; - Page range:
-;;   (start . end)
-;; - Area
-;;   (page . (left top right bottom))
-;; - Range with area
-;;   ((start . area) . (end . area))
-;;   ((start . area) . end)
-;;   (start . (end . area))
-(defun org-ilm--pdf-range-to-string (begin end)
-  "Convert PDF page area from lisp to a string format."
-  (format "(%s %s)"
-          (prin1-to-string begin)
-          (prin1-to-string end)))
-
-(defun org-ilm--pdf-range-from-string (string)
-  "Read STRING that represent a PDF page area to lisp."
-  (let* ((begin-data (read-from-string string))
-         (begin (car begin-data)))
-    (if (= (length string) (cdr begin-data))
-        begin
-      (cons begin (car (read-from-string string (cdr begin-data)))))))
-
-(defun org-ilm--pdf-area-p (area)
-  "Test if  AREA is (page . (left top right bottom)) or ."
-  (and (listp area)
-       (integerp (car area))
-       (listp (cdr area))
-       (or (= 5 (length area))
-           (and (listp (cadr area))
-                (= (length (cadr area)) 4)))))
-
-(defun org-ilm--pdf-parse-spec (spec)
-  "Parse SPEC for viewing in virtual PDF buffers."
-  (org-ilm--debug "Spec:" spec)
-  (let ((file (car spec))
-        (first (cadr spec))
-        (second (cddr spec))
-        type begin-page begin-area end-page end-area)
-    (cond
-     ;; Page range
-     ;; (begin . end)
-     ((and (integerp first) (integerp second))
-      (setq type 'range-pages
-            begin-page first
-            end-page second))
-     ;; Area
-     ;; (page . (left top right bottom))
-     ((org-ilm--pdf-area-p (cdr spec))
-      (setq type 'area-page
-            begin-page first
-            begin-area second))
-     ;; Range with area
-     ;; (start . (end . area))
-     ((and (integerp first) (org-ilm--pdf-area-p second))
-      (setq type 'range-area-pages
-            begin-page first
-            end-page (car second)
-            end-area (cdr second)))
-     ;; Range with area
-     ;; ((start . area) . end)
-     ((and (integerp second) (org-ilm--pdf-area-p first))
-      (setq type 'range-area-pages
-            begin-page (car first)
-            begin-area (cdr first)
-            end-page second))
-     ;; Range with area
-     ;; ((start . area) . (end . area))
-     ((and (org-ilm--pdf-area-p first) (org-ilm--pdf-area-p second))
-      (setq type 'range-area-pages
-            begin-page (car first)
-            begin-area (cdr first)
-            end-page (car second)
-            end-area (cdr second)))
-     (t (error "Spec invalid")))
-
-    (list :file file
-          :type type
-          :begin-page begin-page
-          :begin-area begin-area
-          :end-page end-page
-          :end-area end-area)))
-
-(defun org-ilm--pdf-open-ranges (specs buffer-name &optional no-region)
-  "Open a virtual pdf buffer with the given SPECS.
-With NO-REGION non-nil, view entire page instead of zooming to specified region.
-
-TODO Handle two column layout"
-  ;; We use pop-to-buffer instead of with-current-buffer -> pop-to-buffer
-  ;; because the same buffer can be edited on demand when this function is
-  ;; called. If done the other way, with-current-buffer will deem the original
-  ;; buffer damaged.
-  ;; TODO Maybe there is a way to make virtual-edit-mode invisible so it appears
-  ;; less janky.
-  (pop-to-buffer (get-buffer-create buffer-name))
-  (pdf-virtual-edit-mode)
-  (erase-buffer)
-  (insert ";; %VPDF 1.0\n\n")  
-  (insert "(")
-  (dolist (spec specs)
-    (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area)
-        (org-ilm--pdf-parse-spec spec)
-      (insert "(\"" file "\"")
-      (pcase type
-        ('range-pages
-         (insert (format "(%s . %s)" begin-page end-page)))
-        ('area-page
-         (if no-region
-             (insert (format " %s " begin-page))
-           (insert (format "(%s . %s)" begin-page begin-area))))
-        ('range-area-pages
-         ;; Begin
-         (if (and begin-area (not no-region))
-             (insert (format " (%s . %s) " begin-page begin-area))
-           (insert (format " %s " begin-page)))
-         ;; Pages in between begin and endn
-         (when (> (- end-page begin-page) 1)
-           (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
-         ;; End
-         (if (and end-area (not no-region))
-             (insert (format " (%s . %s) " end-page end-area))
-           (insert (format " %s " end-page))))))
-    (insert ")"))
-  (insert ")\n")
-  
-  ;; (pdf-virtual-edit-mode)
-  (pdf-virtual-view-mode)
-  (current-buffer))
-
-(defun org-ilm--pdf-open-virtual (pdf-path buffer-name)
-  "Open PDF in virtual view mode.
-The main purpose is to toggle into a widened (this func) and narrowed
-view (`org-ilm--pdf-open-ranges')."
-  (with-current-buffer (get-buffer-create buffer-name)
-    (erase-buffer)
-    (insert ";; %VPDF 1.0\n\n")  
-    (insert "((" pdf-path "))")
-    (pdf-virtual-view-mode)
-    (pop-to-buffer (current-buffer))
-    (current-buffer)))
-
-(defun org-ilm--pdf-open-page (pdf-path page-number buffer-name)
-  "Open a virtual pdf buffer with a single page."
-  (with-current-buffer (generate-new-buffer buffer-name)
-    (insert ";; %VPDF 1.0\n\n")
-    (org-ilm--debug nil page-number)
-    (insert "((\"" pdf-path "\" " (number-to-string page-number) " ))\n")
-    (pdf-virtual-view-mode)
-    (pop-to-buffer (current-buffer))
-    (current-buffer)))
-
-;;;;; To org
-
-(defun org-ilm-pdf-to-org ()
-  "Store the contents of the PDF doc to an Org file attachment."
-  (interactive))
-        
 
 ;;;; Attachments
 
