@@ -1063,6 +1063,17 @@ view (`org-ilm--pdf-open-ranges')."
 
 ;;;;; Extract
 
+(defun org-ilm--pdf-extract-prompt-for-output-type (extract-option)
+  "Prompt user to select output type given the extract option."
+  (let ((options (seq-filter
+                  (lambda (option)
+                    (member (cdr option)
+                            (assoc extract-option org-ilm--pdf-extract-option-to-types)))
+                  (org-ilm--invert-alist org-ilm--pdf-output-types))))
+    (if (= 1 (length options))
+        (cdr (car options))
+      (cdr (assoc (completing-read "Extract as: " options nil t) options)))))
+
 (defun org-ilm-pdf-extract (extent &optional output-type)
   "Extract PDF pages, sections, region, and text."
   (interactive
@@ -1077,15 +1088,7 @@ view (`org-ilm--pdf-open-ranges')."
   
   ;; (when (and output-type (called-interactively-p))
   (unless output-type
-    (setq output-type
-          (let ((options (seq-filter
-                          (lambda (option)
-                            (member (cdr option)
-                                    (assoc extent org-ilm--pdf-extract-option-to-types)))
-                          (org-ilm--invert-alist org-ilm--pdf-output-types))))
-            (if (= 1 (length options))
-                (cdr (car options))
-              (cdr (assoc (completing-read "Extract as: " options nil t) options))))))
+    (setq output-type (org-ilm--pdf-extract-prompt-for-output-type extent)))
 
   (unless output-type (setq output-type 'virtual))
   
@@ -1127,6 +1130,7 @@ view (`org-ilm--pdf-open-ranges')."
 
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
+  (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'page)))
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
@@ -1174,7 +1178,7 @@ view (`org-ilm--pdf-open-ranges')."
 TODO When extracting text, use add-variable-watcher to watch for changes
 in pdf-view-active-region as it has no hooks. it allow buffer local and
 set only (not let)."
-  (interactive)
+  (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'region)))
   (unless (pdf-view-active-region-p)
     (user-error "No active region."))
   
@@ -1234,7 +1238,10 @@ set only (not let)."
          ))))
 
 (defun org-ilm-pdf-outline-extract ()
-  "Turn PDF outline items into a extracts."
+  "Turn PDF outline items into a extracts.
+
+It's a bit of a black sheep compared to other extract options because we
+make a bunch of headers."
   (interactive)
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
@@ -1254,6 +1261,7 @@ set only (not let)."
 
 (defun org-ilm-pdf-section-extract (output-type)
   "Extract current section of outline."
+  (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'section)))
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
     (let (section)
@@ -1326,6 +1334,38 @@ set only (not let)."
           )))
 
 ;;;;; Convert
+
+(defun org-ilm-pdf-convert (output-type)
+  "Convert PDF to another format within the same attachment."
+  (interactive
+   (list
+    (let ((options (seq-filter
+                    (lambda (option) (member (cdr option) '(text converted)))
+                    (org-ilm--invert-alist org-ilm--pdf-output-types))))
+      (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
+
+  (let* ((buffer (current-buffer))
+         (org-id (file-name-base (buffer-name)))
+         (tmp-path (expand-file-name
+                    (concat org-id ".org")
+                    temporary-file-directory))
+         (num-pages (pdf-info-number-of-pages)))
+    (pcase output-type
+      ('text
+       (with-temp-buffer
+         (dolist (page (number-sequence 1 num-pages))
+           (insert (pdf-info-gettext page '(0 0 1 1) nil buffer)))
+         (write-region (point-min) (point-max) tmp-path)))
+      ('converted
+       )
+      )
+
+    (org-ilm--pdf-with-point-on-collection-headline
+     nil
+     (let ((org-attach-auto-tag nil))
+         (org-attach-attach tmp-path nil 'mv))
+     (when (yes-or-no-p "Done. Use as main attachment?")
+       (org-entry-put nil "ILM_EXT" "org")))))
 
 
 
