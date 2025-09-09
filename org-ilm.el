@@ -154,13 +154,15 @@ When set to `attachment', org-transclusion will be used to transclude the conten
                   #'org-ilm--org-mem-hook)
         (add-hook 'org-mem-post-targeted-scan-functions
                   #'org-ilm--org-mem-hook)
+        (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
         )
     ;; Disable
     (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
     (remove-hook 'org-mem-post-full-scan-functions
               #'org-ilm--org-mem-hook)
     (remove-hook 'org-mem-post-targeted-scan-functions
-              #'org-ilm--org-mem-hook)
+                 #'org-ilm--org-mem-hook)
+    (define-key pdf-view-mode-map (kbd "A") nil)
     ))
 
 ;;;; Commands
@@ -369,10 +371,9 @@ A collection symbol COLLECTION can be passed to test if file belongs to
   "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
   (if-let ((collection (org-ilm--collection-file buffer-file-name)))
       (cons 'collection collection)
-    (when-let* ((file-title (file-name-sans-extension
-                             (file-name-nondirectory
-                              ;; Allow for non-file buffer: pdf virtual view
-                              (or buffer-file-name (buffer-name)))))
+    (when-let* ((file-title (file-name-base
+                             ;; Allow for non-file buffer: pdf virtual view
+                             (or buffer-file-name (buffer-name))))
                 (_ (org-ilm--org-id-p file-title))
                 (src-file (car (org-id-find file-title))))
       (when-let (collection (org-ilm--collection-file (expand-file-name src-file)))
@@ -704,6 +705,26 @@ Will become an attachment Org file that is the child heading of current entry."
 ;; pdf-util-track-mouse-dragging
 ;; pdf-view-display-region
 ;; pdf-virtual-document-page: normalized virtual page + range -> actual
+
+(defvar-keymap org-ilm-pdf-map
+  :doc "Keymap for PDF attachments."
+  "d" #'org-ilm-pdf-open-full-document)
+
+(defun org-ilm-pdf-open-full-document ()
+  "Open the full PDF document from an extracted virtual view, jump to current page.
+
+TODO Cute if we can use numeric prefix to jump to that page number"
+  (interactive)
+  ;; Hack to get the ID of the ancestor with full PDF: get the file path which
+  ;; is returned as first element in list returned by
+  ;; `pdf-virtual-document-page'.
+  (when-let* ((pdf-path (car (pdf-virtual-document-page 1)))
+              (org-id (file-name-base pdf-path))
+              (headline (org-ilm--org-headline-element-from-id org-id))
+              (page (org-ilm--pdf-page-current)))
+    (org-with-point-at headline
+      (org-ilm--attachment-open)
+      (pdf-view-goto-page page))))
 
 ;;;;; Extract
 
@@ -1088,7 +1109,8 @@ TODO `pdf-virtual-document-page' also normalizes section area."
   "Open a virtual pdf buffer wit the given SPECS.
 
 TODO Handle two column layout"
-  (with-current-buffer (generate-new-buffer buffer-name)
+  (with-current-buffer (get-buffer-create buffer-name)
+    (erase-buffer)
     (insert ";; %VPDF 1.0\n\n")  
     (insert "(")
     (dolist (spec specs)
@@ -1116,6 +1138,18 @@ TODO Handle two column layout"
     (insert ")\n")
       
     ;; (pdf-virtual-edit-mode)
+    (pdf-virtual-view-mode)
+    (pop-to-buffer (current-buffer))
+    (current-buffer)))
+
+(defun org-ilm--pdf-open-virtual (pdf-path buffer-name)
+  "Open PDF in virtual view mode.
+The main purpose is to toggle into a widened (this func) and narrowed
+view (`org-ilm--pdf-open-ranges')."
+  (with-current-buffer (get-buffer-create buffer-name)
+    (erase-buffer)
+    (insert ";; %VPDF 1.0\n\n")  
+    (insert "((" pdf-path "))")
     (pdf-virtual-view-mode)
     (pop-to-buffer (current-buffer))
     (current-buffer)))
