@@ -598,9 +598,9 @@ The callback ON-ABORT is called when capture is cancelled."
            `(("i" "Import"
               entry ,target
               ;; ,(format "* %s [#5] %s %s" state title "%?")
-              ,(format "* %s %s %s %s"
+              ,(format "* %s%s %s %s"
                        state
-                       (if priority (format "[#%s]" priority) "")
+                       (if priority (format " [#%s]" priority) "")
                        (or title "")
                        "%?")
               :hook (lambda ()
