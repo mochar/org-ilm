@@ -97,6 +97,12 @@ When set to `attachment', org-transclusion will be used to transclude the conten
                  (const :tag "Attachment" 'attachment))
   :group 'org-ilm)
 
+(defcustom org-ilm-pdf-minimum-virtual-page-size '(1 . 1)
+  "The minimum size of the area to create a virtual PDF extract."
+  :type '(cons (symbol :tag "Width")
+               (symbol :tag "Height"))
+  :group 'org-ilm)
+
 (defcustom org-ilm-debug nil
   "Print stuff to message buffer."
   :type 'boolean
@@ -722,10 +728,26 @@ TODO Cute if we can use numeric prefix to jump to that page number"
   (when-let* ((pdf-path (car (pdf-virtual-document-page 1)))
               (org-id (file-name-base pdf-path))
               (headline (org-ilm--org-headline-element-from-id org-id))
-              (page (org-ilm--pdf-page-current)))
+              (page (org-ilm--pdf-page-normalized)))
     (org-with-point-at headline
       (org-ilm--attachment-open)
       (pdf-view-goto-page page))))
+
+;;;;; Utilities
+
+(defun org-ilm--pdf-region-below-min-size-p (size-or-page &optional region min-size)
+  "Check if normalized coordinates REGION in SIZE is less than SIZE-MAX.
+When REGION is nil, use active region.
+When MIN-SIZE is nil, compare to `org-ilm-pdf-minimum-virtual-page-size'."
+  (when-let* ((size (if (integerp size-or-page) (pdf-info-pagesize size-or-page) size-or-page))
+              (min-size (or min-size org-ilm-pdf-minimum-virtual-page-size))
+              (region (or region (org-ilm--pdf-region-normalized)))
+              (region-width (* (car size) (- (nth 2 region) (nth 0 region))))
+              (region-height (* (cdr size) (- (nth 3 region) (nth 1 region)))))
+    (org-ilm--debug "W: %s H: %s" region-width region-height)
+    (or (< region-width (car min-size))
+        (< region-height (cdr min-size)))))
+  
 
 ;;;;; Extract
 
@@ -801,7 +823,7 @@ TODO Cute if we can use numeric prefix to jump to that page number"
 
     (switch-to-buffer buffer)
     (let ((current-page (pdf-view-current-page))
-          (current-page-real (org-ilm--pdf-page-current)))
+          (current-page-real (org-ilm--pdf-page-normalized)))
 
       (pcase output-type
         ('virtual
@@ -834,17 +856,23 @@ set only (not let)."
     ;; `save-buffer' or `set-buffer' call in `with-current-buffer'). Since it
     ;; works fine when virtual page buffer is active, just do that.
     (switch-to-buffer buffer)
-    (let* ((current-page-real (org-ilm--pdf-page-current))
+    (let* ((current-page-real (org-ilm--pdf-page-normalized))
            (current-page (pdf-view-current-page))
-           ;; Not sure why pdf-tools stores it in a list!!!
-           (region (car (pdf-view-active-region)))
+           (region (org-ilm--pdf-region-normalized))
            org-headline)
+
+      ;; TODO Would be nice to prompt for other output-type and repeat the
+      ;; function from here. Can do so with a while loop around the pcase
+      ;; below. Could then be generalized to macro so I can reuse it in all
+      ;; extract functions.
+      (when (org-ilm--pdf-region-below-min-size-p current-page-real region)
+        (user-error "Region smaller than minimum size. Try extracting as text or image."))
 
       (pcase output-type
         ('virtual
          (with-temp-buffer
            (org-ilm--pdf-insert-range-as-extract
-            (list current-page-real region)
+            (cons current-page-real region)
             (format "Page %s region %s" current-page-real "%?")
             (1+ level))
            (setq org-headline (buffer-string)))
@@ -887,7 +915,7 @@ set only (not let)."
       (switch-to-buffer buffer)
       (let ((outline (org-ilm--pdf-outline-get buffer)) ; TODO pass orginial file if in virtual
             (num-pages (pdf-info-number-of-pages))
-            (current-page (org-ilm--pdf-page-current))
+            (current-page (org-ilm--pdf-page-normalized))
             outline-index org-heading-str)
         (unless outline (error "No outline found"))
 
@@ -1009,16 +1037,34 @@ Same as `pdf-info-outline' but adds in each section info about the next section 
         (setf (nth index outline) current-item)))
     outline))
 
-(defun org-ilm--pdf-page-current ()
-  "Current page, normalizes if in virtual.
+(defun org-ilm--pdf-page-normalized (&optional page)
+  "If in virtual mode, maps virtual PAGE to document page, else return as is.
+When not specified, PAGE is current page."
+  (let ((page (or page (pdf-view-current-page))))
+    (cond
+     ((eq major-mode 'pdf-view-mode) page)
+     ((eq major-mode 'pdf-virtual-view-mode)
+      (nth 1 (pdf-virtual-document-page page)))
+     (t (error "Not in a PDF buffer")))))
 
-TODO `pdf-virtual-document-page' also normalizes section area."
-  (cond
-   ((eq major-mode 'pdf-view-mode)
-    (pdf-view-current-page))
-   ((eq major-mode 'pdf-virtual-view-mode)
-    (nth 1 (pdf-virtual-document-page (pdf-view-current-page))))
-   (t (error "Not in a PDF buffer"))))
+(defun org-ilm--pdf-region-normalized (&optional region virtual-page)
+  "If in virtual mode, maps virtual REGION to document region, else return as is.
+When not specified, REGION is active region."
+  (let ((region (or region (car (pdf-view-active-region)))))
+    (cond
+     ((eq major-mode 'pdf-view-mode) region)
+     ((eq major-mode 'pdf-virtual-view-mode)
+      (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
+             (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
+        (pcase-let* ((`(,LE ,TO, RI, BO) page-region)
+                     (`(,le ,to ,ri ,bo) region)
+                     (w (- RI LE))
+                     (h (- BO TO)))
+          (list (+ LE (* le w))
+                (+ TO (* to h))
+                (+ LE (* ri w))
+                (+ TO (* bo h))))))
+     (t (error "Not in a PDF buffer")))))
 
 ;;;;; Virtual
 ;; PDF range. One of:
@@ -1074,7 +1120,7 @@ TODO `pdf-virtual-document-page' also normalizes section area."
      ((org-ilm--pdf-area-p (cdr spec))
       (setq type 'area-page
             begin-page first
-            begin-area (car second)))
+            begin-area second))
      ;; Range with area
      ;; (start . (end . area))
      ((and (integerp first) (org-ilm--pdf-area-p second))
@@ -1111,6 +1157,7 @@ TODO `pdf-virtual-document-page' also normalizes section area."
 
 TODO Handle two column layout"
   (with-current-buffer (get-buffer-create buffer-name)
+    (pdf-virtual-edit-mode)
     (erase-buffer)
     (insert ";; %VPDF 1.0\n\n")  
     (insert "(")
