@@ -777,24 +777,24 @@ Will become an attachment Org file that is the child heading of current entry."
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
-    (with-current-buffer buffer
-      (let ((current-page (pdf-view-current-page))
-            (current-page-real (org-ilm--pdf-page-current)))
+    (switch-to-buffer buffer)
+    (let ((current-page (pdf-view-current-page))
+          (current-page-real (org-ilm--pdf-page-current)))
 
-        (pcase output-type
-          ('virtual
-           (with-temp-buffer
-             (org-ilm--pdf-insert-range-as-extract
-              current-page (format "Page %s%s" current-page-real "%?") (1+ level) )
-             (let* ((org-capture-templates
-                     `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
-               (org-capture nil "c"))))
-          ('text
-           (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
-             (org-ilm--capture
-              'extract
-              org-id
-              (list :content text :type "org")))))))))
+      (pcase output-type
+        ('virtual
+         (with-temp-buffer
+           (org-ilm--pdf-insert-range-as-extract
+            current-page-real (format "Page %s%s" current-page-real "%?") (1+ level) )
+           (let* ((org-capture-templates
+                   `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
+             (org-capture nil "c"))))
+        ('text
+         (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
+           (org-ilm--capture 
+            'extract
+            org-id
+            (list :content text :type "org"))))))))
 
 (defun org-ilm-pdf-region-extract (output-type)
   "Turn selected PDF region into an extract.
@@ -862,36 +862,36 @@ set only (not let)."
   (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
     (let (section)
-      (with-current-buffer buffer
-        (let ((outline (org-ilm--pdf-outline-get buffer)) ; TODO pass orginial file if in virtual
-              (num-pages (pdf-info-number-of-pages))
-              (current-page (org-ilm--pdf-page-current))
-              outline-index org-heading-str)
-          (unless outline (error "No outline found"))
+      (switch-to-buffer buffer)
+      (let ((outline (org-ilm--pdf-outline-get buffer)) ; TODO pass orginial file if in virtual
+            (num-pages (pdf-info-number-of-pages))
+            (current-page (org-ilm--pdf-page-current))
+            outline-index org-heading-str)
+        (unless outline (error "No outline found"))
 
-          ;; Find the outline section of the current page. If page overlaps
-          ;; multiple sections, prompt user to select.
-          (let ((within-indices
-                 (seq-filter (lambda (i)
-                               (let ((page-start (alist-get 'page (nth i outline)))
-                                     (page-end (if (= i (1- (length outline)))
-                                                   num-pages
-                                                 (alist-get 'page (nth (1+ i) outline)))))
-                                 (and (>= current-page page-start)
-                                      (<= current-page page-end))))
-                             (number-sequence 0 (1- (length outline))))))
-            (cond
-             ((= 1 (length within-indices))
-              (setq outline-index (car within-indices)))
-             ((> (length within-indices) 1)
-              (let* ((choices (mapcar (lambda (i)
-                                        (cons (alist-get 'title (nth i outline)) i))
-                                      within-indices))
-                     (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
-                (setq outline-index choice)))
-             (t (error "Current page not within (known) section"))))
-          
-          (setq section (nth outline-index outline))))
+        ;; Find the outline section of the current page. If page overlaps
+        ;; multiple sections, prompt user to select.
+        (let ((within-indices
+               (seq-filter (lambda (i)
+                             (let ((page-start (alist-get 'page (nth i outline)))
+                                   (page-end (if (= i (1- (length outline)))
+                                                 num-pages
+                                               (alist-get 'page (nth (1+ i) outline)))))
+                               (and (>= current-page page-start)
+                                    (<= current-page page-end))))
+                           (number-sequence 0 (1- (length outline))))))
+          (cond
+           ((= 1 (length within-indices))
+            (setq outline-index (car within-indices)))
+           ((> (length within-indices) 1)
+            (let* ((choices (mapcar (lambda (i)
+                                      (cons (alist-get 'title (nth i outline)) i))
+                                    within-indices))
+                   (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
+              (setq outline-index choice)))
+           (t (error "Current page not within (known) section"))))
+        
+        (setq section (nth outline-index outline)))
 
         (pcase output-type
           ('virtual
