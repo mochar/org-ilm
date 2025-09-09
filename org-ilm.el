@@ -2361,51 +2361,49 @@ parents, which is defined differently for subjects and extracts/cards:
                 org-id)))))
       '(headline) 'with-self (not all-ancestors))
 
-    (org-ilm--debug "-- Outline ancestors:" subject-ids)
-    
     ;; Process inherited SUBJECTS property.
 
     ;; This is tricky because linked subjects may themselves link to other
     ;; subjects, requiring this to be done recursively if we need all
     ;; subjects. Furthermore test for invalid linking, eg to a descendant or
     ;; circular links.
-    (unless (string-empty-p property-subjects-str)
-      (let (property-subject-ids property-subject-ancestors)
+    (let ((link-match-pos 0)
+          property-subject-ids property-subject-ancestors)
+      (while-let ((_ (string-match org-link-any-re property-subjects-str link-match-pos))
+                  (subject-string (match-string 1 property-subjects-str)))
+        (setq link-match-pos (match-end 1))
 
         ;; First we gather valid subject-ids as well as their individual ancestries
-        (dolist (subject-string (string-split property-subjects-str))
+        (when-let* ((org-id (org-ilm--org-id-from-string subject-string))
+                    ;; Skip if linked to itself
+                    (_ (not (string= org-id headline-id)))
+                    ;; Skip if ancestor of headline
+                    ;; TODO we do this later again as post-processing stop, so
+                    ;; remove?
+                    (_ (not (member org-id headline-ancestry)))
+                    ;; Should have org id and therefore cached by org-mem
+                    (entry (org-mem-entry-by-id org-id))
+                    ;; Should be subject todo state
+                    (_ (member (org-mem-entry-todo-state entry)
+                               org-ilm-subject-states))
+                    ;; Skip if is subject is descendant of headline - this
+                    ;; will lead to circular DAG, causing infinite loops, and
+                    ;; doesn't make sense anyway. Add a root string so
+                    ;; subjects with no org-id parents don't return nil,
+                    ;; terminating the when-let.
+                    (ancestry (org-ilm--org-mem-ancestry-ids entry 'with-root-str))
+                    (_ (not (member headline-id ancestry))))
+          (cl-pushnew org-id property-subject-ids :test #'equal)
+          (cl-pushnew ancestry property-subject-ancestors)
 
-          (when-let* ((org-id (org-ilm--org-id-from-string subject-string))
-                      ;; Skip if linked to itself
-                      (_ (not (string= org-id headline-id)))
-                      ;; Skip if ancestor of headline
-                      ;; TODO we do this later again as post-processing stop, so
-                      ;; remove?
-                      (_ (not (member org-id headline-ancestry)))
-                      ;; Should have org id and therefore cached by org-mem
-                      (entry (org-mem-entry-by-id org-id))
-                      ;; Should be subject todo state
-                      (_ (member (org-mem-entry-todo-state entry)
-                                 org-ilm-subject-states))
-                      ;; Skip if is subject is descendant of headline - this
-                      ;; will lead to circular DAG, causing infinite loops, and
-                      ;; doesn't make sense anyway. Add a root string so
-                      ;; subjects with no org-id parents don't return nil,
-                      ;; terminating the when-let.
-                      (ancestry (org-ilm--org-mem-ancestry-ids entry 'with-root-str))
-                      (_ (not (member headline-id ancestry))))
-
-            (cl-pushnew org-id property-subject-ids :test #'equal)
-            (cl-pushnew ancestry property-subject-ancestors)
-
-            ;; Recursively handle case where property derived subjects
-            ;; themselves might link to other subjects in their properties.
-            ;; Note, no need to do this for outline ancestors (previous step),
-            ;; as properties are inherited.
-            (when all-ancestors
-              (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id all-ancestors)))
-                (cl-pushnew parent-id property-subject-ids :test #'equal)
-                (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-subject-ancestors)))))
+          ;; Recursively handle case where property derived subjects
+          ;; themselves might link to other subjects in their properties.
+          ;; Note, no need to do this for outline ancestors (previous step),
+          ;; as properties are inherited.
+          (when all-ancestors
+            (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id all-ancestors)))
+              (cl-pushnew parent-id property-subject-ids :test #'equal)
+              (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-subject-ancestors))))
 
         ;; Filter if subject-id is ancestor of any other subject-id
         (let ((ancestries (apply #'append property-subject-ancestors)))
