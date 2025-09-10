@@ -553,6 +553,7 @@ The callback ON-ABORT is called when capture is cancelled."
          (content (plist-get data :content))
          (file (plist-get data :file))
          (priority (plist-get data :priority))
+         (template (plist-get data :template))
          (before-finalize
           (lambda ()
             ;; If this is a source header where the attachments will
@@ -602,15 +603,18 @@ The callback ON-ABORT is called when capture is cancelled."
       ;; TODO set MUSTBENEW to t?
       (write-region content nil file))
 
+    (unless template
+      (setq template
+            (format "* %s%s %s %s"
+                    state
+                    (if priority (format " [#%s]" priority) "")
+                    (or title "")
+                    "%?")))
+
     (let ((org-capture-templates
            `(("i" "Import"
               entry ,target
-              ;; ,(format "* %s [#5] %s %s" state title "%?")
-              ,(format "* %s%s %s %s"
-                       state
-                       (if priority (format " [#%s]" priority) "")
-                       (or title "")
-                       "%?")
+              ,template
               :hook (lambda ()
                       ;; Regardless of type, every headline will have an id.
                       (org-entry-put nil "ID" ,id)
@@ -994,6 +998,24 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
    (if (eq major-mode 'pdf-virtual-view-mode)
        (car (pdf-virtual-document-page 1))
      buffer-file-name)))
+
+(defun org-ilm--pdf-add-square-annotation (region &optional label dont-save-buffer)
+  "Add a square highlight annotation that is stored within the PDF file."
+  ;; Need active region for it to be square instead of text highlight
+  (setq pdf-view--have-rectangle-region t)
+  (setq pdf-view-active-region region)
+  (pdf-view--push-mark)
+  (pdf-annot-add-markup-annotation
+   (list region)
+   'highlight
+   (face-background 'org-ilm-face-extract)
+   `(
+     (opacity . 1.0)
+     (label . ,label)
+     ;; (contents . "")
+     ))
+  (unless dont-save-buffer
+    (save-buffer)))
 
 ;;;;; Data
 ;; Like outline and stuff
@@ -1446,12 +1468,14 @@ set only (not let)."
            (current-page (pdf-view-current-page))
            (region (org-ilm--pdf-region-normalized))
            (region-text (car (pdf-view-active-region-text)))
+           (pdf-buffer (current-buffer))
            (title
             (concat
              "Page " (number-to-string current-page-real)
              " region"
              (when region-text (concat ": " (org-ilm--generate-text-snippet region-text))) ))
-           org-headline)
+           (extract-org-id (org-id-new))
+           capture-data)
 
       ;; TODO Would be nice to prompt for other output-type and repeat the
       ;; function from here. Can do so with a while loop around the pcase
@@ -1462,32 +1486,36 @@ set only (not let)."
 
       (pcase output-type
         ('virtual
-         (with-temp-buffer
-           (org-ilm--pdf-insert-range-as-extract
-            (cons current-page-real region)
-            (concat title "%?")
-            (1+ level))
-           (setq org-headline (buffer-string)))
-
-         (let* ((org-capture-templates
-                 `(("c" "Capture" entry (id ,org-id) ,org-headline))))
-           (org-capture nil "c")))
+         (let (org-headline-content)
+           (with-temp-buffer
+             (org-ilm--pdf-insert-range-as-extract
+              (cons current-page-real region)
+              (concat title "%?")
+              (1+ level)
+              (list :id extract-org-id))
+             (setq capture-data (list :template (buffer-string))))))
         ('text
-         (org-ilm--capture
-          'extract
-          org-id
-          (list :title title :content region-text :ext "org")))
+         (setq capture-data
+               (list :id extract-org-id
+                     :title title
+                     :content region-text
+                     :ext "org")))
         ('image
-         (let* ((extract-org-id (org-id-new))
-                (img-path (org-ilm--pdf-image-export extract-org-id region)))
-           (org-ilm--capture
-            'extract
-            org-id
-            (list :file img-path
-                  :title title
-                  :id extract-org-id
-                  :ext t))))
-         ))))
+         (setq capture-data
+               (list :file (org-ilm--pdf-image-export extract-org-id region)
+                     :title title
+                     :id extract-org-id
+                     :ext t)))
+        (t (error "Unrecognized output type")))
+
+      (org-ilm--capture
+       'extract
+       org-id
+       capture-data
+       (lambda ()
+         (with-current-buffer pdf-buffer
+           (org-ilm--pdf-add-square-annotation
+            region extract-org-id)))))))
 
 (defun org-ilm-pdf-outline-extract ()
   "Turn PDF outline items into a extracts.
