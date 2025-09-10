@@ -713,7 +713,7 @@ The callback ON-ABORT is called when capture is cancelled."
              (kill-buffer process-buffer))))))
     process-buffer))
 
-(cl-defun org-ilm--convert-with-pandoc (id input-path input-format &key output-dir keep-buffer-alive on-success on-error)
+(cl-defun org-ilm--convert-with-pandoc (id input-path input-format &key output-dir keep-buffer-alive process-name on-success on-error)
   "Convert a file to Org mode format using Pandoc."
   (let* ((input-path (expand-file-name input-path))
          (output-dir (expand-file-name (or output-dir (file-name-directory input-path))))
@@ -721,7 +721,7 @@ The callback ON-ABORT is called when capture is cancelled."
          (default-directory output-dir))
     (org-ilm--debug "Pandoc conversion: %s" input-path)
     (org-ilm--convert-make-process
-     :name "pandoc"
+     :name (or process-name "pandoc")
      :id id
      :keep-buffer-alive keep-buffer-alive
      :command
@@ -743,7 +743,7 @@ The callback ON-ABORT is called when capture is cancelled."
 
 ;; Marker: https://github.com/datalab-to/marker
 ;; Much better Org formatting when converting from markdown
-(cl-defun org-ilm--convert-with-marker (id input-path format &key output-dir pages disable-image-extraction keep-buffer-alive move-content-out new-name to-org on-success on-error)
+(cl-defun org-ilm--convert-with-marker (id input-path format &key output-dir pages disable-image-extraction keep-buffer-alive move-content-out new-name to-org process-name on-success on-error)
   "Convert a PDF document or image using Marker.
 
 OUTPUT-DIR is the output directory. If not specified, will be the same
@@ -769,7 +769,7 @@ does not have an option for this so it is done here.
          (output-dir-dir (file-name-concat output-dir (file-name-base input-path))))
     (org-ilm--debug "Marker conversion:" input-path)
     (org-ilm--convert-make-process
-     :name "marker"
+     :name (or process-name "marker")
      :id id
      :keep-buffer-alive keep-buffer-alive
      :command
@@ -836,6 +836,33 @@ does not have an option for this so it is done here.
        
        (funcall on-success proc buf id))
      :on-error on-error)))
+
+;; TODO Make a multi-step convert helper, mostly so that org-ilm--convert-state
+;; is not set except for the in the last converter process
+
+(cl-defun org-ilm--convert-to-org-with-marker-pandoc (id input-path new-name &key pdf-pages  on-success on-error)
+  "Convert a PDF file or image to Markdown using Marker, then to Org mode using Pandoc."
+  (let ((input-dir (file-name-directory input-path))
+        (process-name "marker-pandoc"))
+    (org-ilm--convert-with-marker
+     id
+     input-path
+     "markdown"
+     :new-name new-name
+     :pages pdf-pages
+     :move-content-out t
+     :to-org t
+     :process-name process-name
+     :on-success
+     (lambda (proc buf id)
+       (org-ilm--convert-with-pandoc
+        id
+        (file-name-concat input-dir (concat new-name ".md"))
+        "markdown"
+        :process-name process-name
+        :on-success on-success
+        :on-error on-error))
+     :on-error on-error )))
 
 ;;;;; Conversions view
 
@@ -1024,7 +1051,7 @@ Will become an attachment Org file that is the child heading of current entry."
   :group 'org-ilm)
 
 (defconst org-ilm--pdf-output-types
-  '((virtual . "Virtual view")
+  '((virtual . "PDF (virtual)")
     (text . "Text")
     (image . "Image")
     (org . "Org (Marker)")))
@@ -1411,37 +1438,22 @@ view (`org-ilm--pdf-open-ranges')."
 
 ;;;;; Convert
 
-(defun org-ilm--pdf-convert-to-org (pdf-path pages org-id headline on-success)
+(defun org-ilm--pdf-convert-to-org (pdf-path pages org-id on-success &optional on-error)
   "Convert attachment PDF to Md using Marker, then to Org mode using Pandoc."
-  (let ((attach-dir (file-name-directory pdf-path)))
-    (org-ilm--convert-with-marker
-     org-id
+  (let ((headline (org-ilm--org-headline-element-from-id org-id)))
+    (org-ilm--convert-to-org-with-marker-pandoc
+     org-id ;; id process
      pdf-path
-     "markdown"
-     :new-name org-id
-     :pages pages
-     :move-content-out t
-     :to-org t
+     org-id ;; new-name
+     :pdf-pages pages
      :on-success
      (lambda (proc buf id)
-       (org-ilm--convert-with-pandoc
-        org-id
-        (file-name-concat attach-dir (concat org-id ".md"))
-        "markdown"
-        :on-success
-        (lambda (proc buf id)
-          (kill-buffer buf)
-          (save-excursion
-            ;; Fails with org-id, must be headline
-            (org-with-point-at headline
-              (org-attach-sync)
-              (funcall on-success))))
-        :on-error
-        (lambda (proc buf id)
-          (switch-to-buffer buf))))
-     :on-error
-     (lambda (proc buf id)
-       (switch-to-buffer buf)))))
+       (save-excursion
+         ;; Fails with org-id, must be headline
+         (org-with-point-at headline
+           (org-attach-sync)
+           (funcall on-success))))
+     :on-error on-error)))
 
 (defun org-ilm-pdf-convert (output-type)
   "Convert PDF to another format within the same attachment."
@@ -1451,6 +1463,10 @@ view (`org-ilm--pdf-open-ranges')."
                     (lambda (option) (member (cdr option) '(text org)))
                     (org-ilm--invert-alist org-ilm--pdf-output-types))))
       (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
+  (unless (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode))
+    (user-error "Not in PDF buffer."))
+  (unless (org-ilm--attachment-data)
+    (user-error "Not in an attachment buffer."))
 
   (let* ((pdf-buffer (current-buffer))
          (org-id (file-name-base (buffer-name)))
@@ -1483,8 +1499,7 @@ view (`org-ilm--pdf-open-ranges')."
             (1- (nth 1 (pdf-virtual-document-page 1)))
           (cons (1- (nth 1 (pdf-virtual-document-page 1)))
                 (1- (nth 1 (pdf-virtual-document-page num-pages)))))
-        org-id headline on-success)
-       ))))
+        org-id on-success)))))
 
 ;;;;; Extract
 
@@ -1608,10 +1623,7 @@ view (`org-ilm--pdf-open-ranges')."
              pdf-path
              (1- current-page-real)
              extract-org-id
-             (org-ilm--org-headline-element-from-id extract-org-id)
-             (lambda () (message "Conversion finished."))))))
-            )
-         )))
+             (lambda () (message "Conversion finished."))))))))))
 
 (defun org-ilm-pdf-region-extract (output-type)
   "Turn selected PDF region into an extract.
@@ -1795,11 +1807,43 @@ make a bunch of headers."
                (cons (1- (alist-get 'page section))
                      (1- (alist-get 'next-page section)))
                extract-org-id
-               (org-ilm--org-headline-element-from-id extract-org-id)
-               (lambda () (message "Conversion finished.")))))))
-        )
-      )))
+               (lambda () (message "Conversion finished.")))))))))))
 
+
+
+;;;; Image attachment
+
+(cl-defun org-ilm--image-convert-to-org (image-path org-id &key on-success on-error)
+  "Convert an attachment image to Org with Marker."
+  (let ((headline (org-ilm--org-headline-element-from-id org-id)))
+    (org-ilm--convert-to-org-with-marker-pandoc
+     org-id ;; id process
+     image-path
+     org-id ;; new-name
+     :on-success
+     (lambda (proc buf id)
+       (save-excursion
+         ;; Fails with org-id, must be headline
+         (org-with-point-at headline
+           (org-attach-sync)
+           (funcall on-success))))
+     :on-error on-error)))
+
+(defun org-ilm-image-convert-to-org ()
+  "Convert image attachment to an Org file."
+  (interactive)
+  (unless (eq major-mode 'image-mode)
+    (user-error "Not in image buffer."))
+  (unless (org-ilm--attachment-data)
+    (user-error "Not in an attachment buffer."))
+
+  (org-ilm--image-convert-to-org
+   buffer-file-name
+   (car (org-ilm--attachment-data))
+   :on-success
+   (lambda () 
+     (when (yes-or-no-p "Conversion finished. Use as main attachment?")
+       (org-entry-put nil "ILM_EXT" "org")))))
 
 
 ;;;; Attachments
