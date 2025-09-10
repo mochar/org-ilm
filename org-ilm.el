@@ -567,8 +567,9 @@ The callback ON-ABORT is called when capture is cancelled."
             
             ;; Attach the file. We always use 'mv because we are
             ;; importing the file from the tmp dir.
-            (let ((org-attach-auto-tag (if (eq type 'source) org-attach-auto-tag nil)))
-              (org-attach-attach file nil 'mv))))
+            (when file
+              (let ((org-attach-auto-tag (if (eq type 'source) org-attach-auto-tag nil)))
+                (org-attach-attach file nil 'mv)))))
          (after-finalize
           (lambda ()
             ;; Deal with success and aborted capture. This can be detected in
@@ -591,9 +592,9 @@ The callback ON-ABORT is called when capture is cancelled."
         (error "Cannot infer extension when no file provided (:ext=t)")))
 
     ;; Save content in a temporary file if no file provided
-    (unless (or content file)
-      (error "Cannot capture without content or file."))
-    (unless file
+    ;; (unless (or content file)
+      ;; (error "Cannot capture without content or file."))
+    (when (and (not file) content)
       (setq file (expand-file-name
                   (format "%s.%s" id (or attachment-ext "org"))
                   temporary-file-directory))
@@ -891,7 +892,7 @@ Will become an attachment Org file that is the child heading of current entry."
 (defconst org-ilm--pdf-extract-option-to-types
   '((page . (virtual text image org))
     (outline . (virtual))
-    (region . (virtual text image org))
+    (region . (virtual text image))
     (section . (virtual text org))))
 
 (defcustom org-ilm-pdf-marker-path (executable-find "marker_single")
@@ -987,7 +988,12 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (kill-buffer img-buffer)
     img-path))
 
-
+(defun org-ilm--pdf-path ()
+  "Infer the path of the PDF file, regardless if in virtual or not."
+  (expand-file-name
+   (if (eq major-mode 'pdf-virtual-view-mode)
+       (car (pdf-virtual-document-page 1))
+     buffer-file-name)))
 
 ;;;;; Data
 ;; Like outline and stuff
@@ -1212,6 +1218,85 @@ view (`org-ilm--pdf-open-ranges')."
     (pop-to-buffer (current-buffer))
     (current-buffer)))
 
+
+;;;;; Convert
+
+(defun org-ilm--pdf-convert-to-org (pdf-path pages org-id headline on-success)
+  "Convert attachment PDF to Md using Marker, then to Org mode using Pandoc."
+  (let ((attach-dir (file-name-directory pdf-path)))
+    (org-ilm--convert-pdf-with-marker
+     pdf-path
+     "markdown"
+     :new-name org-id
+     :pages pages
+     :keep-buffer-alive t
+     :move-content-out t
+     :to-org t
+     :on-success
+     (lambda (proc buf)
+       (kill-buffer buf)
+       (org-ilm--convert-to-org-with-pandoc
+        (file-name-concat attach-dir (concat org-id ".md"))
+        "markdown"
+        :keep-buffer-alive t
+        :on-success
+        (lambda (proc buf)
+          (kill-buffer buf)
+          (save-excursion
+            ;; Fails with org-id, must be headline
+            (org-with-point-at headline
+              (org-attach-sync)
+              (funcall on-success))))
+        :on-error
+        (lambda (proc buf)
+          (switch-to-buffer buf))))
+     :on-error
+     (lambda (proc buf)
+       (switch-to-buffer buf)))))
+
+(defun org-ilm-pdf-convert (output-type)
+  "Convert PDF to another format within the same attachment."
+  (interactive
+   (list
+    (let ((options (seq-filter
+                    (lambda (option) (member (cdr option) '(text org)))
+                    (org-ilm--invert-alist org-ilm--pdf-output-types))))
+      (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
+
+  (let* ((pdf-buffer (current-buffer))
+         (org-id (file-name-base (buffer-name)))
+         (headline (org-ilm--org-headline-element-from-id org-id))
+         (tmp-path (expand-file-name
+                    (concat org-id ".org")
+                    temporary-file-directory))
+         (num-pages (pdf-info-number-of-pages))
+         (pdf-path (expand-file-name (car (pdf-virtual-document-page 1))))
+         (attach-dir (file-name-directory pdf-path))
+         ;; Not a lot of code reuse..
+         (on-success (lambda () 
+                       (when (yes-or-no-p "Conversion finished. Use as main attachment?")
+                         (org-entry-put nil "ILM_EXT" "org")))))
+    (pcase output-type
+      ('text
+       (with-temp-buffer
+         (dolist (page (number-sequence 1 num-pages))
+           (insert (pdf-info-gettext page '(0 0 1 1) nil pdf-buffer)))
+         (write-region (point-min) (point-max) tmp-path)
+         (save-excursion
+           (org-with-point-at headline
+             (let ((org-attach-auto-tag nil))
+               (org-attach-attach tmp-path nil 'mv))
+             (funcall on-success)))))
+      ('org
+       (org-ilm--pdf-convert-to-org
+        pdf-path
+        (if (= 1 num-pages)
+            (1- (nth 1 (pdf-virtual-document-page 1)))
+          (cons (1- (nth 1 (pdf-virtual-document-page 1)))
+                (1- (nth 1 (pdf-virtual-document-page num-pages)))))
+        org-id headline on-success)
+       ))))
+
 ;;;;; Extract
 
 (defun org-ilm--pdf-extract-prompt-for-output-type (extract-option)
@@ -1287,7 +1372,9 @@ view (`org-ilm--pdf-open-ranges')."
 
     (switch-to-buffer buffer)
     (let ((current-page (pdf-view-current-page))
-          (current-page-real (org-ilm--pdf-page-normalized)))
+          (current-page-real (org-ilm--pdf-page-normalized))
+          (pdf-path (org-ilm--pdf-path))
+          (extract-org-id (org-id-new)))
 
       (pcase output-type
         ('virtual
@@ -1311,8 +1398,7 @@ view (`org-ilm--pdf-open-ranges')."
             org-id
             (list :content text :ext "org"))))
         ('image
-         (let* ((extract-org-id (org-id-new))
-                (img-path (org-ilm--pdf-image-export extract-org-id)))
+         (let* ((img-path (org-ilm--pdf-image-export extract-org-id)))
            (org-ilm--capture
             'extract
             org-id
@@ -1320,7 +1406,22 @@ view (`org-ilm--pdf-open-ranges')."
                   :title (format "Page %s" current-page-real)
                   :id extract-org-id
                   :ext t))))
-           )
+        ('org
+         (org-ilm--capture
+          'extract
+          org-id
+          (list 
+           :title (format "Page %s" current-page-real)
+           :id extract-org-id
+           :ext "org")
+          (lambda ()
+            (org-ilm--pdf-convert-to-org
+             pdf-path
+             (1- current-page-real)
+             extract-org-id
+             (org-ilm--org-headline-element-from-id extract-org-id)
+             (lambda () (message "Conversion finished."))))))
+            )
          )))
 
 (defun org-ilm-pdf-region-extract (output-type)
@@ -1417,6 +1518,8 @@ make a bunch of headers."
       (org-ilm--pdf-extract-prepare)
     (let (section)
       (switch-to-buffer buffer)
+
+      ;; Get section
       (let ((outline (org-ilm--pdf-outline-get buffer)) ; TODO pass orginial file if in virtual
             (num-pages (pdf-info-number-of-pages))
             (current-page (org-ilm--pdf-page-normalized))
@@ -1447,111 +1550,61 @@ make a bunch of headers."
         
         (setq section (nth outline-index outline)))
 
-        (pcase output-type
-          ('virtual
-           (with-temp-buffer
-             (org-ilm--pdf-insert-section-as-extract section level)
+      (pcase output-type
+        ('virtual
+         (with-temp-buffer
+           (org-ilm--pdf-insert-section-as-extract section level)
 
-             (let* ((org-capture-templates
-                     `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
-               (org-capture nil "c"))))
-          ('text
-           ;; TODO This currently extracts the actual PDF data lol
-           (with-temp-buffer
-             (let ((range (alist-get 'range section)))
-               (if (= (length range) 2)
-                   (insert (pdf-info-gettext (car range) (cdr range) nil buffer) "\n")
-                 (let* ((range-begin (car range))
-                        (range-end (cdr range))
-                        (page-begin (car range-begin))
-                        (page-end (car range-end)))
-                   (dolist (page (number-sequence page-begin page-end))
-                     (insert (pdf-info-gettext
-                              page
-                              (cond
-                               ((= page page-begin) (cdr range-begin))
-                               ((= page page-end) (cdr range-end))
-                               (t '(0 0 1 1)))
-                              'word buffer)
-                             "\n")))))
+           (let* ((org-capture-templates
+                   `(("c" "Capture" entry (id ,org-id) ,(buffer-string)))))
+             (org-capture nil "c"))))
+        ('text
+         ;; TODO This currently extracts the actual PDF data lol
+         (with-temp-buffer
+           (let ((range (alist-get 'range section)))
+             (if (= (length range) 2)
+                 (insert (pdf-info-gettext (car range) (cdr range) nil buffer) "\n")
+               (let* ((range-begin (car range))
+                      (range-end (cdr range))
+                      (page-begin (car range-begin))
+                      (page-end (car range-end)))
+                 (dolist (page (number-sequence page-begin page-end))
+                   (insert (pdf-info-gettext
+                            page
+                            (cond
+                             ((= page page-begin) (cdr range-begin))
+                             ((= page page-end) (cdr range-end))
+                             (t '(0 0 1 1)))
+                            'word buffer)
+                           "\n")))))
 
-             (org-ilm--capture
-              'extract
-              org-id
-              (list :content (buffer-string)
-                    :title (concat "Section: " (alist-get 'title section))
-                    :ext "org"))))
-           )
-          )))
+           (org-ilm--capture
+            'extract
+            org-id
+            (list :content (buffer-string)
+                  :title (concat "Section: " (alist-get 'title section))
+                  :ext "org"))))
+        ('org
+         (let ((pdf-path (org-ilm--pdf-path))
+               (extract-org-id (org-id-new)))
+           (org-ilm--capture
+            'extract
+            org-id
+            (list 
+             :title (concat "Section: " (alist-get 'title section))
+             :id extract-org-id
+             :ext "org")
+            (lambda ()
+              (org-ilm--pdf-convert-to-org
+               pdf-path
+               (cons (1- (alist-get 'page section))
+                     (1- (alist-get 'next-page section)))
+               extract-org-id
+               (org-ilm--org-headline-element-from-id extract-org-id)
+               (lambda () (message "Conversion finished.")))))))
+        )
+      )))
 
-;;;;; Convert
-
-(defun org-ilm-pdf-convert (output-type)
-  "Convert PDF to another format within the same attachment."
-  (interactive
-   (list
-    (let ((options (seq-filter
-                    (lambda (option) (member (cdr option) '(text org)))
-                    (org-ilm--invert-alist org-ilm--pdf-output-types))))
-      (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
-
-  (let* ((pdf-buffer (current-buffer))
-         (org-id (file-name-base (buffer-name)))
-         (headline (org-ilm--org-headline-element-from-id org-id))
-         (tmp-path (expand-file-name
-                    (concat org-id ".org")
-                    temporary-file-directory))
-         (num-pages (pdf-info-number-of-pages))
-         (pdf-path (expand-file-name (car (pdf-virtual-document-page 1))))
-         (attach-dir (file-name-directory pdf-path))
-         ;; Not a lot of code reuse..
-         (on-success (lambda () 
-                       (when (yes-or-no-p "Conversion finished. Use as main attachment?")
-                         (org-entry-put nil "ILM_EXT" "org")))))
-    (pcase output-type
-      ('text
-       (with-temp-buffer
-         (dolist (page (number-sequence 1 num-pages))
-           (insert (pdf-info-gettext page '(0 0 1 1) nil pdf-buffer)))
-         (write-region (point-min) (point-max) tmp-path)
-         (save-excursion
-           (org-with-point-at headline
-             (let ((org-attach-auto-tag nil))
-               (org-attach-attach tmp-path nil 'mv))
-             (funcall on-success)))))
-      ('org
-       (org-ilm--convert-pdf-with-marker
-        pdf-path
-        "markdown"
-        :new-name org-id
-        :pages (if (= 1 num-pages)
-                   (1- (nth 1 (pdf-virtual-document-page 1)))
-                 (cons (1- (nth 1 (pdf-virtual-document-page 1)))
-                       (1- (nth 1 (pdf-virtual-document-page num-pages)))))
-        :keep-buffer-alive t
-        :move-content-out t
-        :to-org t
-        :on-success
-        (lambda (proc buf)
-          (kill-buffer buf)
-          (org-ilm--convert-to-org-with-pandoc
-           (file-name-concat attach-dir (concat org-id ".md"))
-           "markdown"
-           :keep-buffer-alive t
-           :on-success
-           (lambda (proc buf)
-             (kill-buffer buf)
-             (save-excursion
-               (org-with-point-at headline
-                 (org-attach-sync)
-                 (funcall on-success))))
-           :on-error
-           (lambda (proc buf)
-             (switch-to-buffer buf))))
-        :on-error
-        (lambda (proc buf)
-          (switch-to-buffer buf)))
-       ))))
 
 
 ;;;; Attachments
