@@ -672,25 +672,63 @@ The callback ON-ABORT is called when capture is cancelled."
 
 ;;;; Conversion
 
-;;;;; To org with Pandoc
+(defcustom org-ilm-convert-marker-path (executable-find "marker_single")
+  "Path to the marker_single executable."
+  :type 'file
+  :group 'org-ilm)
 
-(cl-defun org-ilm--convert-to-org-with-pandoc (file-path format &key output-dir keep-buffer-alive on-success on-error)
-  "Convert a file to Org mode format using Pandoc."
-  (let* ((file-path (expand-file-name file-path))
-         (output-dir (expand-file-name (or output-dir (file-name-directory file-path))))
-         ;; Make sure we are in output dir so that media files references correct
-         (default-directory output-dir)
-         (process-name (format "org-ilm-pandoc (%s)" file-path))
+(defcustom org-ilm-convert-keep-buffer-alive 'always
+  "Keep the conversion buffer alive, regardless of success or fail."
+  :type '(choice (const :tag "Always" always)
+                 (const :tag "On success" success)
+                 (const :tag "On error" error))
+  :group 'org-ilm)
+
+;;;;; Convertors
+
+(cl-defun org-ilm--convert-make-process (&key name id command on-success on-error keep-buffer-alive)
+  "Create an async process to run COMMAND."
+  (let* ((process-name (format "org-ilm-convert-%s (%s)" name id))
          (process-buffer (get-buffer-create (concat "*" process-name "*"))))
-    (org-ilm--debug "Pandoc conversion:\n--File: %s" file-path)
+    (with-current-buffer process-buffer
+      (setq-local org-ilm--convert-state nil))
     (make-process
      :name process-name
      :buffer process-buffer
+     :command command
+     :sentinel
+     (lambda (proc event)
+       (when (memq (process-status proc) '(exit signal))
+         (let ((success (= (process-exit-status proc) 0)))
+           (with-current-buffer process-buffer
+             (setq-local org-ilm--convert-state
+                         (if success 'success 'error)))
+           (if success
+               (funcall on-success proc process-buffer id)
+             (funcall on-error proc process-buffer id))
+           (unless (or keep-buffer-alive
+                       (eq org-ilm-convert-keep-buffer-alive 'always)
+                       (and success (eq org-ilm-convert-keep-buffer-alive 'success))
+                       (and (not success) (eq org-ilm-convert-keep-buffer-alive 'error)))
+             (kill-buffer process-buffer))))))
+    process-buffer))
+
+(cl-defun org-ilm--convert-with-pandoc (id input-path input-format &key output-dir keep-buffer-alive on-success on-error)
+  "Convert a file to Org mode format using Pandoc."
+  (let* ((input-path (expand-file-name input-path))
+         (output-dir (expand-file-name (or output-dir (file-name-directory input-path))))
+         ;; Make sure we are in output dir so that media files references correct
+         (default-directory output-dir))
+    (org-ilm--debug "Pandoc conversion: %s" input-path)
+    (org-ilm--convert-make-process
+     :name "pandoc"
+     :id id
+     :keep-buffer-alive keep-buffer-alive
      :command
      (append
         (list
          "pandoc"
-         "--from" format
+         "--from" input-format
          "--to" "org"
          "--wrap=preserve"
          ;; Relative to output-dir, or absolute path. Since we set
@@ -698,56 +736,47 @@ The callback ON-ABORT is called when capture is cancelled."
          ;; folder, set to "."
          "--extract-media" "."
          "--verbose"
-         file-path
-         "-o" (concat (file-name-sans-extension file-path) ".org")))
-     :sentinel
-     (lambda (proc event)
-       (when (memq (process-status proc) '(exit signal))
-         (if (= (process-exit-status proc) 0)
-             (funcall on-success proc process-buffer)
-           (funcall on-error proc process-buffer))
-         (unless keep-buffer-alive (kill-buffer process-buffer)))))))
-     
+         input-path
+         "-o" (concat (file-name-sans-extension input-path) ".org")))
+     :on-success on-success
+     :on-error on-error)))
 
-;;;;; PDF with Marker
-;; Marker conversion from PDF: https://github.com/datalab-to/marker
-
+;; Marker: https://github.com/datalab-to/marker
 ;; Much better Org formatting when converting from markdown
-(cl-defun org-ilm--convert-pdf-with-marker (pdf-path format &key output-dir pages disable-image-extraction keep-buffer-alive move-content-out new-name to-org on-success on-error)
-  "Convert a PDF document using Marker.
+(cl-defun org-ilm--convert-with-marker (id input-path format &key output-dir pages disable-image-extraction keep-buffer-alive move-content-out new-name to-org on-success on-error)
+  "Convert a PDF document or image using Marker.
 
 OUTPUT-DIR is the output directory. If not specified, will be the same
-directory as PDF-PATH. Note that Marker stores the output in another dir
+directory as INPUT-PATH. Note that Marker stores the output in another dir
 within this directory, named after the file. With MOVE-CONTENT-OUT set
 to non-nil, the directory contents will be moved up to be in OUTPUT-DIR.
 
 NEW-NAME if non-nil can be a string to rename the output file. Marker
 does not have an option for this so it is done here.
 "
-  (unless (and org-ilm-pdf-marker-path (file-executable-p org-ilm-pdf-marker-path))
-    (user-error "Marker executable not available. See org-ilm-pdf-marker-path."))
+  (unless (and org-ilm-convert-marker-path (file-executable-p org-ilm-convert-marker-path))
+    (user-error "Marker executable not available. See org-ilm-convert-marker-path."))
   (unless (member format '("markdown" "json" "html" "chunks"))
     (error "FORMAT must be one of [markdown|json|html|chunks]"))
   (unless (or (not to-org) (member format '("markdown" "html")))
     (error "When TO-ORG, FORMAT must be one of [markdown|html]"))
-  (let* ((pdf-path (expand-file-name pdf-path))
-         (pdf-base-name (file-name-base pdf-path))
+  (let* ((input-path (expand-file-name input-path))
+         (input-base-name (file-name-base input-path))
          ;; for rename-file, NEWNAME recognized as dir if ends in slash
          (output-dir (if output-dir
                          (concat (expand-file-name output-dir) "/")
-                       (file-name-directory pdf-path)))
-         (output-dir-dir (file-name-concat output-dir (file-name-base pdf-path)))
-         (process-name (format "org-ilm-marker (%s)" pdf-path))
-         (process-buffer (get-buffer-create (concat "*" process-name "*"))))
-    (org-ilm--debug "Marker conversion:\n--Pages: %s" pages)
-    (make-process
-     :name process-name
-     :buffer process-buffer
+                       (file-name-directory input-path)))
+         (output-dir-dir (file-name-concat output-dir (file-name-base input-path))))
+    (org-ilm--debug "Marker conversion:" input-path)
+    (org-ilm--convert-make-process
+     :name "marker"
+     :id id
+     :keep-buffer-alive keep-buffer-alive
      :command
      (append
       (list
-       org-ilm-pdf-marker-path
-       pdf-path
+       org-ilm-convert-marker-path
+       input-path
        "--output_format" format
        "--output_dir" output-dir)
       (when pages
@@ -772,45 +801,144 @@ does not have an option for this so it is done here.
        "--recognition_batch_size" "1"
        "--equation_batch_size" "1"
        "--table_rec_batch_size" "1"))
-     :sentinel
-     (lambda (proc event)
-       (when (memq (process-status proc) '(exit signal))
-         (if (= (process-exit-status proc) 0)
-             (progn
-               ;; Renaming the files is done by replacing the pdf base file name
-               ;; in each otuput folder file name, but only if the file name
-               ;; starts with it. This is to hit less false positives if the
-               ;; base file name is small, which won't be the case i think since
-               ;; org-ilm works with org-ids all the time.
+     :on-success
+     (lambda (proc buf id)
+       ;; Renaming the files is done by replacing the input base file
+       ;; name in each otuput folder file name, but only if the file
+       ;; name starts with it. This is to hit less false positives if
+       ;; the base file name is small, which won't be the case i think
+       ;; since org-ilm works with org-ids all the time.
 
-               ;; TODO Works ok but I think a better approach would be to create
-               ;; a symlink with the new name and point marker to that. Then
-               ;; delete symlink afterwards.
-               (when (or move-content-out new-name)
-                 ;; Appearently that regex is needed otherwise returns "." and
-                 ;; ".." as files lol
-                 (dolist (file (directory-files output-dir-dir 'abs-file-name directory-files-no-dot-files-regexp))
-                   (let ((file-base-name (file-name-base file))
-                         (file-ext (file-name-extension file)))
-                     (rename-file
-                      file
-                      (file-name-concat
-                       (if move-content-out output-dir output-dir-dir)
-                       (when new-name
-                         (concat
-                          (replace-regexp-in-string
-                           ;; Only replace name if filename starts with it
-                           (concat "^" pdf-base-name)
-                           new-name
-                           file-base-name)
-                          "." file-ext)))
-                      'ok-if-exists)))
-                 (when move-content-out
-                   (delete-directory output-dir-dir)))
-               (funcall on-success proc process-buffer))
-           (funcall on-error proc process-buffer))
-         (unless keep-buffer-alive (kill-buffer process-buffer))))
-     )))
+       ;; TODO Works ok but I think a better approach would be to create
+       ;; a symlink with the new name and point marker to that. Then
+       ;; delete symlink afterwards.
+       (when (or move-content-out new-name)
+         ;; Appearently that regex is needed otherwise returns "." and
+         ;; ".." as files lol
+         (dolist (file (directory-files output-dir-dir 'abs-file-name directory-files-no-dot-files-regexp))
+           (let ((file-base-name (file-name-base file))
+                 (file-ext (file-name-extension file)))
+             (rename-file
+              file
+              (file-name-concat
+               (if move-content-out output-dir output-dir-dir)
+               (when new-name
+                 (concat
+                  (replace-regexp-in-string
+                   ;; Only replace name if filename starts with it
+                   (concat "^" input-base-name)
+                   new-name
+                   file-base-name)
+                  "." file-ext)))
+              'ok-if-exists)))
+         (when move-content-out
+           (delete-directory output-dir-dir)))
+       
+       (funcall on-success proc buf id))
+     :on-error on-error)))
+
+;;;;; Conversions view
+
+(defvar-keymap org-ilm-conversions-map
+  :doc "Keymap for the conversions view."
+  ;; Navigation
+  "n" (lambda ()
+        (interactive)
+        (next-line)
+        (when (eobp) (previous-line)))
+  "p" #'previous-line
+  "b" #'backward-char
+  "f" #'forward-char
+  "q" #'quit-window
+  "k" (lambda ()
+        (interactive)
+        (kill-buffer (current-buffer)))
+  ;; Actions
+  "SPC" #'org-ilm-conversions-view-in-collection
+  "RET" #'org-ilm-conversions-buffer-open
+  "d" #'org-ilm-conversions-buffer-delete
+  "B" #'org-ilm-conversions-ibuffer)
+
+(defun org-ilm-conversions-view-in-collection ()
+  "View element of object at point in collection."
+  (interactive)
+  (let ((org-id (plist-get (vtable-current-object) :id)))
+    (org-id-goto org-id)))
+
+(defun org-ilm-conversions-buffer-open ()
+  "Open buffer of object at point."
+  (interactive)
+  (pop-to-buffer (plist-get (vtable-current-object) :buffer)))
+
+(defun org-ilm-conversions-buffer-delete ()
+  "Kill buffer of object at point."
+  (interactive)
+  (when (yes-or-no-p "Kill buffer?")
+    (kill-buffer (plist-get (vtable-current-object) :buffer))))
+
+(defun org-ilm-conversions-ibuffer ()
+  "Open conversion buffers in ibuffer."
+  (interactive)
+  (ibuffer nil "*Ilm Conversion Buffers*"
+           '((name . "^\\*org-ilm-convert-"))))
+
+(defun org-ilm--conversions-buffers ()
+  "Return all make-process buffers of convertors."
+  (seq-filter
+   (lambda (buf)
+     (string-match-p
+      (rx bol "*org-ilm-convert-" (+? anything) " (" (+? anything) ")*" eol)
+      (buffer-name buf)))
+   (buffer-list)))
+
+(defun org-ilm--conversions-make-vtable ()
+  "Build conversions view vtable."
+  (make-vtable
+   :insert nil ; Return vtable object rather than insert at point
+   :objects-function
+   (lambda ()
+     (mapcar
+      (lambda (buf)
+        (let* ((buffer-name (buffer-name buf))
+               (_ (string-match
+                   "^\\*org-ilm-convert-\\([^ ]+\\) (\\([^)]*\\))\\*$"
+                   buffer-name))
+               (name (match-string 1 buffer-name))
+               (id (match-string 2 buffer-name)))
+          (list :name name :id id :buffer buf)))
+      (org-ilm--conversions-buffers)))
+   :columns
+   `((:name
+      "State")
+     (:name
+      "ID")
+     (:name
+      "Converter"
+      :min-width "100%"))
+   :getter
+   (lambda (object column vtable)
+     (pcase (vtable-column vtable column)
+       ("ID" (plist-get object :id))
+       ("State" (with-current-buffer (plist-get object :buffer)
+                  (pcase org-ilm--convert-state
+                    ('error (propertize "Error" 'face 'error))
+                    ('success (propertize "Success" 'face 'success))
+                    (t "Busy"))))
+       ("Converter" (plist-get object :name))))
+   :keymap org-ilm-conversions-map))
+
+(defun org-ilm-conversions ()
+  "Open the conversions view."
+  (interactive)
+  (let ((buf (get-buffer-create "*ilm conversions*")))
+    (with-current-buffer buf
+      (setq-local buffer-read-only nil)
+      (erase-buffer)
+      (goto-char (point-min))
+      (vtable-insert (org-ilm--conversions-make-vtable))
+      (setq-local buffer-read-only t)
+      (goto-char (point-min)))
+    (switch-to-buffer buf)))
 
 
 ;;;; Org attachment
@@ -913,11 +1041,6 @@ Will become an attachment Org file that is the child heading of current entry."
     (region . (virtual text image))
     (section . (virtual text org))))
 
-(defcustom org-ilm-pdf-marker-path (executable-find "marker_single")
-  "Path to the marker_single executable."
-  :type 'file
-  :group 'org-ilm)
-
 
 ;;;;; Commands
 
@@ -1006,7 +1129,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (kill-buffer img-buffer)
     img-path))
 
-(cl-defun org-ilm--pdf-path (&keys directory-p)
+(cl-defun org-ilm--pdf-path (&key directory-p)
   "Infer the path of the PDF file, regardless if in virtual or not.
 When DIRECTORY-P, return directory of the file."
   (let ((path (expand-file-name
@@ -1291,23 +1414,22 @@ view (`org-ilm--pdf-open-ranges')."
 (defun org-ilm--pdf-convert-to-org (pdf-path pages org-id headline on-success)
   "Convert attachment PDF to Md using Marker, then to Org mode using Pandoc."
   (let ((attach-dir (file-name-directory pdf-path)))
-    (org-ilm--convert-pdf-with-marker
+    (org-ilm--convert-with-marker
+     org-id
      pdf-path
      "markdown"
      :new-name org-id
      :pages pages
-     :keep-buffer-alive t
      :move-content-out t
      :to-org t
      :on-success
-     (lambda (proc buf)
-       (kill-buffer buf)
-       (org-ilm--convert-to-org-with-pandoc
+     (lambda (proc buf id)
+       (org-ilm--convert-with-pandoc
+        org-id
         (file-name-concat attach-dir (concat org-id ".md"))
         "markdown"
-        :keep-buffer-alive t
         :on-success
-        (lambda (proc buf)
+        (lambda (proc buf id)
           (kill-buffer buf)
           (save-excursion
             ;; Fails with org-id, must be headline
@@ -1315,10 +1437,10 @@ view (`org-ilm--pdf-open-ranges')."
               (org-attach-sync)
               (funcall on-success))))
         :on-error
-        (lambda (proc buf)
+        (lambda (proc buf id)
           (switch-to-buffer buf))))
      :on-error
-     (lambda (proc buf)
+     (lambda (proc buf id)
        (switch-to-buffer buf)))))
 
 (defun org-ilm-pdf-convert (output-type)
@@ -2259,7 +2381,6 @@ A lot of formatting code from org-ql."
      ;;       marked))))
      (:name
       "Title"
-      ;; :max-width "50%"
       :min-width "50%"
       :max-width "55%"
       :formatter
