@@ -155,6 +155,8 @@ When set to `attachment', org-transclusion will be used to transclude the conten
         (add-hook 'org-mem-post-targeted-scan-functions
                   #'org-ilm--org-mem-hook)
         (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
+        (advice-add 'pdf-annot-create-context-menu
+                    :around #'org-ilm--pdf-annot-create-context-menu-advice)
         )
     ;; Disable
     (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
@@ -163,6 +165,8 @@ When set to `attachment', org-transclusion will be used to transclude the conten
     (remove-hook 'org-mem-post-targeted-scan-functions
                  #'org-ilm--org-mem-hook)
     (define-key pdf-view-mode-map (kbd "A") nil)
+    (advice-remove 'pdf-annot-create-context-menu
+                   #'org-ilm--pdf-annot-create-context-menu-advice)
     ))
 
 ;;;; Commands
@@ -408,20 +412,30 @@ TODO org-ql uses following snippet in query action, is it more efficient?
     (when (eq (car element) 'headline)
       element)))
 
-(defun org-ilm--org-headline-element-from-id (org-id)
-  "Return headline element from org id.
+(defmacro org-ilm--org-with-point-at (thing &rest body)
+  "THING for now should be an org-id.
 
 Note: Previously used org-id-find but it put point above
-headline. org-mem takes me there directly."
-  (when-let* ((entry (org-mem-entry-by-id org-id))
-              (file (org-mem-entry-file-truename entry))
-              (buf (or (find-buffer-visiting file)
-                       (find-file-noselect file))))
-    (save-excursion
-      (with-current-buffer buf
-        ;; Jump to correct position
-        (goto-char (org-find-property "ID" org-id))
-        (org-ilm--org-headline-at-point)))))
+headline. org-mem takes me there directly.
+
+Alternatively org-id-goto could be used, but does not seem to respect
+save-excursion."
+  `(when-let* ((org-id ,thing)
+               (entry (org-mem-entry-by-id org-id))
+               (file (org-mem-entry-file-truename entry))
+               (buf (or (find-buffer-visiting file)
+                        (find-file-noselect file))))
+     (with-current-buffer buf
+       ;; Jump to correct position
+       (goto-char (org-find-property "ID" org-id))
+       ,@body)))
+
+(defun org-ilm--org-headline-element-from-id (org-id)
+  "Return headline element from org id."
+  (save-excursion
+    (org-ilm--org-with-point-at
+     org-id
+     (org-ilm--org-headline-at-point))))
 
 (defun org-ilm--org-id-from-string (string)
   "Interpret STRING as org-id, link with org-id, or else nil."
@@ -992,30 +1006,16 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (kill-buffer img-buffer)
     img-path))
 
-(defun org-ilm--pdf-path ()
-  "Infer the path of the PDF file, regardless if in virtual or not."
-  (expand-file-name
-   (if (eq major-mode 'pdf-virtual-view-mode)
-       (car (pdf-virtual-document-page 1))
-     buffer-file-name)))
-
-(defun org-ilm--pdf-add-square-annotation (region &optional label dont-save-buffer)
-  "Add a square highlight annotation that is stored within the PDF file."
-  ;; Need active region for it to be square instead of text highlight
-  (setq pdf-view--have-rectangle-region t)
-  (setq pdf-view-active-region region)
-  (pdf-view--push-mark)
-  (pdf-annot-add-markup-annotation
-   (list region)
-   'highlight
-   (face-background 'org-ilm-face-extract)
-   `(
-     (opacity . 1.0)
-     (label . ,label)
-     ;; (contents . "")
-     ))
-  (unless dont-save-buffer
-    (save-buffer)))
+(cl-defun org-ilm--pdf-path (&keys directory-p)
+  "Infer the path of the PDF file, regardless if in virtual or not.
+When DIRECTORY-P, return directory of the file."
+  (let ((path (expand-file-name
+               (if (eq major-mode 'pdf-virtual-view-mode)
+                   (car (pdf-virtual-document-page 1))
+                 buffer-file-name))))
+    (if directory-p
+        (file-name-directory path)
+      path)))
 
 ;;;;; Data
 ;; Like outline and stuff
@@ -1085,6 +1085,51 @@ When not specified, REGION is active region."
                 (+ LE (* ri w))
                 (+ TO (* bo h))))))
      (t (error "Not in a PDF buffer")))))
+
+;;;;; Annotation highlight
+
+(defun org-ilm--pdf-add-square-annotation (region &optional label dont-save-buffer)
+  "Add a square highlight annotation that is stored within the PDF file."
+  ;; Need active region for it to be square instead of text highlight
+  (setq pdf-view--have-rectangle-region t)
+  (setq pdf-view-active-region region)
+  (pdf-view--push-mark)
+  (pdf-annot-add-markup-annotation
+   (list region)
+   'highlight
+   (face-background 'org-ilm-face-extract)
+   `(
+     (opacity . 1.0)
+     (label . ,label)
+     ;; (contents . "")
+     ))
+  (unless dont-save-buffer
+    (save-buffer)))
+
+(defun org-ilm--pdf-annot-create-context-menu-advice (func &rest args)
+  "Advice the function to add an additional menu item to open the
+attachment from its highlight."
+  (let* ((menu (apply func args))
+         (annotation (car args))
+         (extract-id (alist-get 'label annotation)))
+    (define-key
+     menu [ilm-open-collection]
+     `(menu-item "Ilm: View in collection"
+                 ,(lambda ()
+                    (interactive)
+                    (org-id-goto extract-id))
+                 :help "View this extract in the collection."))
+    (define-key
+     menu [ilm-open-attachment]
+     `(menu-item "Ilm: Open attachment"
+                 ,(lambda ()
+                    (interactive)
+                    (let ((path (org-ilm--org-with-point-at
+                                 extract-id
+                                 (org-ilm--attachment-find))))
+                      (find-file path)))
+                 :help "Open the attachment of this extract."))
+    menu))
 
 ;;;;; Virtual
 ;; PDF range. One of:
@@ -1663,11 +1708,15 @@ make a bunch of headers."
     (when (or (not if-exists) (file-exists-p path))
       path)))
 
+(defun org-ilm--attachment-extension ()
+  "Return the extension of the attachment at point, assuming in collection."
+  (or (org-entry-get nil "ILM_EXT" 'inherit) "org"))
+  
 (defun org-ilm--attachment-find (&optional type org-id)
   "Return attachment file of the headline."
   (when-let* ((attach-dir (org-attach-dir))
               (org-id (or org-id (org-id-get)))
-              (type (or type (org-entry-get nil "ILM_EXT" 'inherit) "org"))
+              (type (or type (org-ilm--attachment-extension)))
               (path (expand-file-name (concat org-id "." type) attach-dir)))
       (when (file-exists-p path) path)))
 
