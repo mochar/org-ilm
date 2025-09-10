@@ -651,6 +651,149 @@ The callback ON-ABORT is called when capture is cancelled."
               :after-finalize ,after-finalize))))
       (org-capture nil "i"))))
 
+;;;; Conversion
+
+;;;;; To org with Pandoc
+
+(cl-defun org-ilm--convert-to-org-with-pandoc (file-path format &key output-dir keep-buffer-alive on-success on-error)
+  "Convert a file to Org mode format using Pandoc."
+  (let* ((file-path (expand-file-name file-path))
+         (output-dir (expand-file-name (or output-dir (file-name-directory file-path))))
+         ;; Make sure we are in output dir so that media files references correct
+         (default-directory output-dir)
+         (process-name (format "org-ilm-pandoc (%s)" file-path))
+         (process-buffer (get-buffer-create (concat "*" process-name "*"))))
+    (org-ilm--debug "Pandoc conversion:\n--File: %s" file-path)
+    (make-process
+     :name process-name
+     :buffer process-buffer
+     :command
+     (append
+        (list
+         "pandoc"
+         "--from" format
+         "--to" "org"
+         "--wrap=preserve"
+         ;; Relative to output-dir, or absolute path. Since we set
+         ;; default-directory to output path and want to store media in same
+         ;; folder, set to "."
+         "--extract-media" "."
+         "--verbose"
+         file-path
+         "-o" (concat (file-name-sans-extension file-path) ".org")))
+     :sentinel
+     (lambda (proc event)
+       (when (memq (process-status proc) '(exit signal))
+         (if (= (process-exit-status proc) 0)
+             (funcall on-success proc process-buffer)
+           (funcall on-error proc process-buffer))
+         (unless keep-buffer-alive (kill-buffer process-buffer)))))))
+     
+
+;;;;; PDF with Marker
+;; Marker conversion from PDF: https://github.com/datalab-to/marker
+
+;; Much better Org formatting when converting from markdown
+(cl-defun org-ilm--convert-pdf-with-marker (pdf-path format &key output-dir pages disable-image-extraction keep-buffer-alive move-content-out new-name to-org on-success on-error)
+  "Convert a PDF document using Marker.
+
+OUTPUT-DIR is the output directory. If not specified, will be the same
+directory as PDF-PATH. Note that Marker stores the output in another dir
+within this directory, named after the file. With MOVE-CONTENT-OUT set
+to non-nil, the directory contents will be moved up to be in OUTPUT-DIR.
+
+NEW-NAME if non-nil can be a string to rename the output file. Marker
+does not have an option for this so it is done here.
+"
+  (unless (and org-ilm-pdf-marker-path (file-executable-p org-ilm-pdf-marker-path))
+    (user-error "Marker executable not available. See org-ilm-pdf-marker-path."))
+  (unless (member format '("markdown" "json" "html" "chunks"))
+    (error "FORMAT must be one of [markdown|json|html|chunks]"))
+  (unless (or (not to-org) (member format '("markdown" "html")))
+    (error "When TO-ORG, FORMAT must be one of [markdown|html]"))
+  (let* ((pdf-path (expand-file-name pdf-path))
+         (pdf-base-name (file-name-base pdf-path))
+         ;; for rename-file, NEWNAME recognized as dir if ends in slash
+         (output-dir (if output-dir
+                         (concat (expand-file-name output-dir) "/")
+                       (file-name-directory pdf-path)))
+         (output-dir-dir (file-name-concat output-dir (file-name-base pdf-path)))
+         (process-name (format "org-ilm-marker (%s)" pdf-path))
+         (process-buffer (get-buffer-create (concat "*" process-name "*"))))
+    (org-ilm--debug "Marker conversion:\n--Pages: %s" pages)
+    (make-process
+     :name process-name
+     :buffer process-buffer
+     :command
+     (append
+      (list
+       org-ilm-pdf-marker-path
+       pdf-path
+       "--output_format" format
+       "--output_dir" output-dir)
+      (when pages
+        (list
+         "--page_range"
+         (cond
+          ((stringp pages) pages)
+          ((integerp pages) (number-to-string pages))
+          ;; TODO allow "0,5-10,20" as list of integers and cons
+          ((and (consp pages) (integerp (car pages)) (integerp (cdr pages)))
+           (format "%s-%s" (car pages) (cdr pages)))
+          (t (error "Argument PAGES not correctly specified.")))))
+      ;; "--disable_tqdm"
+      ;; Extract images from the document. Default is True.
+      (when disable-image-extraction '("--disable_image_extraction"))
+      ;; Whether to flatten the PDF structure. 
+      ;; "--flatten_pdf BOOLEAN"
+      (list
+       "--detection_batch_size" "1"
+       "--ocr_error_batch_size" "1" ; slowest
+       "--layout_batch_size" "1"
+       "--recognition_batch_size" "1"
+       "--equation_batch_size" "1"
+       "--table_rec_batch_size" "1"))
+     :sentinel
+     (lambda (proc event)
+       (when (memq (process-status proc) '(exit signal))
+         (if (= (process-exit-status proc) 0)
+             (progn
+               ;; Renaming the files is done by replacing the pdf base file name
+               ;; in each otuput folder file name, but only if the file name
+               ;; starts with it. This is to hit less false positives if the
+               ;; base file name is small, which won't be the case i think since
+               ;; org-ilm works with org-ids all the time.
+
+               ;; TODO Works ok but I think a better approach would be to create
+               ;; a symlink with the new name and point marker to that. Then
+               ;; delete symlink afterwards.
+               (when (or move-content-out new-name)
+                 ;; Appearently that regex is needed otherwise returns "." and
+                 ;; ".." as files lol
+                 (dolist (file (directory-files output-dir-dir 'abs-file-name directory-files-no-dot-files-regexp))
+                   (let ((file-base-name (file-name-base file))
+                         (file-ext (file-name-extension file)))
+                     (rename-file
+                      file
+                      (file-name-concat
+                       (if move-content-out output-dir output-dir-dir)
+                       (when new-name
+                         (concat
+                          (replace-regexp-in-string
+                           ;; Only replace name if filename starts with it
+                           (concat "^" pdf-base-name)
+                           new-name
+                           file-base-name)
+                          "." file-ext)))
+                      'ok-if-exists)))
+                 (when move-content-out
+                   (delete-directory output-dir-dir)))
+               (funcall on-success proc process-buffer))
+           (funcall on-error proc process-buffer))
+         (unless keep-buffer-alive (kill-buffer process-buffer))))
+     )))
+
+
 ;;;; Org attachment
 ;; Org mode attachments
 
@@ -724,6 +867,7 @@ Will become an attachment Org file that is the child heading of current entry."
   :doc "Keymap for PDF attachments."
   "d" #'org-ilm-pdf-open-full-document
   "x" #'org-ilm-pdf-extract
+  "c" #'org-ilm-pdf-convert
   "n" #'org-ilm-pdf-toggle-narrow)
 
 (defcustom org-ilm-pdf-minimum-virtual-page-size '(1 . 1)
@@ -736,7 +880,7 @@ Will become an attachment Org file that is the child heading of current entry."
   '((virtual . "Virtual view")
     (text . "Text")
     (image . "Image")
-    (converted . "Converted to Org")))
+    (org . "Org (Marker)")))
 
 (defconst org-ilm--pdf-extract-options
   '((page . "Page")
@@ -745,10 +889,16 @@ Will become an attachment Org file that is the child heading of current entry."
     (section . "Section")))
 
 (defconst org-ilm--pdf-extract-option-to-types
-  '((page . (virtual text image converted))
+  '((page . (virtual text image org))
     (outline . (virtual))
-    (region . (virtual text image converted))
-    (section . (virtual text converted))))
+    (region . (virtual text image org))
+    (section . (virtual text org))))
+
+(defcustom org-ilm-pdf-marker-path (executable-find "marker_single")
+  "Path to the marker_single executable."
+  :type 'file
+  :group 'org-ilm)
+
 
 ;;;;; Commands
 
@@ -836,6 +986,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
       (write-region (point-min) (point-max) img-path))
     (kill-buffer img-buffer)
     img-path))
+
 
 
 ;;;;; Data
@@ -1340,33 +1491,67 @@ make a bunch of headers."
   (interactive
    (list
     (let ((options (seq-filter
-                    (lambda (option) (member (cdr option) '(text converted)))
+                    (lambda (option) (member (cdr option) '(text org)))
                     (org-ilm--invert-alist org-ilm--pdf-output-types))))
       (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
 
-  (let* ((buffer (current-buffer))
+  (let* ((pdf-buffer (current-buffer))
          (org-id (file-name-base (buffer-name)))
+         (headline (org-ilm--org-headline-element-from-id org-id))
          (tmp-path (expand-file-name
                     (concat org-id ".org")
                     temporary-file-directory))
-         (num-pages (pdf-info-number-of-pages)))
+         (num-pages (pdf-info-number-of-pages))
+         (pdf-path (expand-file-name (car (pdf-virtual-document-page 1))))
+         (attach-dir (file-name-directory pdf-path))
+         ;; Not a lot of code reuse..
+         (on-success (lambda () 
+                       (when (yes-or-no-p "Conversion finished. Use as main attachment?")
+                         (org-entry-put nil "ILM_EXT" "org")))))
     (pcase output-type
       ('text
        (with-temp-buffer
          (dolist (page (number-sequence 1 num-pages))
-           (insert (pdf-info-gettext page '(0 0 1 1) nil buffer)))
-         (write-region (point-min) (point-max) tmp-path)))
-      ('converted
-       )
-      )
-
-    (org-ilm--pdf-with-point-on-collection-headline
-     nil
-     (let ((org-attach-auto-tag nil))
-         (org-attach-attach tmp-path nil 'mv))
-     (when (yes-or-no-p "Done. Use as main attachment?")
-       (org-entry-put nil "ILM_EXT" "org")))))
-
+           (insert (pdf-info-gettext page '(0 0 1 1) nil pdf-buffer)))
+         (write-region (point-min) (point-max) tmp-path)
+         (save-excursion
+           (org-with-point-at headline
+             (let ((org-attach-auto-tag nil))
+               (org-attach-attach tmp-path nil 'mv))
+             (funcall on-success)))))
+      ('org
+       (org-ilm--convert-pdf-with-marker
+        pdf-path
+        "markdown"
+        :new-name org-id
+        :pages (if (= 1 num-pages)
+                   (1- (nth 1 (pdf-virtual-document-page 1)))
+                 (cons (1- (nth 1 (pdf-virtual-document-page 1)))
+                       (1- (nth 1 (pdf-virtual-document-page num-pages)))))
+        :keep-buffer-alive t
+        :move-content-out t
+        :to-org t
+        :on-success
+        (lambda (proc buf)
+          (kill-buffer buf)
+          (org-ilm--convert-to-org-with-pandoc
+           (file-name-concat attach-dir (concat org-id ".md"))
+           "markdown"
+           :keep-buffer-alive t
+           :on-success
+           (lambda (proc buf)
+             (kill-buffer buf)
+             (save-excursion
+               (org-with-point-at headline
+                 (org-attach-sync)
+                 (funcall on-success))))
+           :on-error
+           (lambda (proc buf)
+             (switch-to-buffer buf))))
+        :on-error
+        (lambda (proc buf)
+          (switch-to-buffer buf)))
+       ))))
 
 
 ;;;; Attachments
