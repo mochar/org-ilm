@@ -121,6 +121,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   "x" #'org-ilm-extract-dwim
   "z" #'org-ilm-cloze
   "c" #'org-ilm-cloze-toggle-this
+  "t" #'org-ilm-attachment-transclude
   "j" #'org-ilm-subject-add
   "q" #'org-ilm-queue)
 
@@ -2026,6 +2027,18 @@ make a bunch of headers."
   (save-excursion
     (org-ilm-attachment-transclusion-create)
     (org-transclusion-add)))
+
+(defun org-ilm-attachment-transclude (&optional dont-activate)
+  "Transclude the contents of the current heading's attachment."
+  (interactive "P")
+  (save-excursion
+    (save-restriction
+      (org-ilm--org-narrow-to-header)
+      (if (text-property-search-forward 'org-transclusion-type)
+          (org-ilm-attachment-transclusion-delete)
+        (if dont-activate
+            (org-ilm-attachment-transclusion-create)
+          (org-ilm-attachment-transclusion-transclude))))))
 
 
 ;;;; Targets
