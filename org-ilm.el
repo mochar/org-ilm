@@ -1050,6 +1050,13 @@ Will become an attachment Org file that is the child heading of current entry."
                (symbol :tag "Height"))
   :group 'org-ilm)
 
+(defcustom org-ilm-pdf-convert-org-respect-area t
+  "When virtual view is an area of a single page, convert just that area.
+
+This is done by converting the area to an image first. Note that this will likely effect the quality of the conversion output, probably for the worse if it contains complex objects other than text."
+  :type 'boolean
+  :group 'org-ilm)
+
 (defconst org-ilm--pdf-output-types
   '((virtual . "PDF (virtual)")
     (text . "Text")
@@ -1137,8 +1144,10 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (insert (format ":PDF_RANGE: %s\n" range))
     (insert ":END:\n")))
 
-(defun org-ilm--pdf-image-export (filename &optional region page)
-  ""
+(cl-defun org-ilm--pdf-image-export (filename &key region page dir)
+  "Export current PDF buffer as an image.
+
+REGION: Note that if in virtual view with region, already exports that region."
   (let ((region (or region '(0 0 1 1)))
         (img-buffer (get-buffer-create "*Org Ilm PDF Image*"))
         img-type img-ext img-path)
@@ -1151,7 +1160,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
             img-ext (symbol-name img-type) ;; TODO ???
             img-path (expand-file-name
                       (concat filename "." img-ext)
-                      temporary-file-directory))
+                      (or dir temporary-file-directory)))
       (write-region (point-min) (point-max) img-path))
     (kill-buffer img-buffer)
     img-path))
@@ -1438,29 +1447,25 @@ view (`org-ilm--pdf-open-ranges')."
 
 ;;;;; Convert
 
-(defun org-ilm--pdf-convert-to-org (pdf-path pages org-id on-success &optional on-error)
+;; TODO off-load pages handling to here so that this function can be more usefull
+(cl-defun org-ilm--pdf-convert-attachment-to-org (pdf-path pages org-id &key on-success on-error)
   "Convert attachment PDF to Md using Marker, then to Org mode using Pandoc."
-  (let ((headline (org-ilm--org-headline-element-from-id org-id)))
-    (org-ilm--convert-to-org-with-marker-pandoc
-     org-id ;; id process
-     pdf-path
-     org-id ;; new-name
-     :pdf-pages pages
-     :on-success
-     (lambda (proc buf id)
-       (save-excursion
-         ;; Fails with org-id, must be headline
-         (org-with-point-at headline
-           (org-attach-sync)
-           (funcall on-success))))
-     :on-error on-error)))
+  (org-ilm--convert-to-org-with-marker-pandoc
+   org-id ;; id process
+   pdf-path
+   org-id ;; new-name
+   :pdf-pages pages
+   :on-success on-success
+   :on-error on-error))
 
 (defun org-ilm-pdf-convert (output-type)
-  "Convert PDF to another format within the same attachment."
+  "Convert PDF to another format within the same attachment.
+
+See also `org-ilm-pdf-convert-org-respect-area'."
   (interactive
    (list
     (let ((options (seq-filter
-                    (lambda (option) (member (cdr option) '(text org)))
+                    (lambda (option) (member (cdr option) '(text org image)))
                     (org-ilm--invert-alist org-ilm--pdf-output-types))))
       (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
   (unless (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode))
@@ -1471,35 +1476,50 @@ view (`org-ilm--pdf-open-ranges')."
   (let* ((pdf-buffer (current-buffer))
          (org-id (file-name-base (buffer-name)))
          (headline (org-ilm--org-headline-element-from-id org-id))
-         (tmp-path (expand-file-name
-                    (concat org-id ".org")
-                    temporary-file-directory))
          (num-pages (pdf-info-number-of-pages))
-         (pdf-path (expand-file-name (car (pdf-virtual-document-page 1))))
+         (document-page-1 (pdf-virtual-document-page 1))
+         (pdf-path (expand-file-name (car document-page-1)))
+         (region (nth 2 document-page-1))
          (attach-dir (file-name-directory pdf-path))
-         ;; Not a lot of code reuse..
-         (on-success (lambda () 
-                       (when (yes-or-no-p "Conversion finished. Use as main attachment?")
-                         (org-entry-put nil "ILM_EXT" "org")))))
+         (out-path-format (expand-file-name (concat org-id ".%s") attach-dir))
+         (on-success
+          (lambda ()
+            (when (yes-or-no-p "Conversion finished. Use as main attachment?")
+              (org-with-point-at headline
+                (org-entry-put nil "ILM_EXT" "org"))))))
+
     (pcase output-type
       ('text
        (with-temp-buffer
          (dolist (page (number-sequence 1 num-pages))
            (insert (pdf-info-gettext page '(0 0 1 1) nil pdf-buffer)))
-         (write-region (point-min) (point-max) tmp-path)
-         (save-excursion
-           (org-with-point-at headline
-             (let ((org-attach-auto-tag nil))
-               (org-attach-attach tmp-path nil 'mv))
-             (funcall on-success)))))
+         (write-region (point-min) (point-max) (format out-path-format "org")))
+       (funcall on-success))
       ('org
-       (org-ilm--pdf-convert-to-org
-        pdf-path
-        (if (= 1 num-pages)
-            (1- (nth 1 (pdf-virtual-document-page 1)))
-          (cons (1- (nth 1 (pdf-virtual-document-page 1)))
-                (1- (nth 1 (pdf-virtual-document-page num-pages)))))
-        org-id on-success)))))
+       ;; Decide on whether to convert just the virtual pdf region or the entire
+       ;; page.
+       (if (and (eq major-mode 'pdf-virtual-view-mode)
+                (= 1 num-pages) region
+                org-ilm-pdf-convert-org-respect-area)
+           (org-ilm--image-convert-attachment-to-org
+            (org-ilm--pdf-image-export org-id :dir attach-dir)
+            org-id
+            :on-success
+            (lambda (proc buf id) (funcall on-success)))
+         (org-ilm--pdf-convert-attachment-to-org
+          pdf-path
+          (if (= 1 num-pages)
+              (1- (nth 1 (pdf-virtual-document-page 1)))
+            (cons (1- (nth 1 (pdf-virtual-document-page 1)))
+                  (1- (nth 1 (pdf-virtual-document-page num-pages)))))
+          org-id
+          :on-success
+          (lambda (proc buf id) (funcall on-success)))))
+      ('image
+       (unless (= 1 num-pages)
+         (user-error "Can only convert a single-paged document to an image."))
+       (org-ilm--pdf-image-export org-id :dir attach-dir)
+       (funcall on-success)))))
 
 ;;;;; Extract
 
@@ -1619,11 +1639,12 @@ view (`org-ilm--pdf-open-ranges')."
            :id extract-org-id
            :ext "org")
           (lambda ()
-            (org-ilm--pdf-convert-to-org
+            (org-ilm--pdf-convert-attachment-to-org
              pdf-path
              (1- current-page-real)
              extract-org-id
-             (lambda () (message "Conversion finished."))))))))))
+             :on-success
+             (lambda (proc buf id) (message "Conversion finished."))))))))))
 
 (defun org-ilm-pdf-region-extract (output-type)
   "Turn selected PDF region into an extract.
@@ -1681,7 +1702,7 @@ set only (not let)."
                      :ext "org")))
         ('image
          (setq capture-data
-               (list :file (org-ilm--pdf-image-export extract-org-id region)
+               (list :file (org-ilm--pdf-image-export extract-org-id :region region)
                      :title title
                      :id extract-org-id
                      :ext t)))
@@ -1802,31 +1823,26 @@ make a bunch of headers."
              :id extract-org-id
              :ext "org")
             (lambda ()
-              (org-ilm--pdf-convert-to-org
+              (org-ilm--pdf-convert-attachment-to-org
                pdf-path
                (cons (1- (alist-get 'page section))
                      (1- (alist-get 'next-page section)))
                extract-org-id
-               (lambda () (message "Conversion finished.")))))))))))
+               :on-success
+               (lambda (proc buf id) (message "Conversion finished.")))))))))))
 
 
 
 ;;;; Image attachment
 
-(cl-defun org-ilm--image-convert-to-org (image-path org-id &key on-success on-error)
+(cl-defun org-ilm--image-convert-attachment-to-org (image-path org-id &key on-success on-error)
   "Convert an attachment image to Org with Marker."
   (let ((headline (org-ilm--org-headline-element-from-id org-id)))
     (org-ilm--convert-to-org-with-marker-pandoc
      org-id ;; id process
      image-path
      org-id ;; new-name
-     :on-success
-     (lambda (proc buf id)
-       (save-excursion
-         ;; Fails with org-id, must be headline
-         (org-with-point-at headline
-           (org-attach-sync)
-           (funcall on-success))))
+     :on-success on-success
      :on-error on-error)))
 
 (defun org-ilm-image-convert-to-org ()
@@ -1837,7 +1853,7 @@ make a bunch of headers."
   (unless (org-ilm--attachment-data)
     (user-error "Not in an attachment buffer."))
 
-  (org-ilm--image-convert-to-org
+  (org-ilm--image-convert-attachment-to-org
    buffer-file-name
    (car (org-ilm--attachment-data))
    :on-success
