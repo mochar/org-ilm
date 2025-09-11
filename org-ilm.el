@@ -1923,16 +1923,20 @@ make a bunch of headers."
     (when (eq 'attachment (car location))
       (cdr location))))
 
-(defun org-ilm--attachment-path (&optional if-exists)
-  "Return path to the attachment of heading at point."
-  (when-let* ((org-id (org-id-get))
-              (path (org-attach-expand (format "%s.org" org-id))))
-    (when (or (not if-exists) (file-exists-p path))
-      path)))
-
 (defun org-ilm--attachment-extension ()
   "Return the extension of the attachment at point, assuming in collection."
   (or (org-entry-get nil "ILM_EXT" 'inherit) "org"))
+
+(cl-defun org-ilm--attachment-path (&key not-exists-ok allowed-exts)
+  "Return path to the attachment of heading at point."
+  (when (and allowed-exts (not (listp allowed-exts)))
+    (error "ALLOWED-EXTS must be list of extensions"))
+  (when-let* ((org-id (org-id-get))
+              (ext (org-ilm--attachment-extension))
+              (_ (or (not allowed-exts) (member ext allowed-exts)))
+              (path (org-attach-expand (format "%s.%s" org-id ext))))
+    (when (or not-exists-ok (file-exists-p path))
+      path)))
   
 (defun org-ilm--attachment-find (&optional type org-id)
   "Return attachment file of the headline."
@@ -1985,6 +1989,19 @@ make a bunch of headers."
 
 ;;;; Transclusion
 
+(defcustom org-ilm-transclusion-attachment-exts (append '("org") image-file-name-extensions)
+  "List of extensions that are allowed to be transcluded from within the collection element.
+
+See `org-ilm-attachment-transclude'."
+  :type '(repeat string)
+  :group 'org-ilm)
+
+(defun org-ilm--transclusion-active-p ()
+  (save-excursion
+    (save-restriction
+      (org-ilm--org-narrow-to-header)
+      (text-property-search-forward 'org-transclusion-type))))
+
 (defun org-ilm--transclusion-goto (file-path &optional action)
   ""
   (let* ((transclusion-text (format "#+transclude: [[file:%s]]" file-path))
@@ -2009,36 +2026,40 @@ make a bunch of headers."
       (when create
         (insert (format "%s :level %s" transclusion-text (+ 1 current-level)))))))
 
+(defun org-ilm--transcludable-attachment-path ()
+  (org-ilm--attachment-path :allowed-exts org-ilm-transclusion-attachment-exts))
+
 (defun org-ilm-attachment-transclusion-delete ()
   "Delete transclusion text for the attachment of header at point."
   (interactive)
-  (when-let ((attachment-path (org-ilm--attachment-path t)))
-    (org-ilm--transclusion-goto attachment-path 'delete)))
+  (when-let ((attachment-path (org-ilm--transcludable-attachment-path)))
+    (save-excursion
+     (org-ilm--transclusion-goto attachment-path 'delete))))
 
 (defun org-ilm-attachment-transclusion-create ()
   "Create and move point to transclusion for the attachment of header at point."
   (interactive)
-  (when-let ((attachment-path (org-ilm--attachment-path t)))
+  (when-let ((attachment-path (org-ilm--transcludable-attachment-path)))
     (org-ilm--transclusion-goto attachment-path 'create)))
 
 (defun org-ilm-attachment-transclusion-transclude ()
   "Transclude the contents of the current heading's attachment."
   (interactive)
-  (save-excursion
-    (org-ilm-attachment-transclusion-create)
-    (org-transclusion-add)))
+  (when (org-ilm--transcludable-attachment-path)
+    (save-excursion
+      (org-ilm-attachment-transclusion-create)
+      (org-transclusion-add))))
 
 (defun org-ilm-attachment-transclude (&optional dont-activate)
   "Transclude the contents of the current heading's attachment."
   (interactive "P")
-  (save-excursion
-    (save-restriction
-      (org-ilm--org-narrow-to-header)
-      (if (text-property-search-forward 'org-transclusion-type)
-          (org-ilm-attachment-transclusion-delete)
-        (if dont-activate
-            (org-ilm-attachment-transclusion-create)
-          (org-ilm-attachment-transclusion-transclude))))))
+  (unless (org-ilm--transcludable-attachment-path)
+    (user-error "No transcludable attachment for element"))
+  (if (org-ilm--transclusion-active-p)
+      (org-ilm-attachment-transclusion-delete)
+    (if dont-activate
+        (org-ilm-attachment-transclusion-create)
+      (org-ilm-attachment-transclusion-transclude))))
 
 
 ;;;; Targets
