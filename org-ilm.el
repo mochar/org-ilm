@@ -185,7 +185,9 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defun org-ilm-open-attachment ()
   "Open attachment of item at point."
   (interactive)
-  (org-ilm--attachment-open))
+  (condition-case err
+      (org-ilm--attachment-open)
+    (error (user-error "%s" (error-message-string err)))))
 
 (defun org-ilm-open-highlight ()
   "Open element associated with highlight at point."
@@ -436,6 +438,15 @@ save-excursion."
     (org-ilm--org-with-point-at
      org-id
      (org-ilm--org-headline-at-point))))
+
+(defun org-ilm--org-attach-dir-from-id (org-id)
+  "Return the attachment directory of element with ORG-ID
+
+Note that we cannot just use org-attach utilities to find this because we might be using buffer local variables or dir-locals.el"
+  (save-excursion
+    (org-ilm--org-with-point-at
+     org-id
+     (org-attach-dir))))
 
 (defun org-ilm--org-id-from-string (string)
   "Interpret STRING as org-id, link with org-id, or else nil."
@@ -704,8 +715,10 @@ The callback ON-ABORT is called when capture is cancelled."
              (setq-local org-ilm--convert-state
                          (if success 'success 'error)))
            (if success
-               (funcall on-success proc process-buffer id)
-             (funcall on-error proc process-buffer id))
+               (when on-success
+                 (funcall on-success proc process-buffer id))
+             (when on-error
+               (funcall on-error proc process-buffer id)))
            (unless (or keep-buffer-alive
                        (eq org-ilm-convert-keep-buffer-alive 'always)
                        (and success (eq org-ilm-convert-keep-buffer-alive 'success))
@@ -1072,7 +1085,7 @@ This is done by converting the area to an image first. Note that this will likel
 (defconst org-ilm--pdf-extract-option-to-types
   '((page . (virtual text image org))
     (outline . (virtual))
-    (region . (virtual text image))
+    (region . (virtual text image org))
     (section . (virtual text org))))
 
 
@@ -1561,18 +1574,28 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 (defun org-ilm--pdf-extract-prepare ()
   "Groundwork to do an extract."
   (let ((location (org-ilm--where-am-i))
-        org-id attachment buffer collection headline)
+        org-id attach-dir attachment buffer collection headline)
 
     ;; Handle both when current buffer is PDF or headine in
     ;; collection. Furthermore we need the headline level to indent the outline
     ;; headlines appropriately.
     (cond
      ((eq (car location) 'attachment)
+      (cl-assert (or (eq major-mode 'pdf-view-mode)
+                     (eq major-mode 'pdf-virtual-view-mode)))
       (setq org-id (nth 0 (cdr location))
-            collection (nth 1 (cdr location))))
+            collection (nth 1 (cdr location)))
+      (setq attach-dir
+            (pcase major-mode
+              ('pdf-view-mode
+               (file-name-directory buffer-file-name))
+              ('pdf-virtual-view-mode
+               (org-ilm--org-attach-dir-from-id org-id))
+              (t (error "This attachment is not a PDF")))))
      ((eq (car location) 'collection)
       (setq org-id (org-id-get)
-            collection (cdr location)))
+            collection (cdr location)
+            attach-dir (org-attach-dir)))
      (t (error "Not in attachment or on collection element.")))
     (setq attachment (concat org-id ".pdf"))
     (if-let ((buf (get-buffer attachment)))
@@ -1583,7 +1606,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     (setq headline (org-ilm--org-headline-element-from-id org-id))
     (unless headline
       (error "Collection element not found"))
-    (list org-id attachment buffer collection headline
+    (list org-id attach-dir attachment buffer collection headline
           (org-element-property :level headline)
           (org-ilm--interval-to-schedule-string
            (org-ilm--schedule-interval-from-priority 5)))))
@@ -1591,7 +1614,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'page)))
-  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+  (cl-destructuring-bind (org-id attach-dir attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
     (switch-to-buffer buffer)
@@ -1656,7 +1679,7 @@ set only (not let)."
   (unless (pdf-view-active-region-p)
     (user-error "No active region."))
   
-  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+  (cl-destructuring-bind (org-id attach-dir attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
     ;; Orginally used `with-current-buffer' but throws an error on virtual page
@@ -1675,7 +1698,7 @@ set only (not let)."
              " region"
              (when region-text (concat ": " (org-ilm--generate-text-snippet region-text))) ))
            (extract-org-id (org-id-new))
-           capture-data)
+           capture-data capture-on-success)
 
       ;; TODO Would be nice to prompt for other output-type and repeat the
       ;; function from here. Can do so with a while loop around the pcase
@@ -1706,6 +1729,16 @@ set only (not let)."
                      :title title
                      :id extract-org-id
                      :ext t)))
+        ('org
+         (setq capture-data
+               (list :title title :ext "org" :id extract-org-id))
+         (setq capture-on-success
+               (lambda ()
+                 (org-ilm--image-convert-attachment-to-org
+                  ;; TODO this shouldnt be the normalized region i think
+                  (org-ilm--pdf-image-export
+                   extract-org-id :region region :dir attach-dir)
+                  extract-org-id))))
         (t (error "Unrecognized output type")))
 
       (org-ilm--capture
@@ -1715,7 +1748,9 @@ set only (not let)."
        (lambda ()
          (with-current-buffer pdf-buffer
            (org-ilm--pdf-add-square-annotation
-            region extract-org-id)))))))
+            region extract-org-id))
+         (when capture-on-success
+           (funcall capture-on-success)))))))
 
 (defun org-ilm-pdf-outline-extract ()
   "Turn PDF outline items into a extracts.
@@ -1723,7 +1758,7 @@ set only (not let)."
 It's a bit of a black sheep compared to other extract options because we
 make a bunch of headers."
   (interactive)
-  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+  (cl-destructuring-bind (org-id attach-dir attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
 
     (let ((outline (org-ilm--pdf-outline-get buffer))
@@ -1742,7 +1777,7 @@ make a bunch of headers."
 (defun org-ilm-pdf-section-extract (output-type)
   "Extract current section of outline."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'section)))
-  (cl-destructuring-bind (org-id attachment buffer collection headline level schedule-str)
+  (cl-destructuring-bind (org-id attach-dir attachment buffer collection headline level schedule-str)
       (org-ilm--pdf-extract-prepare)
     (let (section)
       (switch-to-buffer buffer)
