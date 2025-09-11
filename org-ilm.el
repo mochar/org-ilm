@@ -931,22 +931,27 @@ does not have an option for this so it is done here.
       (buffer-name buf)))
    (buffer-list)))
 
+(defun org-ilm--conversions ()
+  "Return list of plists containing info of each conversion."
+  (mapcar
+   (lambda (buf)
+     (let* ((buffer-name (buffer-name buf))
+            (_ (string-match
+                "^\\*org-ilm-convert-\\([^ ]+\\) (\\([^)]*\\))\\*$"
+                buffer-name))
+            (name (match-string 1 buffer-name))
+            (id (match-string 2 buffer-name))
+            (state (with-current-buffer buf
+                     org-ilm--convert-state)))
+       (list :name name :id id :buffer buf :state state)))
+   (org-ilm--conversions-buffers)))
+
 (defun org-ilm--conversions-make-vtable ()
   "Build conversions view vtable."
   (make-vtable
    :insert nil ; Return vtable object rather than insert at point
    :objects-function
-   (lambda ()
-     (mapcar
-      (lambda (buf)
-        (let* ((buffer-name (buffer-name buf))
-               (_ (string-match
-                   "^\\*org-ilm-convert-\\([^ ]+\\) (\\([^)]*\\))\\*$"
-                   buffer-name))
-               (name (match-string 1 buffer-name))
-               (id (match-string 2 buffer-name)))
-          (list :name name :id id :buffer buf)))
-      (org-ilm--conversions-buffers)))
+   #'org-ilm--conversions
    :columns
    `((:name
       "State")
@@ -959,11 +964,10 @@ does not have an option for this so it is done here.
    (lambda (object column vtable)
      (pcase (vtable-column vtable column)
        ("ID" (plist-get object :id))
-       ("State" (with-current-buffer (plist-get object :buffer)
-                  (pcase org-ilm--convert-state
-                    ('error (propertize "Error" 'face 'error))
-                    ('success (propertize "Success" 'face 'success))
-                    (t "Busy"))))
+       ("State" (pcase (plist-get object :state)
+                  ('error (propertize "Error" 'face 'error))
+                  ('success (propertize "Success" 'face 'success))
+                  (t "Busy")))
        ("Converter" (plist-get object :name))))
    :keymap org-ilm-conversions-map))
 
@@ -1962,8 +1966,21 @@ make a bunch of headers."
            (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
            buffer-name
            pdf-no-region))
-      (error "Attachment not found"))))
-
+      (if-let* ((org-id (org-id-get))
+                (conversion (seq-find
+                             (lambda (conversion)
+                               (string= (plist-get conversion :id) org-id))
+                             (org-ilm--conversions))))
+          (let ((message (pcase (plist-get conversion :state)
+                           ;; TODO for success and error, provide option to
+                           ;; delete headline and extract highlight in parent
+                           ;; attachment.
+                           ('success "Attachment finished conversion but not found.")
+                           ('error "Attachment conversion failed.")
+                           (t "Attachment still being converted."))))
+            (when (yes-or-no-p (concat message " View conversion buffer?"))
+              (pop-to-buffer (plist-get conversion :buffer))))
+        (error "Attachment not found")))))
 
 ;;;; Transclusion
 
