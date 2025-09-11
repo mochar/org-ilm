@@ -2016,7 +2016,9 @@ See `org-ilm-attachment-transclude'."
       (goto-char (point-min))
       (if (re-search-forward transclusion-pattern nil t)
           (pcase action
-            ('delete (delete-line))
+            ('delete (if (org-next-line-empty-p)
+                         (progn (delete-line) (delete-line))
+                       (delete-line)))
             ('create (progn
                        (delete-line)
                        (split-line))))
@@ -2024,7 +2026,9 @@ See `org-ilm-attachment-transclude'."
           (goto-char (point-max))
           (unless (bolp) (insert "\n"))))
       (when create
-        (insert (format "%s :level %s" transclusion-text (+ 1 current-level)))))))
+        (insert (format "%s :level %s" transclusion-text (+ 1 current-level)))
+        ;; Newline necessary, otherwise next line will be on same line
+        (save-excursion (insert "\n"))))))
 
 (defun org-ilm--transcludable-attachment-path ()
   (org-ilm--attachment-path :allowed-exts org-ilm-transclusion-attachment-exts))
