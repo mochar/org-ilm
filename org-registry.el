@@ -43,7 +43,20 @@
 		:value-type plist)
   :group 'org-registry)
 
+(defface org-registry-link-face
+  '((t :inherit org-link))
+  "Face used by registry link types."
+  :group 'org-registry)
+
 ;;;; Minor mode
+
+(defun org-registry--delete-overlay-advice (&rest args)
+  "Advice to detect if our org-link face was deleted."
+  (let ((ov (car args)))
+    (when-let* ((type (overlay-get ov 'org-registry-type))
+                (data (cdr (assoc type org-registry-types)))
+                (teardown-func (plist-get data :teardown)))
+      (funcall teardown-func ov))))
 
 (define-minor-mode org-registry-global-minor-mode
   "Prepare some hooks and advices some functions."
@@ -53,13 +66,20 @@
   :group 'org-registry
   (if org-registry-global-minor-mode
       ;; Enable
-      (dolist (type-data org-registry-types)
-        (when-let ((f (plist-get (cdr type-data) :setup)))
-          (funcall f)))
+      (progn
+        ;; Detect deletion, call type :teardown ov
+        (advice-add 'delete-overlay
+                    :before #'org-registry--delete-overlay-advice)
+        
+        (dolist (type-data org-registry-types)
+          (when-let ((f (plist-get (cdr type-data) :setup)))
+            (funcall f))))
     ;; Disable
     (dolist (type-data org-registry-types)
         (when-let ((f (plist-get (cdr type-data) :cleanup)))
-          (funcall f)))))
+          (funcall f)))
+    (advice-remove 'delete-overlay
+                   #'org-registry--delete-overlay-advice)))
 
 ;;;; Types
 
@@ -76,16 +96,26 @@ PARAMETERS should be keyword value pairs. See `org-registry-types'."
   (let* ((entry (org-mem-entry-by-id id))
          (type (org-mem-entry-property "TYPE" entry)))
     (when-let ((data (cdr (assoc type org-registry-types))))
+      (overlay-put ov 'org-registry-type type)
       (org-with-point-at (org-element-begin link)
         (funcall (plist-get data :preview) entry ov link)))))
 
 (defun org-registry--link-follow (id prefix-arg)
   (org-node-goto-id id))
 
+(defun org-registry--link-face (id)
+  (if-let ((entry (org-mem-entry-by-id id))
+             (type (org-mem-entry-property "TYPE" entry))
+             (data (cdr (assoc type org-registry-types)))
+             (face (plist-get data :face)))
+      face
+    'org-registry-link-face))
+
 (org-link-set-parameters
  "registry"
  :follow #'org-registry--link-follow
- :preview #'org-registry--link-preview)
+ :preview #'org-registry--link-preview
+ :face #'org-registry--link-face)
 
 
 ;;;;; Latex type
@@ -112,28 +142,17 @@ The way this is implemented is by using `org-latex-preview-place' which
        latex)))
     t))
 
-(defun org-registry--delete-overlay-advice (&rest args)
-  (let ((ov (car args)))
-    (when (overlay-get ov 'org-registry-latex)
-    (dolist (o (overlays-in (overlay-start ov) (overlay-end ov)))
-      (when (eq (overlay-get o 'org-overlay-type)
-                'org-latex-overlay)
-        (delete-overlay o)
-        )))))
-
-(defun org-registry--type-latex-setup ()
-  (advice-add 'delete-overlay
-              :before #'org-registry--delete-overlay-advice))
-
-(defun org-registry--type-latex-cleanup ()
-  (advice-remove 'delete-overlay
-                 #'org-registry--delete-overlay-advice))
+(defun org-registry--type-latex-teardown (ov)
+  "When latex registry link ov gets deleted, remove the latex ov inside it."
+  (dolist (o (overlays-in (overlay-start ov) (overlay-end ov)))
+    (when (eq (overlay-get o 'org-overlay-type)
+              'org-latex-overlay)
+      (delete-overlay o))))
 
 (org-registry-set-type
  "latex"
  :preview #'org-registry--type-latex-preview
- :setup #'org-registry--type-latex-setup
- :cleanup #'org-registry--type-latex-cleanup)
+ :teardown #'org-registry--type-latex-teardown)
 
 
 ;;;;; File type
@@ -150,10 +169,41 @@ The way this is implemented is by using `org-latex-preview-place' which
 
 ;;;;; Org type
 
-(defun org-registry--type-org-preview (entry ov link)
-  
-  )
+(defface org-registry-org-header-face
+  '((t :slant italic))
+  "Face used to display the title above the transcluded content.")
 
+(defun org-registry--type-org-preview (entry ov link)
+  "Transclude Org mode content with org-transclusion."
+  (let ((begin (overlay-start ov))
+        (end (overlay-end ov)))
+    (goto-char end)
+    (insert (format "\n#+transclude: [[id:%s]] :only-contents" (org-mem-entry-id entry)))
+    (org-transclusion-add)
+    (overlay-put ov 'display (org-mem-entry-title entry))
+    ;; TODO fgiure out how to not inherit org-link properties
+    (overlay-put ov 'face 'org-registry-org-header-face)
+    t))
+
+(defun org-registry--type-org-teardown (ov)
+  (save-excursion
+    (goto-char (overlay-end ov))
+    ;; TODO might be better to keep checking until non-emtpy line
+    (forward-line)
+    (cond
+     ((org-transclusion-within-transclusion-p)
+        (progn
+          (org-transclusion-remove)
+          (delete-line)))
+     ((org-transclusion-check-add)
+      (delete-line))
+     (t
+      (message "Cannot find transclusion to clean up")))))
+
+(org-registry-set-type
+ "org"
+ :preview #'org-registry--type-org-preview
+ :teardown #'org-registry--type-org-teardown)
 
 ;;;; Footer
 
