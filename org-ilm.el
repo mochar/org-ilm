@@ -28,27 +28,18 @@
 (require 'ts)
 (require 'vtable)
 
-;;;; Customization
+;;;; Global customization
 (defgroup org-ilm nil
   "Incremental learning mode."
   :group 'org
   :prefix "org-ilm-"
   :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
 
-(defcustom org-ilm-collections-alist '((ilm . "~/org/ilm.org"))
-  "Alist mapping collection name to path to its org file."
-  :type '(alist :key-type symbol :value-type file)
-  :group 'org-ilm)
-
-(defcustom org-ilm-queries-alist
-  `((Outstanding . org-ilm-query-outstanding))
-  "Alist mapping query name to a function that returns an org-ql query."
-  :type '(alist :key-type symbol :value-type function)
-  :group 'org-ilm)
-
-(defcustom org-ilm-custom-queries-alist nil
-  "Do not edit. Auto saved user added queries. See `org-ilm-queries-alist'."
-  :type '(alist :key-type symbol :value-type function)
+(defcustom org-ilm-collections-alist '((ilm . "~/ilm/"))
+  "Alist mapping collection name to path to its org file or directory."
+  :type '(alist :key-type symbol
+                :value-type (choice (file :tag "File")
+                                    (directory :tag "Directory")))
   :group 'org-ilm)
 
 (defcustom org-ilm-id-from-attachment-path-func 'org-ilm-infer-id-from-attachment-path
@@ -111,9 +102,6 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 (defface org-ilm-face-card
   '((t :background "pink"))
   "Face used to highlight clozes.")
-
-(defvar org-ilm-queue nil
-  "List of org headings that form the queue.")
 
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-mode'."
@@ -217,9 +205,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   (interactive)
   (if-let* ((data (org-ilm--attachment-data))
             (org-id-loc (org-id-find (car data))))
-      (progn
-        (find-file (car org-id-loc))
-        (goto-char (cdr org-id-loc)))
+      (org-ilm--org-goto-id (car data))
     (let ((collection (org-ilm--select-collection)))
       (find-file (cdr collection)))))
 
@@ -303,11 +289,6 @@ If empty return nil, and if only one, return it."
               (choice (completing-read (or prompt "Select: ") choices nil t))
               (item (cdr (assoc choice choices))))
          item))))
-
-(defun org-ilm--select-query ()
-  "Prompt user for query to select from.
-The queries are stored in `org-ilm-queries-alist'."
-  (org-ilm--select-alist org-ilm-queries-alist "Query: "))
 
 (defun org-ilm-get-subjects (&optional headline)
   "Returns subjects of headline or parses "
@@ -415,6 +396,12 @@ TODO org-ql uses following snippet in query action, is it more efficient?
     (when (eq (car element) 'headline)
       element)))
 
+(defun org-ilm--org-goto-id (org-id)
+  ;; (let ((loc (org-id-find org-id 'marker)))
+  ;;   (pop-to-buffer (marker-buffer loc))
+  ;;   (goto-char loc)))
+  (org-node-goto-id org-id))
+
 (defmacro org-ilm--org-with-point-at (thing &rest body)
   "THING for now should be an org-id.
 
@@ -500,13 +487,25 @@ With non-nil ASSERT, assert headline must be found, else return nil."
             (cons (cdr pair) (car pair)))
           alist))
 
+(cl-defun org-ilm--add-hook-once (hook function &optional depth (local t))
+  "Add FUNCTION to HOOK and remove it after its first execution.
+
+HOOK is the hook to which FUNCTION will be added.
+FUNCTION is the function to run once in the hook.
+DEPTH controls where FUNCTION is placed in HOOK and defaults to 0.
+LOCAL controls whether to add HOOK buffer-locally and defaults to t.
+
+The returned function can be used to call `remove-hook' if needed."
+  (letrec ((hook-function (lambda () (remove-hook hook hook-function local) (funcall function))))
+    (add-hook hook hook-function depth local)
+    hook-function))
+
 ;;;; Elements
 
 (defun org-ilm--select-collection ()
   "Prompt user for collection to select from.
 The collections are stored in `org-ilm-collections-alist'."
   (org-ilm--select-alist org-ilm-collections-alist "Collection: "))
-
 
 ;;;;; Logbook
 (defun org-ilm--logbook-parse (logbook)
@@ -637,7 +636,8 @@ The callback ON-ABORT is called when capture is cancelled."
                     (or title "")
                     "%?")))
 
-    (let ((org-capture-templates
+    ;; (let ((org-capture-templates
+    (cl-letf (((symbol-value 'org-capture-templates)
            `(("i" "Import"
               entry ,target
               ,template
@@ -1111,7 +1111,7 @@ TODO Cute if we can use numeric prefix to jump to that page number"
   (interactive)
   (save-excursion
     (org-ilm--pdf-with-point-on-collection-headline nil
-     (org-ilm--attachment-open region)
+     (org-ilm--attachment-open :pdf-no-region region)
      (pdf-view-goto-page virtual-page))))
 
 ;;;;; Utilities
@@ -1954,12 +1954,12 @@ make a bunch of headers."
       (setq attachment (org-ilm--attachment-find type (nth 4 (pop crumbs)))))
     attachment))
 
-(defun org-ilm--attachment-open (&optional pdf-no-region)
-  "Open the attachemnt of collection element at point."
+(cl-defun org-ilm--attachment-open (&key pdf-no-region)
+  "Open the attachment of collection element at point, returns its buffer."
   (if-let* ((path (org-ilm--attachment-find)))
       (progn
         (run-hook-with-args 'org-attach-open-hook path)
-        (org-open-file path 'in-emacs))
+        (find-file path))
     (if-let* ((pdf-range (org-entry-get nil "PDF_RANGE"))
               ;; Returns 0 if not a number
               (pdf-page-maybe (string-to-number pdf-range))
@@ -1986,6 +1986,11 @@ make a bunch of headers."
             (when (yes-or-no-p (concat message " View conversion buffer?"))
               (pop-to-buffer (plist-get conversion :buffer))))
         (error "Attachment not found")))))
+
+(defun org-ilm--attachment-open-by-id (id)
+  (org-ilm--org-with-point-at
+   id
+   (org-ilm--attachment-open)))
 
 ;;;; Transclusion
 
@@ -2219,6 +2224,19 @@ See `org-ilm-attachment-transclude'."
 
 ;;;; Query
 
+
+(defcustom org-ilm-queries-alist
+  `((Outstanding . org-ilm-query-outstanding))
+  "Alist mapping query name to a function that returns an org-ql query."
+  :type '(alist :key-type symbol :value-type function)
+  :group 'org-ilm)
+
+(defcustom org-ilm-custom-queries-alist nil
+  "Do not edit. Auto saved user added queries. See `org-ilm-queries-alist'."
+  :type '(alist :key-type symbol :value-type function)
+  :group 'org-ilm)
+
+;;;;; Queries
 ;; Optimizations: https://github.com/alphapapa/org-ql/issues/88#issuecomment-570473621
 ;; + If any data is needed in action and query, use org-ql--value-at
 ;; + Prefer query over custom predicate
@@ -2258,7 +2276,7 @@ wasteful if headline does not match query."
      :scheduled-relative (when scheduled ; convert from sec to days
                            (/ (ts-diff now scheduled) 86400))
      :type type
-     :logbook (unless is-card (org-ilm--logbook-read headline))
+     ;; :logbook (unless is-card (org-ilm--logbook-read headline))
      ;; cdr to get rid of headline priority in the car - redundant
      :subjects (cdr (org-ilm--priority-subject-gather headline))
      :priority-sample (org-ilm--sample-priority-from-headline headline))))
@@ -2274,10 +2292,10 @@ wasteful if headline does not match query."
   (when-let ((due (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)))
     (ts<= due (ts-now))))
 
-(defun org-ilm-query-queue (collection query)
+(defun org-ilm-query-collection (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
-  (let ((entries (org-ql-select (cdr collection)
-                   (funcall (cdr query))
+  (let ((entries (org-ql-select (cdr (assoc collection org-ilm-collections-alist))
+                   (funcall (cdr (assoc query org-ilm-queries-alist)))
                    :action #'org-ilm-parse-headline
                    :sort #'org-ilm--compare-priority)))
     entries))
@@ -2286,7 +2304,9 @@ wasteful if headline does not match query."
   "Return list of subjects from COLLECTION.
 
 TODO parse-headline pass arg to not sample priority to prevent recusrive subject search?"
-  (let ((collection (or collection (plist-get org-ilm-queue :collection))))
+  (let ((collection (assoc
+                     (or collection (plist-get org-ilm-queue :collection))
+                     org-ilm-collections-alist)))
     (cl-assert collection)
     (org-ql-select (cdr collection)
       (cons 'todo org-ilm-subject-states)
@@ -2298,15 +2318,53 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     (and (todo ,org-ilm-incr-state) (scheduled :to today))
     (and (todo ,org-ilm-card-state) (org-ilm--ql-card-due))))
 
+(defun org-ilm--query-select ()
+  "Prompt user for query to select from.
+The queries are stored in `org-ilm-queries-alist'."
+  (org-ilm--select-alist org-ilm-queries-alist "Query: "))
+
 
 ;;;; Queue
 
+;; "Queue" is a bit of a misnomer, as it can be ordered in any way, and may
+;; contain any element, outstanding or not, depending on the query it was used
+;; to build it. However, on review start, it forms the review queue, so in that
+;; sense it is a queue.
 
 (defcustom org-ilm-queue-subject-nchar 6
   "Truncation size of subject names as displayed in the queue.
 If available, the last alias in the ROAM_ALIASES property will be used."
   :type 'integer
   :group 'org-ilm)
+
+(defvar org-ilm-queue nil
+  "List of elements. This will form the review queue.")
+
+(defun org-ilm-queue-elements ()
+  "Return elements in the queue."
+  (plist-get org-ilm-queue :queue))
+
+(defun org-ilm-queue-empty-p ()
+  (= 0 (length (org-ilm-queue-elements))))
+
+(defun org-ilm--queue-build (&optional collection query)
+  (let ((collection (or collection (car (org-ilm--select-collection))))
+        (query (or query (car (org-ilm--query-select)))))
+    (list
+     :queue (org-ilm-query-collection collection query)
+     :collection collection
+     :query query)))
+
+(defun org-ilm-queue-refresh (&optional select-collection)
+  "Call the query again."
+  (interactive "P")
+  (let ((collection (if select-collection
+                        (car (org-ilm--select-collection))
+                      (or
+                       (plist-get org-ilm-queue :collection)
+                       (car (org-ilm--select-collection)))))
+        (query (or (plist-get org-ilm-queue :query) (car (org-ilm--query-select)))))
+    (setq org-ilm-queue (org-ilm--queue-build collection query))))
 
 ;;;;; Building
 
@@ -2324,33 +2382,8 @@ If point on subject, add all headlines of subject."
         
         )))))
 
-(defun org-ilm-queue-refresh (&optional select-collection)
-  "Call the query again."
-  (interactive "P")
-  (let ((collection (if select-collection
-                        (org-ilm--select-collection)
-                      (or
-                       (plist-get org-ilm-queue :collection)
-                       (org-ilm--select-collection))))
-        (query (or (plist-get org-ilm-queue :query) (org-ilm--select-query))))
-    (setq org-ilm-queue
-          (list
-           :queue (org-ilm-query-queue collection query)
-           :collection collection
-           :query query))))
 
-;;;;; Commands       
-
-(defun org-ilm-queue (reset)
-  "View queue in Agenda-like buffer."
-  (interactive "P")
-  (if (and org-ilm-queue (not reset))
-      (org-ilm--queue-display)
-    (org-ilm-queue-refresh)
-    (org-ilm--queue-display)))
-
-
-;;;;; Within queue 
+;;;;; Queue view
 (defvar org-ilm-queue-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "n")
@@ -2391,17 +2424,12 @@ If point on subject, add all headlines of subject."
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
   (interactive (list (org-ilm--vtable-get-object)))
-  (let ((loc (org-id-find (plist-get object :id) 'marker)))
-    (with-current-buffer (marker-buffer loc)
-      (goto-char loc)
-      (org-ilm-open-attachment))))
+  (org-ilm--attachment-open-by-id (plist-get object :id)))
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
   (interactive (list (org-ilm--vtable-get-object)))
-  (let ((loc (org-id-find (plist-get object :id) 'marker)))
-    (pop-to-buffer (marker-buffer loc))
-    (goto-char loc)))
+  (org-ilm--org-goto-id (plist-get object :id)))
 
 (defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
@@ -2468,9 +2496,9 @@ DAYS can be specified as numeric prefix arg."
 (defun org-ilm-queue--set-header ()
   (setq header-line-format
         (concat
-         (symbol-name (car (plist-get org-ilm-queue :query)))
+         (symbol-name (plist-get org-ilm-queue :query))
          " ("
-         (symbol-name (car (plist-get org-ilm-queue :collection)))
+         (symbol-name (plist-get org-ilm-queue :collection))
          ")")))
 
 (defun org-ilm-queue-revert (&optional select-collection)
@@ -2586,7 +2614,7 @@ A lot of formatting code from org-ql."
                 "")))))
    :objects-function
    (lambda ()
-     (let ((queue (plist-get org-ilm-queue :queue)))
+     (let ((queue (org-ilm-queue-elements)))
        (unless (= 0 (length queue))
          (number-sequence 0 (- (length queue) 1)))))
    :getter
@@ -2612,6 +2640,11 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm--queue-display ()
   "Open the active queue."
+  (when (org-ilm-queue-empty-p)
+    (org-ilm-queue-refresh)
+    (when (org-ilm-queue-empty-p)
+      (user-error "Queue is empty!")))
+  
   (let ((buf (get-buffer-create "*ilm queue*")))
     (with-current-buffer buf
       (setq-local buffer-read-only nil)
@@ -2620,8 +2653,17 @@ A lot of formatting code from org-ql."
       (vtable-insert (org-ilm--queue-make-vtable))
       (org-ilm-queue--set-header)
       (setq-local buffer-read-only t)
+      (hl-line-mode 1)
       (goto-char (point-min)))
     (switch-to-buffer buf)))
+
+(defun org-ilm-queue (reset)
+  "View queue in Agenda-like buffer."
+  (interactive "P")
+  (if (and org-ilm-queue (not reset))
+      (org-ilm--queue-display)
+    (org-ilm-queue-refresh)
+    (org-ilm--queue-display)))
 
 
 ;;;; Import
@@ -2956,6 +2998,7 @@ Headline can be a subject or not."
 ;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
 ;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
 ;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
+;; org-srs-table-lines
 
 (defun org-ilm-cloze ()
   "Create a cloze card.
@@ -3046,6 +3089,82 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
   (org-narrow-to-subtree)
   ;; When buffer narrows, will only review items within narrowed region.
   (org-srs-review-start))
+
+(defun org-ilm--srs-headline-item ()
+  "Return item of the org-srs card of headline at point."
+  (save-excursion
+    (org-back-to-heading)
+    (org-srs-log-beginning-of-drawer)
+    (forward-line)
+    (org-srs-item-at-point)))
+
+(defun org-ilm--srs-headline-item-type ()
+  "Return the item type of the cards of this headline."
+  ;; Returns (type-info id)
+  ;; type-info can be: (cloze) (card front) (card back)
+  (car (car (org-ilm--srs-headline-item))))
+
+(defun org-ilm--srs-review-rate (rating)
+  "Rate SRS item without being in review.
+
+https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169"
+  (org-srs-property-let ((org-srs-review-cache-p nil))
+     (apply #'org-srs-review-rate rating (org-ilm--srs-headline-item))))
+
+;;;;; Custom org-srs types
+
+(cl-defmethod org-srs-item-review ((type (eql 'ilm-cloze)) &rest args)
+  "Exactly as the default 'cloze type, but assumes no header."
+  (cl-loop with visibility = (org-srs-item-cloze-visibility) and cloze-id-set = args
+           initially (org-srs-item-cloze-remove-overlays (point-min) (point-max))
+           ;; for cloze in (progn (org-srs-item-narrow) (org-srs-item-cloze-collect))
+           for cloze in (org-srs-item-cloze-collect)
+           for (id . (start end text hint)) = cloze
+           if (or (null cloze-id-set) (member id cloze-id-set))
+           collect (cons (org-srs-item-cloze-put-overlay
+                          start end
+                          (org-srs-item-cloze-current hint))
+                         cloze)
+           into hidden-clozes
+           else
+           do (cl-ecase visibility
+                ((nil) (org-srs-item-cloze-put-overlay start end (org-srs-item-cloze-hidden)))
+                ((t) (org-srs-item-cloze-put-overlay start end text)))
+           finally
+           (cl-loop with centeredp = (org-srs-item-cloze-centered-in-review-p)
+                    for (overlay _id start _end text _hint) in hidden-clozes
+                    do (cl-assert (overlayp overlay))
+                    unless (> (length hidden-clozes) 1)
+                    do (goto-char start)
+                    and when (cl-etypecase centeredp
+                               (boolean centeredp)
+                               (function (funcall centeredp)))
+                    do (recenter) (org-srs-item-cloze-recenter-horizontally)
+                    do (org-srs-item-add-hook-once
+                        'org-srs-item-after-confirm-hook
+                        (apply-partially #'\(setf\ org-srs-item-cloze-overlay-text\) (org-srs-item-cloze-answer text) overlay)))
+           (org-srs-item-add-hook-once
+            'org-srs-review-continue-hook
+            (apply-partially #'org-srs-item-cloze-remove-overlays (point-min) (point-max))
+            50)
+           (apply (org-srs-item-confirm) type args)))
+
+;;;;; Temporary advice
+
+;; https://github.com/bohonghuang/org-srs/issues/45
+
+(defun org-ilm--org-srs-item-goto-override (&rest args)
+  (let* ((marker (apply #'org-srs-item-marker args))
+         (buffer (marker-buffer marker)))
+    ;; (cl-assert (eq (window-buffer) (current-buffer)))
+    (unless (eq buffer (current-buffer))
+      (switch-to-buffer buffer nil t)
+      ;; (cl-assert (eq (window-buffer) buffer))
+      )
+    (cl-assert (eq (current-buffer) buffer))
+    (goto-char marker)))
+(advice-add 'org-srs-item-goto
+            :override #'org-ilm--org-srs-item-goto-override)
 
 
 ;;;; Subjects
@@ -3232,6 +3351,204 @@ TODO Skip if self or descendant."
                             (concat "id:" subject-id) subject-desc)))
         (org-entry-put nil "SUBJECTS+"
                        (concat cur-subjects " " subject-link))))))
+
+
+;;;; Review
+
+(defvar org-ilm--review-current-element-info nil
+  "Info of the current element being reviewed.
+
+Besides storing the attachment buffer, this variable contains redundant data as the current element should be the first element in org-ilm-queue. However this redundancy is useful to make sure everything is still in sync.")
+
+(cl-defun org-ilm-review-start (&key queue)
+  (interactive)
+
+  (setq org-ilm-queue (or queue org-ilm-queue (org-ilm--queue-build)))
+  (when (org-ilm-queue-empty-p)
+    (org-ilm-queue-refresh)
+    (when (org-ilm-queue-empty-p)    
+      (user-error "Queue is empty!")))
+
+  (org-ilm--review-next))
+
+(defun org-ilm-review-quit ()
+  (interactive)
+  (org-ilm--review-cleanup-current-element))
+
+(defun org-ilm-review-next ()
+  (interactive)
+  (if (and
+       (plist-get org-ilm--review-current-element-info :card-type)
+       (not (plist-get org-ilm--review-current-element-info :rating)))
+      (call-interactively #'org-ilm-review-rate)
+    (org-ilm--review-next)))
+
+(defun org-ilm-review-rate (rating)
+  "Rate the card that is being reviewed."
+  (interactive
+   (list
+    (let ((ratings '(("Good" . :good) ("Easy" . :easy) ("Hard" . :hard) ("Again" . :again))))
+      (alist-get (completing-read "Rate:" ratings nil t) ratings nil nil #'equal))))
+  (unless org-ilm--review-current-element-info
+    (user-error "Not reviewing."))
+  (unless (plist-get org-ilm--review-current-element-info :card-type)
+    (user-error "Element is not a card. Try `org-ilm-review-next'."))
+  (org-ilm--org-with-point-at
+   (plist-get org-ilm--review-current-element-info :id)
+   (org-ilm--srs-review-rate rating))
+  (setq org-ilm--review-current-element-info
+        (plist-put org-ilm--review-current-element-info :rating rating))
+  (org-ilm-review-next))
+
+(defun org-ilm-review-rate-good ()
+  (interactive)
+  (org-ilm-review-rate :good))
+
+(defun org-ilm-review-rate-easy ()
+  (interactive)
+  (org-ilm-review-rate :easy))
+
+(defun org-ilm-review-rate-hard ()
+  (interactive)
+  (org-ilm-review-rate :hard))
+
+(defun org-ilm-review-rate-again ()
+  (interactive)
+  (org-ilm-review-rate :again))
+
+(defun org-ilm--review-top-element ()
+  (car (org-ilm-queue-elements)))
+
+(defun org-ilm--review-next ()
+  (when org-ilm--review-current-element-info
+    (org-ilm--review-cleanup-current-element)
+    (setq org-ilm-queue
+          (plist-put org-ilm-queue :queue
+                     (cdr (plist-get org-ilm-queue :queue)))))
+  (if (org-ilm-queue-empty-p)
+      (message "Finished reviewing queue!")
+    (org-ilm--review-setup-current-element)
+    (org-ilm--review-open-current-element)))
+
+(defun org-ilm--review-setup-current-element ()
+  (cl-assert (not (org-ilm-queue-empty-p)))
+  
+  (let* ((element (org-ilm--review-top-element))
+         (id (plist-get element :id))
+         (is-card (eq 'card (plist-get element :type)))
+         card-type attachment-buffer)
+
+    (org-ilm--org-with-point-at
+     id
+     (when is-card
+       (setq card-type
+             (org-ilm--org-with-point-at
+              id
+              (org-ilm--srs-headline-item-type))))
+     (setq attachment-buffer
+           ;; dont yet switch to the buffer, just return it so we can do some
+           ;; processing first.
+           (save-window-excursion
+             (org-ilm--attachment-open))))
+
+    (with-current-buffer attachment-buffer
+      (setq header-line-format
+            '(:eval (org-ilm--review-header-build)))
+
+      (org-ilm--add-hook-once
+       'kill-buffer-hook
+       (lambda ()
+         (when (yes-or-no-p "Quit review?")
+           (org-ilm-review-quit)))
+       nil t))
+
+    (setq org-ilm--review-current-element-info
+          (list :element element
+                :id (plist-get element :id)
+                :buffer attachment-buffer
+                :card-type card-type))))
+
+(defun org-ilm--review-open-current-element ()
+  (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
+        (card-type (plist-get org-ilm--review-current-element-info :card-type)))
+    (with-current-buffer (pop-to-buffer buffer)
+      ;; Prepare org-srs card overlays. First tried doing it before poping to
+      ;; buffer, but `org-srs-item-review' immediately prompts user to type any
+      ;; key to reveal the answer, so no time to switch to buffer.
+      (when card-type
+        (add-hook
+         'org-srs-item-after-confirm-hook
+         (lambda ()
+           (setq org-ilm--review-current-element-info
+                 (plist-put org-ilm--review-current-element-info
+                            :card-revealed t)))
+         nil t)
+        (org-srs-item-review card-type)))))
+
+(defun org-ilm--review-cleanup-current-element ()
+  (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
+    (kill-buffer buffer))
+  (setq org-ilm--review-current-element-info nil))
+
+(defun org-ilm--review-header-make-map (func)
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] 
+                (lambda () (interactive)
+                  (funcall func)))
+    map))
+
+(defun org-ilm--review-header-build ()
+  (let* ((element (plist-get org-ilm--review-current-element-info :element))
+         (card-type (plist-get org-ilm--review-current-element-info :card-type))
+         (card-revealed (plist-get org-ilm--review-current-element-info :card-revealed)))
+    (list
+     (propertize "Ilm Review" 'face '(:weight bold :height 1.1))
+     "   "
+     (apply
+      #'concat
+      (append
+       (unless card-type
+         (list
+          (propertize
+           "[Next]"
+           'mouse-face 'highlight
+           'local-map (org-ilm--review-header-make-map
+                       #'org-ilm-review-next))
+          " "))
+       (when (and card-type (not card-revealed))
+         (list
+           "Continue with any key"))
+       (when (and card-type card-revealed)
+         (list
+          (propertize
+           "[Again]"
+           'mouse-face 'highlight
+           'local-map (org-ilm--review-header-make-map
+                       #'org-ilm-review-rate-again))
+          " "
+          (propertize
+           "[Hard]"
+           'mouse-face 'highlight
+           'local-map (org-ilm--review-header-make-map
+                       #'org-ilm-review-rate-hard))
+          " "
+          (propertize
+           "[Good]"
+           'mouse-face 'highlight
+           'local-map (org-ilm--review-header-make-map
+                       #'org-ilm-review-rate-good))
+          " "
+          (propertize
+           "[Easy]"
+           'mouse-face 'highlight
+           'local-map (org-ilm--review-header-make-map
+                       #'org-ilm-review-rate-easy))
+
+          ))
+
+       ))
+
+     )))
 
 
 ;;;; Footer
