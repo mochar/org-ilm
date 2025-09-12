@@ -40,8 +40,15 @@
 (defcustom org-registry-types nil
   "Alist mapping registry type name to plist properties."
   :type '(alist :tag "Registry type parameters"
+                :key-type string
 		:value-type plist)
   :group 'org-registry)
+
+(defcustom org-registry-type-aliases
+  '(("file" . ("image" "video")))
+  "Alist mapping `org-registry-types' types to aliases that can be used in their place.
+This helps share functionality of a type while being able to filter on a more granular level."
+  :type '(alist :key-type string :value-type (repeat string)))
 
 (defface org-registry-link-face
   '((t :inherit org-link))
@@ -56,7 +63,7 @@
   ;; Might be nice to detect transclusions being deactivated
   (let ((ov (car args)))
     (when-let* ((type (overlay-get ov 'org-registry-type))
-                (data (cdr (assoc type org-registry-types)))
+                (data (cdr (org-registry--data-from-name type)))
                 (teardown-func (plist-get data :teardown)))
       (funcall teardown-func ov))))
 
@@ -110,7 +117,7 @@
   (interactive)
   (let* ((entry (org-registry--select-entry))
          (type (org-mem-entry-property "TYPE" entry))
-         (data (cdr (assoc type org-registry-types)))
+         (data (cdr (org-registry--data-from-name type)))
          (paste-func (plist-get data :paste)))
       (funcall paste-func entry)))
 
@@ -152,6 +159,22 @@
           t)
         )))))
 
+(defun org-registry--type-data (type-or-alias)
+  (if-let ((data (assoc type-or-alias org-registry-types)))
+      data
+    (if-let ((type (car
+                    (cl-find-if (lambda (entry)
+                                  (member type-or-alias (cdr entry)))
+                                org-registry-type-aliases))))
+        (assoc type org-registry-types))))
+
+(defun org-registry--type-data-from-entry (entry-or-id)
+  (when-let* ((entry (if (org-mem-entry-p entry-or-id)
+                         entry-or-id
+                       (org-mem-entry-by-id entry-or-id)))
+              (type (org-mem-entry-property "TYPE" entry)))
+    (org-registry--type-data type)))
+
 ;;;; Types
 
 (defun org-registry-set-type (type &rest parameters)
@@ -165,20 +188,17 @@ PARAMETERS should be keyword value pairs. See `org-registry-types'."
 (defun org-registry--link-preview (ov id link)
   ;; This function must return a non-nil value to indicate success.
   (let* ((entry (org-mem-entry-by-id id))
-         (type (org-mem-entry-property "TYPE" entry)))
-    (when-let ((data (cdr (assoc type org-registry-types))))
-      (overlay-put ov 'org-registry-type type)
-      (org-with-point-at (org-element-begin link)
-        (funcall (plist-get data :preview) entry ov link)))))
+         (type-data (org-registry--type-data-from-entry entry)))
+    (overlay-put ov 'org-registry-type (car type-data))
+    (org-with-point-at (org-element-begin link)
+      (funcall (plist-get (cdr type-data) :preview) entry ov link))))
 
 (defun org-registry--link-follow (id prefix-arg)
   (org-node-goto-id id))
 
 (defun org-registry--link-face (id)
-  (if-let ((entry (org-mem-entry-by-id id))
-             (type (org-mem-entry-property "TYPE" entry))
-             (data (cdr (assoc type org-registry-types)))
-             (face (plist-get data :face)))
+  (if-let ((type-data (org-registry-type-data-from-entry id))
+           (face (plist-get (car data) :face)))
       face
     'org-registry-link-face))
 
