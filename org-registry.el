@@ -53,12 +53,13 @@
   :group 'org-registry
   (if org-registry-global-minor-mode
       ;; Enable
-      (progn
-        (advice-add 'delete-overlay
-                    :before #'org-registry--delete-overlay-advice)
-        )
+      (dolist (type-data org-registry-types)
+        (when-let ((f (plist-get (cdr type-data) :setup)))
+          (funcall f)))
     ;; Disable
-    (advice-remove 'delete-overlay #'org-registry--delete-overlay-advice)))
+    (dolist (type-data org-registry-types)
+        (when-let ((f (plist-get (cdr type-data) :cleanup)))
+          (funcall f)))))
 
 ;;;; Types
 
@@ -120,8 +121,19 @@ The way this is implemented is by using `org-latex-preview-place' which
         (delete-overlay o)
         )))))
 
+(defun org-registry--type-latex-setup ()
+  (advice-add 'delete-overlay
+              :before #'org-registry--delete-overlay-advice))
+
+(defun org-registry--type-latex-cleanup ()
+  (advice-remove 'delete-overlay
+                 #'org-registry--delete-overlay-advice))
+
 (org-registry-set-type
- "latex" :preview #'org-registry--type-latex-preview)
+ "latex"
+ :preview #'org-registry--type-latex-preview
+ :setup #'org-registry--type-latex-setup
+ :cleanup #'org-registry--type-latex-cleanup)
 
 
 ;;;;; File type
@@ -135,6 +147,12 @@ The way this is implemented is by using `org-latex-preview-place' which
 
 (org-registry-set-type
  "file" :preview #'org-registry--type-file-preview)
+
+;;;;; Org type
+
+(defun org-registry--type-org-preview (entry ov link)
+  
+  )
 
 
 ;;;; Footer
