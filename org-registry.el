@@ -52,6 +52,8 @@
 
 (defun org-registry--delete-overlay-advice (&rest args)
   "Advice to detect if our org-link face was deleted."
+  ;; TODO in org-transclusion-remove: (delete-overlay tc-pair-ov)
+  ;; Might be nice to detect transclusions being deactivated
   (let ((ov (car args)))
     (when-let* ((type (overlay-get ov 'org-registry-type))
                 (data (cdr (assoc type org-registry-types)))
@@ -80,6 +82,75 @@
           (funcall f)))
     (advice-remove 'delete-overlay
                    #'org-registry--delete-overlay-advice)))
+
+;;;; Commands
+
+;;;###autoload
+(defvar-keymap org-registry-prefix-map
+  "f" #'org-registry-find
+  "i" #'org-registry-insert
+  "p" #'org-registry-paste)
+
+;;;###autoload
+(defun org-registry-find ()
+  (interactive)
+  (org-node-goto (org-registry--select-entry)))
+
+;;;###autoload
+(defun org-registry-insert ()
+  (interactive)
+  (let* ((entry (org-registry--select-entry))
+         (id (org-mem-entry-id entry)))
+    (insert (format "[[registry:%s]]" id))
+    (org-link-preview)))
+
+;;;###autoload
+(defun org-registry-paste ()
+  "Paste the contents of the entry rather than linking to it."
+  (interactive)
+  (let* ((entry (org-registry--select-entry))
+         (type (org-mem-entry-property "TYPE" entry))
+         (data (cdr (assoc type org-registry-types)))
+         (paste-func (plist-get data :paste)))
+      (funcall paste-func entry)))
+
+;;;; Functions
+
+;; See: https://github.com/meedstrom/org-node/issues/137
+(defun org-registry--org-node-read-candidate (&optional prompt blank-ok initial-input predicate)
+  "Like `org-node-read-candidate' but with PREDICATE and returns the node."
+  (gethash
+   (completing-read (or prompt "Node: ")
+                    (if blank-ok #'org-node-collection-main
+                      #'org-node-collection-basic)
+                    predicate
+                    ()
+                    initial-input
+                    (if org-node-alter-candidates 'org-node-hist-altered
+                      'org-node-hist))
+   org-node--candidate<>entry))
+
+
+(cl-defun org-registry--select-entry (&key types registries)
+  "Select registry entry."
+  (let ((types (if (listp types) types (list types)))
+        (registries (mapcar
+                     (lambda (x) (expand-file-name x "~/"))
+                     (if registries
+                         (if (listp registries) registries (list registries))
+                       org-registry-registries))))
+    (org-registry--org-node-read-candidate
+     "Entry: "
+     nil nil
+     ;; filter predicate
+     (lambda (name node)
+       (and
+        (member (org-mem-entry-file-truename node) registries)
+        (if types
+          (member (org-mem-entry-property "TYPE" node)
+                  types)
+          t)
+        )))))
 
 ;;;; Types
 
@@ -139,7 +210,9 @@ The way this is implemented is by using `org-latex-preview-place' which
       (list
        (overlay-start ov)
        (overlay-end ov)
-       latex)))
+       ;; latex
+       (concat "\\( " (org-mem-entry-property "LATEX" entry) " \\)")
+       )))
     t))
 
 (defun org-registry--type-latex-teardown (ov)
@@ -149,10 +222,14 @@ The way this is implemented is by using `org-latex-preview-place' which
               'org-latex-overlay)
       (delete-overlay o))))
 
+(defun org-registry--type-latex-paste (entry)
+  (insert "\\( " (org-mem-entry-property "LATEX" entry) " \\)"))
+
 (org-registry-set-type
  "latex"
  :preview #'org-registry--type-latex-preview
- :teardown #'org-registry--type-latex-teardown)
+ :teardown #'org-registry--type-latex-teardown
+ :paste #'org-registry--type-latex-paste)
 
 
 ;;;;; File type
