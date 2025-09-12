@@ -302,10 +302,12 @@ If empty return nil, and if only one, return it."
 
 (defun org-ilm--buffer-text-clean (&optional region-begin region-end keep-clozes)
   "Extract buffer text without clozes and extract and card targets."
-  (let ((text (s-replace-regexp
-               org-ilm-target-regexp ""
-               (buffer-substring-no-properties (or region-begin (point-min))
-                                               (or region-end (point-max))))))
+  (let* ((text (s-replace-regexp
+                org-ilm-target-regexp ""
+                (buffer-substring-no-properties (or region-begin (point-min))
+                                                (or region-end (point-max)))))
+         ;; Remove org links
+         (text (org-link-display-format text)))
     ;; Remove clozes by looping until none left
     (if keep-clozes
         text
