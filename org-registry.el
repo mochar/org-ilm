@@ -175,6 +175,23 @@ This helps share functionality of a type while being able to filter on a more gr
               (type (org-mem-entry-property "TYPE" entry)))
     (org-registry--type-data type)))
 
+(defun org-registry--id-links-to-entry (&optional entry-or-id)
+  "All ID-links targeting registry entry with ID.
+
+From: `org-mem-id-links-to-id'
+TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
+  (when-let ((id (cond
+                  ((org-mem-entry-p entry-or-id)
+                   (org-mem-entry-id entry-or-id))
+                  ((stringp entry-or-id) entry-or-id)
+                  (t (org-mem-entry-id (org-node-at-point))))))
+    (with-memoization (org-mem--table 14 id)
+      (when-let* ((links (org-mem-links-to-target id)))
+        ;; For a vast majority of people, this filter is safe to skip.  But it's
+        ;; possible, for example, to have a heading named identical to some ID
+        ;; that you also have, and have non-ID links targeting that.
+        (seq-filter (##equal (org-mem-link-type %) "registry") links)))))
+
 ;;;; Types
 
 (defun org-registry-set-type (type &rest parameters)
