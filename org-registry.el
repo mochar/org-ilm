@@ -18,6 +18,9 @@
 (require 'org-id)
 (require 'org-attach)
 (require 'org-latex-preview)
+(require 'org-ql)
+(require 'org-node)
+(require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
 
@@ -34,7 +37,11 @@
   :type '(repeat file)
   :group 'org-registry)
 
-;;;; Variables
+(defcustom org-registry-types nil
+  "Alist mapping registry type name to plist properties."
+  :type '(alist :tag "Registry type parameters"
+		:value-type plist)
+  :group 'org-registry)
 
 ;;;; Minor mode
 
@@ -53,15 +60,23 @@
     ;; Disable
     (advice-remove 'delete-overlay #'org-registry--delete-overlay-advice)))
 
-;;;; Link previews
+;;;; Types
+
+(defun org-registry-set-type (type &rest parameters)
+  "Set registry TYPE properties to PARAMETERS.
+PARAMETERS should be keyword value pairs. See `org-registry-types'."
+  (let ((data (assoc type org-registry-types)))
+    (if data
+        (setcdr data (org-combine-plists (cdr data) parameters))
+      (push (cons type parameters) org-registry-types))))
 
 (defun org-registry--link-preview (ov id link)
   ;; This function must return a non-nil value to indicate success.
-  (let ((entry (org-mem-entry-by-id id)))
-    (org-with-point-at (org-element-begin link)
-      (pcase (org-mem-entry-property "TYPE" entry)
-        ("latex" (org-registry--link-preview-latex entry ov link))
-        ("file" (org-registry--link-preview-file entry ov link))))))
+  (let* ((entry (org-mem-entry-by-id id))
+         (type (org-mem-entry-property "TYPE" entry)))
+    (when-let ((data (cdr (assoc type org-registry-types))))
+      (org-with-point-at (org-element-begin link)
+        (funcall (plist-get data :preview) entry ov link)))))
 
 (defun org-registry--link-follow (id prefix-arg)
   (org-node-goto-id id))
@@ -72,9 +87,9 @@
  :preview #'org-registry--link-preview)
 
 
-;;;;; Latex preview
+;;;;; Latex type
 
-(defun org-registry--link-preview-latex (entry ov link)
+(defun org-registry--type-latex-preview (entry ov link)
   "Place a latex overlay on the link.
 
 The way this is implemented is by using `org-latex-preview-place' which
@@ -103,17 +118,23 @@ The way this is implemented is by using `org-latex-preview-place' which
       (when (eq (overlay-get o 'org-overlay-type)
                 'org-latex-overlay)
         (delete-overlay o)
-      )
-    )
-  )))
+        )))))
 
-;;;;; File preview
-(defun org-registry--link-preview-file (entry ov link)
+(org-registry-set-type
+ "latex" :preview #'org-registry--type-latex-preview)
+
+
+;;;;; File type
+
+(defun org-registry--type-file-preview (entry ov link)
   (org-link-preview-file
    ov (expand-file-name
        (org-mem-entry-property "PATH" entry)
        "~/")
    link))
+
+(org-registry-set-type
+ "file" :preview #'org-registry--type-file-preview)
 
 
 ;;;; Footer
