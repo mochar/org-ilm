@@ -38,7 +38,41 @@
   :group 'org-registry)
 
 (defcustom org-registry-types nil
-  "Alist mapping registry type name to plist properties."
+  "Alist mapping registry type name to plist properties.
+
+Properties are:
+
+`:preview'
+
+  See `org-link-parameters' for expected behavior. Accepts org-mem
+  entry, link overlay, and link org-element.
+
+`:teardown'
+
+  Called when the link overlay is deleted. Accepts the link overlay.
+
+`:setup'
+
+  Called when `org-registry-global-minor-mode' is activated.
+
+`:cleanup'
+
+  Called when `org-registry-global-minor-mode' is deactivated.
+
+`:paste'
+
+  Should insert the contents of the registry entry in the buffer at
+  point. Accepts org-mem entry.
+
+`:parse'
+
+  Return org registry entry properties based on thing at point. If there
+  is nothing at point to interpret, return nil.
+
+`:create'
+
+  Return org registry entry properties from scratch.
+"
   :type '(alist :tag "Registry type parameters"
                 :key-type string
 		:value-type plist)
@@ -96,7 +130,8 @@ This helps share functionality of a type while being able to filter on a more gr
 (defvar-keymap org-registry-prefix-map
   "f" #'org-registry-find
   "i" #'org-registry-insert
-  "p" #'org-registry-paste)
+  "p" #'org-registry-paste
+  "r" #'org-registry-register-dwim)
 
 ;;;###autoload
 (defun org-registry-find ()
@@ -119,7 +154,36 @@ This helps share functionality of a type while being able to filter on a more gr
          (type (org-mem-entry-property "TYPE" entry))
          (data (cdr (org-registry--data-from-name type)))
          (paste-func (plist-get data :paste)))
-      (funcall paste-func entry)))
+    (funcall paste-func entry)))
+
+;;;###autoload
+(defun org-registry-register ()
+  "Add something to the registry."
+  (interactive)
+  (pcase (length org-registry-types)
+    (0 (message "No registry types available. See `org-registry-types'"))
+    (
+  )
+
+;;;###autoload
+(defun org-registry-register-dwim ()
+  "Add element at point to the registry."
+  (interactive)
+  (let ((types
+         (cl-remove-if
+          #'null (mapcar
+                  (lambda (type)
+                    (when-let* ((f (plist-get (cdr type) :parse))
+                                (props (funcall f)))
+                      (cons (car type) props)))
+                  org-registry-types))))
+    (pcase (length types)
+      (0 (org-registry-register))
+      (1 (org-registry--register (car (car types)) (cdr (car types))))
+      (_
+       (let ((type (completing-read "Type: " (mapcar #'car types) nil t)))
+         (org-registry--register type (cdr (assoc type types))))))))
+
 
 ;;;; Functions
 
@@ -192,6 +256,30 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
         ;; that you also have, and have non-ID links targeting that.
         (seq-filter (##equal (org-mem-link-type %) "registry") links)))))
 
+(defun org-registry--registry-select (&optional type)
+  (pcase (length org-registry-registries)
+    (0 nil)
+    (1 (car org-registry-registries))
+    (t (completing-read "Registry: " org-registry-registries nil t))))
+    
+(defun org-registry--register (type properties &optional registry)
+  "Add an entry of TYPE with PROPERTIES to the REGISTRY."
+  (message "Adding %s with props: %s" type properties)
+  (cl-letf* ((registry (or registry (org-registry--registry-select)))
+             ((symbol-value 'org-capture-templates)
+              (list
+               (list "r" "Register"
+                     'entry
+                     `(file ,registry)
+                     "* %?"
+                     :hook
+                     (lambda ()
+                       (org-id-get-create)
+                       (org-entry-put nil "TYPE" type)
+                       (cl-loop for (p v) on properties by #'cddr
+                                do (org-entry-put nil (substring (symbol-name p) 1) v)))))))
+    (org-capture nil "r")))
+
 ;;;; Types
 
 (defun org-registry-set-type (type &rest parameters)
@@ -248,7 +336,7 @@ The way this is implemented is by using `org-latex-preview-place' which
        (overlay-start ov)
        (overlay-end ov)
        ;; latex
-       (concat "\\( " (org-mem-entry-property "LATEX" entry) " \\)")
+       (concat (org-mem-entry-property "LATEX" entry))
        )))
     t))
 
@@ -260,13 +348,20 @@ The way this is implemented is by using `org-latex-preview-place' which
       (delete-overlay o))))
 
 (defun org-registry--type-latex-paste (entry)
-  (insert "\\( " (org-mem-entry-property "LATEX" entry) " \\)"))
+  (insert (org-mem-entry-property "LATEX" entry)))
+
+(defun org-registry--type-latex-parse ()
+  (when-let* ((org-element (when (eq major-mode 'org-mode)
+                             (org-element-context)))
+              (_ (eq 'latex-fragment (org-element-type org-element))))
+    (list :LATEX (org-element-property :value org-element))))
 
 (org-registry-set-type
  "latex"
  :preview #'org-registry--type-latex-preview
  :teardown #'org-registry--type-latex-teardown
- :paste #'org-registry--type-latex-paste)
+ :paste #'org-registry--type-latex-paste
+ :parse #'org-registry--type-latex-parse)
 
 
 ;;;;; File type
