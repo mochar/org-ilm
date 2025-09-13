@@ -69,9 +69,30 @@ Properties are:
   Return org registry entry properties based on thing at point. If there
   is nothing at point to interpret, return nil.
 
+One of the following properties can be passed to create a new entry of
+this type. Note that they are mutually exclusive:
+
+`:template'
+
+  A list containing org-capture template info used to place the entry in
+  the registry.  It is a list with first element the template
+  string. The remainder is a property list as used in
+  `org-capture-templates'.
+
 `:create'
 
-  Return org registry entry properties from scratch.
+  Return org registry entry properties from scratch. The properties will
+  be used to create an entry using `org-registry--register'. If instead
+  you'd like to do that yourself, use `:register' instead. This is
+  useful for example when you have an asynchronous process that creates
+  the properties.
+
+`:register'
+
+  Register an entry. This function is responsible for creating the entry
+  in the registry, similar to `org-registry--register'. If instead you'd
+  like to delegate that to org-registry and only return a list of
+  properties, use `:create' instead.
 "
   :type '(alist :tag "Registry type parameters"
                 :key-type string
@@ -160,10 +181,19 @@ This helps share functionality of a type while being able to filter on a more gr
 (defun org-registry-register ()
   "Add something to the registry."
   (interactive)
-  (pcase (length org-registry-types)
-    (0 (message "No registry types available. See `org-registry-types'"))
-    (
-  )
+  (let* ((type-name (completing-read "Type: " org-registry-types nil t))
+         (type (assoc type-name org-registry-types)))
+    (cond
+     ((when-let ((template (plist-get (cdr type) :template)))
+        (org-registry--register-capture type-name template)
+        t))
+     ((when-let* ((create-func (plist-get (cdr type) :create))
+                  (props (funcall create-func)))
+        (org-registry--register (car type) props)
+        t))
+     ((when-let ((register-func (plist-get (cdr type) :register)))
+        (funcall register-func)))
+     (t (user-error "Registry type does not have :create or :register property")))))
 
 ;;;###autoload
 (defun org-registry-register-dwim ()
@@ -261,24 +291,41 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
     (0 nil)
     (1 (car org-registry-registries))
     (t (completing-read "Registry: " org-registry-registries nil t))))
-    
-(defun org-registry--register (type properties &optional registry)
-  "Add an entry of TYPE with PROPERTIES to the REGISTRY."
-  (message "Adding %s with props: %s" type properties)
+
+
+;;;; Register
+
+(defun org-registry--register-capture (type template &optional registry)
   (cl-letf* ((registry (or registry (org-registry--registry-select)))
+             (default-template-props
+              (list 
+               :hook
+               (lambda ()
+                 (org-id-get-create)
+                 (org-entry-put nil "TYPE" type))))
+             (template-props (org-combine-plists default-template-props (cdr template)))
              ((symbol-value 'org-capture-templates)
               (list
-               (list "r" "Register"
-                     'entry
-                     `(file ,registry)
-                     "* %?"
-                     :hook
-                     (lambda ()
-                       (org-id-get-create)
-                       (org-entry-put nil "TYPE" type)
-                       (cl-loop for (p v) on properties by #'cddr
-                                do (org-entry-put nil (substring (symbol-name p) 1) v)))))))
-    (org-capture nil "r")))
+               (append 
+                (list "r" "Register"
+                      'entry
+                      `(file ,registry)
+                      (or (car template) "* %?"))
+                template-props))))
+    (org-capture nil "r")))  
+
+(defun org-registry--register (type properties &optional registry)
+  "Add an entry of TYPE with PROPERTIES to the REGISTRY."
+  (org-registry--register-capture
+   type
+   (list
+    "* %?"
+    :hook
+    (lambda ()
+      (org-id-get-create)
+      (org-entry-put nil "TYPE" type)
+      (cl-loop for (p v) on properties by #'cddr
+               do (org-entry-put nil (substring (symbol-name p) 1) v))))))
 
 ;;;; Types
 
@@ -356,12 +403,21 @@ The way this is implemented is by using `org-latex-preview-place' which
               (_ (eq 'latex-fragment (org-element-type org-element))))
     (list :LATEX (org-element-property :value org-element))))
 
+(defun org-registry--type-latex-create ()
+  (list :LATEX ""))
+
+(defvar org-registry--type-latex-template
+  (list
+   "* %? %^{LATEX}p"))
+
 (org-registry-set-type
  "latex"
  :preview #'org-registry--type-latex-preview
  :teardown #'org-registry--type-latex-teardown
  :paste #'org-registry--type-latex-paste
- :parse #'org-registry--type-latex-parse)
+ :parse #'org-registry--type-latex-parse
+ :template org-registry--type-latex-template
+ :create #'org-registry--type-latex-create)
 
 
 ;;;;; File type
