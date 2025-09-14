@@ -125,7 +125,7 @@ This helps share functionality of a type while being able to filter on a more gr
   ;; Might be nice to detect transclusions being deactivated
   (let ((ov (car args)))
     (when-let* ((type (overlay-get ov 'org-registry-type))
-                (data (cdr (org-registry--data-from-name type)))
+                (data (cdr (org-registry--type-data type)))
                 (teardown-func (plist-get data :teardown)))
       (funcall teardown-func ov))))
 
@@ -180,7 +180,7 @@ This helps share functionality of a type while being able to filter on a more gr
   (interactive)
   (let* ((entry (org-registry--select-entry))
          (type (org-mem-entry-property "TYPE" entry))
-         (data (cdr (org-registry--data-from-name type)))
+         (data (cdr (org-registry--type-data type)))
          (paste-func (plist-get data :paste)))
     (funcall paste-func entry)))
 
@@ -200,7 +200,8 @@ This helps share functionality of a type while being able to filter on a more gr
         t))
      ((when-let ((register-func (plist-get (cdr type) :register)))
         (funcall register-func)))
-     (t (user-error "Registry type does not have :create or :register property")))))
+     ;; When nothing assigned, create empty capture
+     (t (org-registry--register (car type) nil)))))
 
 ;;;###autoload
 (defun org-registry-register-dwim ()
@@ -335,7 +336,21 @@ save-excursion."
        ;; Jump to correct position
        (goto-char (org-find-property "ID" org-id))
        ,@body)))
-  
+
+(defun org-registry--entry-contents (entry)
+  (cl-assert (org-mem-entry-p entry))
+  (save-excursion
+    (org-registry--org-with-point-at
+     (org-mem-entry-id entry)
+     (org-registry--org-get-contents))))
+
+(defun org-registry--plist-keys (plist)
+  "Return a list of keys in PLIST."
+  (let (keys)
+    (while plist
+      (push (car plist) keys)
+      (setq plist (cddr plist)))
+    (nreverse keys)))
 
 ;;;; Content capture
 
@@ -427,7 +442,7 @@ TEMPLATE is a list with as first value the template string, which can be
   (let ((body (plist-get data :ENTRY_BODY))
         (title (plist-get data :ENTRY_TITLE))
         (properties data))
-    (dolist (key (plist-get-keys properties))
+    (dolist (key (org-registry--plist-keys properties))
       (when (s-starts-with-p ":ENTRY_" (symbol-name key))
         (setq properties (org-plist-delete properties key))))
     (org-registry--register-capture
@@ -443,10 +458,14 @@ TEMPLATE is a list with as first value the template string, which can be
   (save-excursion
     (org-back-to-heading)
     (org-end-of-meta-data 'full)
-    (let ((start (point)))
-      (org-next-visible-heading 1)
-      (string-trim
-       (buffer-substring-no-properties start (point))))))
+    (if (or (org-at-heading-p) (eobp))
+        ;; If we end up at the next heading or end of buffer, no content except
+        ;; metadata.
+        ""
+      (let ((start (point)))
+        (org-next-visible-heading 1)
+        (string-trim
+         (buffer-substring-no-properties start (point)))))))
 
 ;;;; Types
 
@@ -489,10 +508,7 @@ PARAMETERS should be keyword value pairs. See `org-registry-types'."
 Can be either in the LATEX property or the body text."
   (or
    (org-mem-entry-property "LATEX" entry)
-   (save-excursion
-     (org-registry--org-with-point-at
-      (org-mem-entry-id entry)
-      (org-registry--org-get-contents)))))
+   (org-registry--entry-contents entry)))
 
 (defun org-registry--type-latex-preview (entry ov link)
   "Place a latex overlay on the link.
@@ -629,10 +645,21 @@ environment (multiline), paste it in headline body."
      (t
       (message "Cannot find transclusion to clean up")))))
 
+(defun org-registry--type-org-paste (entry)
+  (insert (org-registry--entry-contents entry)))
+
+(defun org-registry--type-org-parse ()
+  (when (and (eq major-mode 'org-mode) (region-active-p))
+    (list :ENTRY_BODY (buffer-substring-no-properties
+                       (region-beginning) (region-end)))))
+
 (org-registry-set-type
  "org"
  :preview #'org-registry--type-org-preview
- :teardown #'org-registry--type-org-teardown)
+ :teardown #'org-registry--type-org-teardown
+ :paste #'org-registry--type-org-paste
+ :parse #'org-registry--type-org-parse
+ )
 
 ;;;; Footer
 
