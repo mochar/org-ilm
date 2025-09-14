@@ -25,8 +25,8 @@
   :prefix "convtools-"
   :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
 
-(defcustom convtools-marker-path (executable-find "marker_single")
-  "Path to the marker_single executable."
+(defcustom convtools-node-path (executable-find "node")
+  "Path to the node executable."
   :type 'file
   :group 'convtools)
 
@@ -37,7 +37,7 @@
                  (const :tag "On error" error))
   :group 'convtools)
 
-;;;; Convertors
+;;;; Convert process
 
 (cl-defun convtools--convert-make-process (&key name id command on-success on-error keep-buffer-alive dont-update-state &allow-other-keys)
   "Create an async process to run COMMAND."
@@ -137,6 +137,7 @@ final converter succeeds."
             )))
     (apply converter converter-args)))
 
+;;;; Pandoc
 (cl-defun convtools--convert-with-pandoc (&rest args &key process-id process-name input-path input-format output-dir &allow-other-keys)
   "Convert a file to Org mode format using Pandoc."
   (unless (and process-id input-path input-format)
@@ -167,8 +168,52 @@ final converter succeeds."
          input-path
          "-o" (concat (file-name-sans-extension input-path) ".org"))))))))
 
+;;;; Defuddle
+;; Defuddle: https://github.com/kepano/defuddle
+;; Simplify html to markdown
+
+(defconst convtools-defuddle-path
+  (expand-file-name "scripts/defuddle.mjs"
+                    (file-name-directory (or load-file-name buffer-file-name))))
+
+(cl-defun convtools--convert-with-defuddle (&rest args &key process-id process-name input-path output-format &allow-other-keys)
+  "Convert an HTML file to Markdown using Defuddle."
+  (unless (and process-id input-path output-format)
+    (error "Required args: PROCESS-ID INPUT-PATH OUTPUT-FORMAT"))
+  (unless (member output-format '("markdown" "html"))
+    (error "OUTPUT-FORMAT must be one of [markdown|html]"))
+  (let* ((input-path (expand-file-name input-path))
+         (to-markdown (string= output-format "markdown"))
+         (output-path (expand-file-name
+                       (format "%s.%s"
+                               (file-name-base input-path)
+                               (if to-markdown "md" "html"))
+                       (file-name-directory input-path))))
+    (apply
+     #'convtools--convert-make-process
+     (org-combine-plists
+      args
+      (list
+       :name (or process-name "defuddle")
+       :id process-id
+       :command
+       (list
+        convtools-node-path
+        convtools-defuddle-path
+        input-path
+        output-format
+        output-path))))))
+
+
+;;;; Marker
 ;; Marker: https://github.com/datalab-to/marker
 ;; Much better Org formatting when converting from markdown
+
+(defcustom convtools-marker-path (executable-find "marker_single")
+  "Path to the marker_single executable."
+  :type 'file
+  :group 'convtools-marker)
+
 (cl-defun convtools--convert-with-marker (&rest args &key process-id process-name input-path format output-dir pages disable-image-extraction move-content-out new-name to-org on-success &allow-other-keys)
   "Convert a PDF document or image using Marker.
 
@@ -292,6 +337,119 @@ does not have an option for this so it is done here.
      :on-error on-error
      :on-final-success on-success)))
      
+
+;;;; Monolith
+
+(defcustom convtools-monolith-path (executable-find "monolith")
+  "Path to the monolith executable."
+  :type 'file
+  :group 'convtools-monolith)
+
+(defcustom convtools-monolith-args
+  '("--no-fonts" "--no-js")
+  "Arguments passed to monolith."
+  :type '(repeat string)
+  :group 'convtools-monolith)
+
+(cl-defun convtools--monolith-compile-paths (&rest args &key process-id input-path output-path &allow-other-keys)
+    (unless (and process-id input-path)
+    (error "Required args: PROCESS-ID INPUT-PATH"))
+
+  ;; TODO For now determining if input is file or url using file-exists-p, need
+  ;; something more robust
+  (let ((input-is-file (file-exists-p input-path)))
+    (setq input-path
+          (if input-is-file
+              (expand-file-name input-path)
+            input-path))
+    
+    (setq output-path
+          (expand-file-name
+           (format "%s.html"
+                   (or (when output-path
+                         (file-name-base output-path))
+                       (when input-is-file
+                         (file-name-base input-path))
+                       process-id))
+           (file-name-directory
+            (or output-path
+                (when input-is-file input-path)
+                temporary-file-directory))))
+    (list :input-path input-path :output-path output-path)))
+
+(cl-defun convtools--convert-with-monolith (&rest args &key process-id process-name input-path output-path &allow-other-keys)
+  "Convert a web URL or local HTML file to a single HTML file using Monolith."
+  (unless (and convtools-monolith-path (file-executable-p convtools-monolith-path))
+    (user-error "Monolith executable not available. See convtools-monolith-path."))
+
+  (cl-destructuring-bind (&key input-path output-path)
+      (apply #'convtools--monolith-compile-paths args)
+    (apply
+     #'convtools--convert-make-process
+     (org-combine-plists
+      args
+      (list
+       :name (or process-name "monolith")
+       :id process-id
+       :command
+       (append 
+        (list
+         convtools-monolith-path
+         input-path
+         "-o" output-path)
+        convtools-monolith-args))))))
+
+(cl-defun convtools--convert-to-org-with-monolith-pandoc (&key process-id on-success on-error monolith-args pandoc-args)
+  "Convert a URL or HTML file to single file HTML using Monolith, then to Org mode using Pandoc."
+  (unless (and process-id monolith-args)
+    (error "Required args: PROCESS-ID MONOLITH-ARGS"))
+
+  (setq monolith-args
+        (plist-put monolith-args :process-id process-id))
+  
+  (cl-destructuring-bind (&key input-path output-path)
+      (apply #'convtools--monolith-compile-paths monolith-args)
+    (convtools--convert-multi
+     :process-name "monolith-pandoc"
+     :process-id process-id
+     :converters
+     (list
+      (cons #'convtools--convert-with-monolith monolith-args)
+      (cons #'convtools--convert-with-pandoc
+            (append
+             pandoc-args
+             (list
+              :input-path output-path
+              :input-format "html"))))
+     :on-error on-error
+     :on-final-success on-success)))
+
+(cl-defun convtools--convert-to-org-with-monolith-defuddle-pandoc (&key process-id on-success on-error monolith-args defuddle-args pandoc-args)
+  "Convert a URL or HTML file to single file HTML using Monolith, simplify to Markdown with Defuddle, then to Org mode using Pandoc."
+  (unless (and process-id monolith-args)
+    (error "Required args: PROCESS-ID MONOLITH-ARGS"))
+
+  (setq monolith-args
+        (plist-put monolith-args :process-id process-id))
+  
+  (cl-destructuring-bind (&key input-path output-path)
+      (apply #'convtools--monolith-compile-paths monolith-args)
+    (convtools--convert-multi
+     :process-name "monolith-pandoc"
+     :process-id process-id
+     :converters
+     (list
+      (cons #'convtools--convert-with-monolith monolith-args)
+      (cons #'convtools--convert-with-defuddle ....)
+      (cons #'convtools--convert-with-pandoc
+            (append
+             pandoc-args
+             (list
+              :input-path output-path
+              :input-format "markdown"))))
+     :on-error on-error
+     :on-final-success on-success)))
+
 
 ;;;; Conversions view
 
