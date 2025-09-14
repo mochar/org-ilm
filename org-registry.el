@@ -71,6 +71,11 @@ Properties are:
   headline. The remainder is a plist of headline properties. If there is
   nothing at point to interpret, return nil.
 
+`:aliases'
+
+  Optional list of aliases for this type. You may also use
+  `org-registry-type-aliases'.
+
 One of the following properties can be passed to create a new entry of
 this type. Note that they are mutually exclusive:
 
@@ -102,7 +107,7 @@ this type. Note that they are mutually exclusive:
   :group 'org-registry)
 
 (defcustom org-registry-type-aliases
-  '(("file" . ("image" "video")))
+  '(("file" . ("video")))
   "Alist mapping `org-registry-types' types to aliases that can be used in their place.
 This helps share functionality of a type while being able to filter on a more granular level."
   :type '(alist :key-type string :value-type (repeat string)))
@@ -255,14 +260,34 @@ This helps share functionality of a type while being able to filter on a more gr
           t)
         )))))
 
-(defun org-registry--type-data (type-or-alias)
-  (if-let ((data (assoc type-or-alias org-registry-types)))
-      data
-    (if-let ((type (car
-                    (cl-find-if (lambda (entry)
-                                  (member type-or-alias (cdr entry)))
-                                org-registry-type-aliases))))
-        (assoc type org-registry-types))))
+(defun org-registry-type-aliases ()
+  "Return alist of type name to aliases.
+Aliases are retrieved from `org-registry-type-aliases' and the :aliases
+ key in `org-registry-types'."
+  (mapcar
+   (lambda (type)
+     (let ((name (car type))
+           (data (cdr type)))
+       (cons
+        name
+        (cl-union (cdr (assoc name org-registry-type-aliases))
+                  (plist-get data :aliases)
+                  :test #'equal))))
+   org-registry-types))
+
+(defun org-registry--type-name-and-aliases (typename-or-alias)
+  "Return a list of which name is first element and remainder are aliases."
+  (let ((type (assoc typename-or-alias org-registry-types))
+        (type-aliases (org-registry-type-aliases)))
+    (if type
+        (assoc typename-or-alias type-aliases)
+      (cl-find-if (lambda (aliases)
+                    (member typename-or-alias aliases))
+                  type-aliases))))
+
+(defun org-registry--type-data (typename-or-alias)
+  (when-let ((type-name (car (org-registry--type-name-and-aliases typename-or-alias))))
+    (assoc type-name org-registry-types)))
 
 (defun org-registry--type-data-from-entry (entry-or-id)
   (when-let* ((entry (if (org-mem-entry-p entry-or-id)
@@ -534,8 +559,28 @@ environment (multiline), paste it in headline body."
        "~/")
    link))
 
+(defun org-registry--type-file-paste (entry)
+  (let ((path (org-mem-entry-property "PATH" entry)))
+    (insert (org-link-make-string
+             (concat "file:" path)
+             (file-name-base path)))))
+
+(defun org-registry--type-file-parse ()
+  (when buffer-file-name
+    (let* ((ext (file-name-extension buffer-file-name))
+           (type (cond
+                  ((member ext image-file-name-extensions) "image")
+                  (t "file"))))
+      (list nil :PATH buffer-file-name :TYPE type))))
+           
 (org-registry-set-type
- "file" :preview #'org-registry--type-file-preview)
+ "file"
+ :aliases '("image" "video")
+ :preview #'org-registry--type-file-preview
+ :paste #'org-registry--type-file-paste
+ :parse #'org-registry--type-file-parse
+ 
+ )
 
 ;;;;; Org type
 
