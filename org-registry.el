@@ -88,18 +88,18 @@ this type. Note that they are mutually exclusive:
 
 `:create'
 
-  Return org registry entry properties from scratch. The properties will
-  be used to create an entry using `org-registry--register'. If instead
-  you'd like to do that yourself, use `:register' instead. This is
-  useful for example when you have an asynchronous process that creates
-  the properties.
+  Return org registry entry data, which will be passed to
+  `org-registry--register'. If instead you'd like to add the entry in
+  the registry yourself, use `:register' instead. This is useful for
+  example when you have an asynchronous process that creates the
+  properties.
 
 `:register'
 
-  Register an entry. This function is responsible for creating the entry
-  in the registry, similar to `org-registry--register'. If instead you'd
-  like to delegate that to org-registry and only return a list of
-  properties, use `:create' instead.
+  Add an entry to the registry. This function is responsible for
+  creating the entry in the registry, similar to
+  `org-registry--register'. If instead you'd like to delegate that to
+  org-registry and only return the data for it, use `:create' instead.
 "
   :type '(alist :tag "Registry type parameters"
                 :key-type string
@@ -195,8 +195,8 @@ This helps share functionality of a type while being able to filter on a more gr
         (org-registry--register-capture type-name template)
         t))
      ((when-let* ((create-func (plist-get (cdr type) :create))
-                  (props (funcall create-func)))
-        (org-registry--register (car type) props)
+                  (data (funcall create-func)))
+        (org-registry--register (car type) data)
         t))
      ((when-let ((register-func (plist-get (cdr type) :register)))
         (funcall register-func)))
@@ -237,7 +237,6 @@ This helps share functionality of a type while being able to filter on a more gr
                     (if org-node-alter-candidates 'org-node-hist-altered
                       'org-node-hist))
    org-node--candidate<>entry))
-
 
 (cl-defun org-registry--select-entry (&key types registries)
   "Select registry entry."
@@ -336,6 +335,7 @@ save-excursion."
        ;; Jump to correct position
        (goto-char (org-find-property "ID" org-id))
        ,@body)))
+  
 
 ;;;; Content capture
 
@@ -424,16 +424,18 @@ TEMPLATE is a list with as first value the template string, which can be
 
 (defun org-registry--register (type data &optional registry)
   "Add an entry of TYPE with DATA to the REGISTRY."
-  (let ((body (car data))
-        (properties (cdr data)))
+  (let ((body (plist-get data :ENTRY_BODY))
+        (title (plist-get data :ENTRY_TITLE))
+        (properties data))
+    (dolist (key (plist-get-keys properties))
+      (when (s-starts-with-p ":ENTRY_" (symbol-name key))
+        (setq properties (org-plist-delete properties key))))
     (org-registry--register-capture
      type
      (list
-      (if body (concat "* %?\n" body) "* %?")
+      (format "* %s%s%s" (or title "") "%?" (if body (concat "\n" body) ""))
       :hook
       (lambda ()
-        ;; (org-id-get-create)
-        ;; (org-entry-put nil "TYPE" type)
         (cl-loop for (p v) on properties by #'cddr
                  do (org-entry-put nil (substring (symbol-name p) 1) v)))))))
 
@@ -529,15 +531,15 @@ environment (multiline), paste it in headline body."
                              (org-element-context))))
     (pcase (org-element-type org-element)
       ('latex-fragment
-       (list nil :LATEX (org-element-property :value org-element)))
+       (list :LATEX (org-element-property :value org-element)))
       ('latex-environment
-       (list (org-element-property :value org-element))))))
+       (list :ENTRY_BODY (org-element-property :value org-element))))))
 
 (defvar org-registry--type-latex-template
   (list "* %? %^{LATEX}p"))
 
 (defun org-registry--type-latex-create ()
-  (list nil :LATEX ""))
+  (list :LATEX ""))
 
 (org-registry-set-type
  "latex"
@@ -565,13 +567,25 @@ environment (multiline), paste it in headline body."
              (concat "file:" path)
              (file-name-base path)))))
 
-(defun org-registry--type-file-parse ()
-  (when buffer-file-name
-    (let* ((ext (file-name-extension buffer-file-name))
+(defun org-registry--type-file-from-path (path)
+  "Return data for registry entry of type file from PATH."
+  (when (and (stringp path) (file-exists-p path))
+    (let* ((ext (file-name-extension path))
+           (name (file-name-base path))
            (type (cond
                   ((member ext image-file-name-extensions) "image")
                   (t "file"))))
-      (list nil :PATH buffer-file-name :TYPE type))))
+      (list :ENTRY_TITLE name :PATH path :TYPE type))))
+
+(defun org-registry--type-file-parse ()
+  (when-let ((data (org-registry--type-file-from-path buffer-file-name)))
+    ;; We only dwim if its a non-generic file
+    (unless (string= (plist-get data :TYPE) "file")
+      data)))
+
+(defun org-registry--type-file-create ()
+  (let ((path (read-file-name "File: ")))
+    (org-registry--type-file-from-path path)))
            
 (org-registry-set-type
  "file"
@@ -579,7 +593,7 @@ environment (multiline), paste it in headline body."
  :preview #'org-registry--type-file-preview
  :paste #'org-registry--type-file-paste
  :parse #'org-registry--type-file-parse
- 
+ :create #'org-registry--type-file-create
  )
 
 ;;;;; Org type
