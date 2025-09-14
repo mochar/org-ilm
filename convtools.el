@@ -434,21 +434,26 @@ does not have an option for this so it is done here.
   
   (cl-destructuring-bind (&key input-path output-path)
       (apply #'convtools--monolith-compile-paths monolith-args)
+    (let ((monolith-output-path output-path)
+          (defuddle-output-path (concat (file-name-sans-extension output-path) ".md")))
     (convtools--convert-multi
-     :process-name "monolith-pandoc"
+     :process-name "monolith-defuddle-pandoc"
      :process-id process-id
      :converters
      (list
       (cons #'convtools--convert-with-monolith monolith-args)
-      (cons #'convtools--convert-with-defuddle ....)
+      (cons #'convtools--convert-with-defuddle
+            (list
+             :input-path monolith-output-path
+             :output-format "markdown"))
       (cons #'convtools--convert-with-pandoc
             (append
              pandoc-args
              (list
-              :input-path output-path
+              :input-path defuddle-output-path
               :input-format "markdown"))))
      :on-error on-error
-     :on-final-success on-success)))
+     :on-final-success on-success))))
 
 
 ;;;; Conversions view
