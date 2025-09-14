@@ -30,7 +30,7 @@
   "Org registry"
   :group 'org
   :prefix "org-registry-"
-  :link '(url-link :tag "GitHub" "https://github.com/mochar/org-registry"))
+  :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
 
 (defcustom org-registry-registries '("~/org/registry.org")
   "List of Org file paths to be used as registries."
