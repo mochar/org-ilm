@@ -104,7 +104,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   "Face used to highlight clozes.")
 
 (defvar-keymap org-ilm-map
-  :doc "Keymap for `org-ilm-global-mode'."
+  :doc "Keymap for `org-ilm-global-minor-mode'."
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract-dwim
   "z" #'org-ilm-cloze
@@ -128,14 +128,14 @@ When set to `attachment', org-transclusion will be used to transclude the conten
   (org-ilm-priority-subject-cache-reset))
 
 ;;;###autoload
-(define-minor-mode org-ilm-global-mode
+(define-minor-mode org-ilm-global-minor-mode
   "Prepare some hooks and advices some functions."
   :init-value nil
   :global t
   :lighter nil ;; String to display in mode line
   :group 'org-ilm
   ;; :keymap org-ilm-map
-  (if org-ilm-global-mode
+  (if org-ilm-global-minor-mode
       ;; Enable
       (progn
         (add-hook 'org-mode-hook #'org-ilm-prepare-buffer)
