@@ -66,8 +66,10 @@ Properties are:
 
 `:parse'
 
-  Return org registry entry properties based on thing at point. If there
-  is nothing at point to interpret, return nil.
+  Return org registry entry data based on thing at point. Should be a
+  list where the first element contains the body content of the entry
+  headline. The remainder is a plist of headline properties. If there is
+  nothing at point to interpret, return nil.
 
 One of the following properties can be passed to create a new entry of
 this type. Note that they are mutually exclusive:
@@ -310,17 +312,81 @@ save-excursion."
        (goto-char (org-find-property "ID" org-id))
        ,@body)))
 
+;;;; Content capture
+
+;; TODO Finish. Idea is to ahve a capture buffer with more space where eg latex
+;; can be typed out before send to `org-registry--register' but i'm facing
+;; scoping issues and i dont like having two capture buffers in a row.
+
+(defcustom org-registry-content-capture-path
+  (expand-file-name
+   "org-registry-input.org"
+   temporary-file-directory)
+  "Path of file where content is captured to, to be used with type registers."
+  :type 'string
+  :group 'org-registry)
+
+(defun org-registry--org-capture (on-capture)
+  (cl-letf* (((symbol-value 'org-capture-templates)
+               (list
+                (list
+                 "i" "Input"
+                 'plain
+                 (list 'file org-registry-content-capture-path)
+                 ""
+                 :hook
+                 (lambda ()
+                   (save-restriction
+                     (erase-buffer)
+                     (unless (eq major-mode 'org-mode)
+                       (org-mode))
+                     (save-buffer))
+
+                   (setq-local header-line-format
+                               (substitute-command-keys
+                                "Registry concent capture. Finish `\\[org-capture-finalize]' Abort `\\[org-capture-kill]'"))
+                   )
+                 
+                 :prepare-finalize
+                 (lambda ()
+                   (goto-char (point-min))
+                   ;; Remove empty lines and comment lines
+                   (flush-lines "^\\([ \t]*\\|#.*\\)$")
+                   (goto-char (point-min))
+                   (funcall on-capture)
+                   ;; ,@body
+                   )
+                 ;; :after-finalize
+                 ;; (lambda ()
+                 ;;   (with-current-buffer (find-file-noselect org-registry-content-capture-path)
+                 ;;     ,@body))
+                 :kill-buffer t
+                 ))))
+     (org-capture nil "i")))
+
+
 ;;;; Register
 
 (defun org-registry--register-capture (type template &optional registry)
+  "Use org-capture to register entry with TYPE to the REGISTRY.
+
+TEMPLATE is a list with as first value the template string, which can be
+ nil to use a default template string. The remainder is a standard
+ org-capture template plist."
   (cl-letf* ((registry (or registry (org-registry--registry-select)))
              (default-template-props
               (list 
                :hook
                (lambda ()
                  (org-id-get-create)
-                 (org-entry-put nil "TYPE" type))))
-             (template-props (org-combine-plists default-template-props (cdr template)))
+                 (org-entry-put nil "TYPE" type)
+                 (save-excursion
+                   (forward-line)
+                   (org-fold-hide-drawer-toggle nil))
+                 (when-let ((hook2 (plist-get (cdr template) :hook)))
+                   (funcall hook2))
+                 )))
+             (template-props (org-combine-plists (cdr template) default-template-props))
              ((symbol-value 'org-capture-templates)
               (list
                (append 
@@ -331,18 +397,20 @@ save-excursion."
                 template-props))))
     (org-capture nil "r")))  
 
-(defun org-registry--register (type properties &optional registry)
-  "Add an entry of TYPE with PROPERTIES to the REGISTRY."
-  (org-registry--register-capture
-   type
-   (list
-    "* %?"
-    :hook
-    (lambda ()
-      (org-id-get-create)
-      (org-entry-put nil "TYPE" type)
-      (cl-loop for (p v) on properties by #'cddr
-               do (org-entry-put nil (substring (symbol-name p) 1) v))))))
+(defun org-registry--register (type data &optional registry)
+  "Add an entry of TYPE with DATA to the REGISTRY."
+  (let ((body (car data))
+        (properties (cdr data)))
+    (org-registry--register-capture
+     type
+     (list
+      (if body (concat "* %?\n" body) "* %?")
+      :hook
+      (lambda ()
+        ;; (org-id-get-create)
+        ;; (org-entry-put nil "TYPE" type)
+        (cl-loop for (p v) on properties by #'cddr
+                 do (org-entry-put nil (substring (symbol-name p) 1) v)))))))
 
 (defun org-registry--org-get-contents ()
   (save-excursion
@@ -389,6 +457,16 @@ PARAMETERS should be keyword value pairs. See `org-registry-types'."
 
 ;;;;; Latex type
 
+(defun org-registry--type-latex-from-entry (entry)
+  "Return the latex content from ENTRY.
+Can be either in the LATEX property or the body text."
+  (or
+   (org-mem-entry-property "LATEX" entry)
+   (save-excursion
+     (org-registry--org-with-point-at
+      (org-mem-entry-id entry)
+      (org-registry--org-get-contents)))))
+
 (defun org-registry--type-latex-preview (entry ov link)
   "Place a latex overlay on the link.
 
@@ -400,12 +478,7 @@ The way this is implemented is by using `org-latex-preview-place' which
  the 'modification-hooks overlay property does not detect overlay
  deletions. So my best solution at the moment is to advice
  `delete-overlay', which is done in the global minor mode."
-  (when-let ((latex (or
-                     (org-mem-entry-property "LATEX" entry)
-                     (save-excursion
-                       (org-registry--org-with-point-at
-                        (org-mem-entry-id entry)
-                        (org-registry--org-get-contents))))))
+  (when-let ((latex (org-registry--type-latex-from-entry entry)))
     (overlay-put ov 'org-registry-latex t)
     (org-latex-preview-place
      org-latex-preview-process-default
@@ -421,20 +494,25 @@ The way this is implemented is by using `org-latex-preview-place' which
       (delete-overlay o))))
 
 (defun org-registry--type-latex-paste (entry)
-  (insert (org-mem-entry-property "LATEX" entry)))
+  (insert (org-registry--type-latex-from-entry entry)))
 
 (defun org-registry--type-latex-parse ()
+  "Parses latex value from text at point.
+If inline fragment, use it as entry property value. If
+environment (multiline), paste it in headline body."
   (when-let* ((org-element (when (eq major-mode 'org-mode)
-                             (org-element-context)))
-              (_ (eq 'latex-fragment (org-element-type org-element))))
-    (list :LATEX (org-element-property :value org-element))))
-
-(defun org-registry--type-latex-create ()
-  (list :LATEX ""))
+                             (org-element-context))))
+    (pcase (org-element-type org-element)
+      ('latex-fragment
+       (list nil :LATEX (org-element-property :value org-element)))
+      ('latex-environment
+       (list (org-element-property :value org-element))))))
 
 (defvar org-registry--type-latex-template
-  (list
-   "* %? %^{LATEX}p"))
+  (list "* %? %^{LATEX}p"))
+
+(defun org-registry--type-latex-create ()
+  (list nil :LATEX ""))
 
 (org-registry-set-type
  "latex"
@@ -442,8 +520,9 @@ The way this is implemented is by using `org-latex-preview-place' which
  :teardown #'org-registry--type-latex-teardown
  :paste #'org-registry--type-latex-paste
  :parse #'org-registry--type-latex-parse
- :template org-registry--type-latex-template
- :create #'org-registry--type-latex-create)
+ ;; :template #'org-registry--type-latex-template
+ :create #'org-registry--type-latex-create
+ )
 
 
 ;;;;; File type
