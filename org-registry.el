@@ -292,6 +292,23 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
     (1 (car org-registry-registries))
     (t (completing-read "Registry: " org-registry-registries nil t))))
 
+(defmacro org-registry--org-with-point-at (thing &rest body)
+  "THING for now should be an org-id.
+
+Note: Previously used org-id-find but it put point above
+headline. org-mem takes me there directly.
+
+Alternatively org-id-goto could be used, but does not seem to respect
+save-excursion."
+  `(when-let* ((org-id ,thing)
+               (entry (org-mem-entry-by-id org-id))
+               (file (org-mem-entry-file-truename entry))
+               (buf (or (find-buffer-visiting file)
+                        (find-file-noselect file))))
+     (with-current-buffer buf
+       ;; Jump to correct position
+       (goto-char (org-find-property "ID" org-id))
+       ,@body)))
 
 ;;;; Register
 
@@ -326,6 +343,15 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
       (org-entry-put nil "TYPE" type)
       (cl-loop for (p v) on properties by #'cddr
                do (org-entry-put nil (substring (symbol-name p) 1) v))))))
+
+(defun org-registry--org-get-contents ()
+  (save-excursion
+    (org-back-to-heading)
+    (org-end-of-meta-data 'full)
+    (let ((start (point)))
+      (org-next-visible-heading 1)
+      (string-trim
+       (buffer-substring-no-properties start (point))))))
 
 ;;;; Types
 
@@ -374,17 +400,17 @@ The way this is implemented is by using `org-latex-preview-place' which
  the 'modification-hooks overlay property does not detect overlay
  deletions. So my best solution at the moment is to advice
  `delete-overlay', which is done in the global minor mode."
-  (when-let ((latex (org-mem-entry-property "LATEX" entry)))
+  (when-let ((latex (or
+                     (org-mem-entry-property "LATEX" entry)
+                     (save-excursion
+                       (org-registry--org-with-point-at
+                        (org-mem-entry-id entry)
+                        (org-registry--org-get-contents))))))
     (overlay-put ov 'org-registry-latex t)
     (org-latex-preview-place
      org-latex-preview-process-default
      (list
-      (list
-       (overlay-start ov)
-       (overlay-end ov)
-       ;; latex
-       (concat (org-mem-entry-property "LATEX" entry))
-       )))
+      (list (overlay-start ov) (overlay-end ov) latex )))
     t))
 
 (defun org-registry--type-latex-teardown (ov)
