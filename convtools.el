@@ -39,14 +39,15 @@
 
 ;;;; Convert process
 
-(cl-defun convtools--convert-make-process (&key name id command on-success on-error keep-buffer-alive dont-update-state &allow-other-keys)
+(cl-defun convtools--convert-make-process (&key name id command on-success on-error keep-buffer-alive prevent-success-state buffer-data &allow-other-keys)
   "Create an async process to run COMMAND."
   (let* ((process-name (format "convtools-%s (%s)" name id))
          (process-buffer (get-buffer-create (concat "*" process-name "*"))))
     (with-current-buffer process-buffer
       (setq-local convtools--convert-name name
                   convtools--convert-id id
-                  convtools--convert-state nil)
+                  convtools--convert-state nil
+                  convtools--convert-data buffer-data)
       (goto-char (point-max))
       (insert (format "\n====== START: %s ======\n" process-name)))
     (make-process
@@ -62,7 +63,7 @@
          
          (let ((success (= (process-exit-status proc) 0)))
 
-           (unless dont-update-state
+           (unless (and success prevent-success-state)
              (with-current-buffer process-buffer
                (setq-local convtools--convert-state
                            (if success 'success 'error))))
@@ -101,7 +102,7 @@ final converter succeeds."
          (converter (car first))
          (converter-args (cdr first))
          ;; Have to store the inner callback here, otherwise infinite recursion
-         (convert-on-error (plist-get converter-args :on-error))
+         (converter-on-error (plist-get converter-args :on-error))
          (converter-on-success (plist-get converter-args :on-success))
          (on-error
           (lambda (proc buf id)
@@ -131,9 +132,9 @@ final converter succeeds."
             :process-name process-name
             :process-id process-id
             ;; convtools--convert-make-process adds a buffer local variable that
-            ;; signifies success or failure of a process. dont set this unless we are
-            ;; on the last converter.
-            :dont-update-state (if rest t nil)
+            ;; signifies success or failure of a process. dont set success
+            ;; unless we are on the last converter.
+            :prevent-success-state (if rest t nil)
             )))
     (apply converter converter-args)))
 
@@ -143,7 +144,11 @@ final converter succeeds."
   (unless (and process-id input-path input-format)
     (error "Required args: PROCESS-ID INPUT-PATH INPUT-FORMAT"))
   (let* ((input-path (expand-file-name input-path))
-         (output-dir (expand-file-name (or output-dir (file-name-directory input-path))))
+         (output-dir (expand-file-name
+                      (or output-dir (file-name-directory input-path))))
+         (output-path (expand-file-name
+                       (concat (file-name-base input-path) ".org")
+                       output-dir))
          ;; Make sure we are in output dir so that media files references correct
          (default-directory output-dir))
     (apply
@@ -153,6 +158,7 @@ final converter succeeds."
       (list
        :name (or process-name "pandoc")
        :id process-id
+       :buffer-data '(:output-path 'output-path)
        :command
        (append
         (list
@@ -166,7 +172,7 @@ final converter succeeds."
          "--extract-media" "."
          "--verbose"
          input-path
-         "-o" (concat (file-name-sans-extension input-path) ".org"))))))))
+         "-o" output-path)))))))
 
 ;;;; Defuddle
 ;; Defuddle: https://github.com/kepano/defuddle

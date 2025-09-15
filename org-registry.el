@@ -24,6 +24,9 @@
 (require 'cl-lib)
 (require 'dash)
 
+(require 'utils)
+(require 'convtools)
+
 ;;;; Customization
 
 (defgroup org-registry nil
@@ -78,13 +81,6 @@ Properties are:
 
 One of the following properties can be passed to create a new entry of
 this type. Note that they are mutually exclusive:
-
-`:template'
-
-  A list containing org-capture template info used to place the entry in
-  the registry.  It is a list with first element the template
-  string. The remainder is a property list as used in
-  `org-capture-templates'.
 
 `:create'
 
@@ -185,21 +181,19 @@ This helps share functionality of a type while being able to filter on a more gr
     (funcall paste-func entry)))
 
 ;;;###autoload
-(defun org-registry-register ()
+(defun org-registry-register (type-name &optional args)
   "Add something to the registry."
-  (interactive)
-  (let* ((type-name (completing-read "Type: " org-registry-types nil t))
-         (type (assoc type-name org-registry-types)))
+  (interactive
+   (list
+    (completing-read "Type: " org-registry-types nil t)))
+  (let ((type (assoc type-name org-registry-types)))
     (cond
-     ((when-let ((template (plist-get (cdr type) :template)))
-        (org-registry--register-capture type-name template)
-        t))
      ((when-let* ((create-func (plist-get (cdr type) :create))
-                  (data (funcall create-func)))
+                  (data (funcall create-func args)))
         (org-registry--register (car type) data)
         t))
      ((when-let ((register-func (plist-get (cdr type) :register)))
-        (funcall register-func)))
+        (funcall register-func args)))
      ;; When nothing assigned, create empty capture
      (t (org-registry--register (car type) nil)))))
 
@@ -207,21 +201,22 @@ This helps share functionality of a type while being able to filter on a more gr
 (defun org-registry-register-dwim ()
   "Add element at point to the registry."
   (interactive)
-  (let ((types
-         (cl-remove-if
-          #'null (mapcar
-                  (lambda (type)
-                    (when-let* ((f (plist-get (cdr type) :parse))
-                                (props (funcall f)))
-                      (cons (car type) props)))
-                  org-registry-types))))
-    (pcase (length types)
-      (0 (org-registry-register))
-      (1 (org-registry--register (car (car types)) (cdr (car types))))
-      (_
-       (let ((type (completing-read "Type: " (mapcar #'car types) nil t)))
-         (org-registry--register type (cdr (assoc type types))))))))
-
+  (if-let ((types
+            (cl-remove-if
+             #'null
+             (mapcar
+              (lambda (type)
+                (when-let* ((f (plist-get (cdr type) :parse))
+                            (data (funcall f)))
+                  (cons (car type) data)))
+              org-registry-types)))
+           (type (if (> (length types) 1)
+                     (let ((type (completing-read "Type: " (mapcar #'car types) nil t)))
+                       (assoc type types))
+                   (car types))))
+      (funcall #'org-registry-register
+               (car type) (cdr type))
+    (call-interactively #'org-registry-register)))
 
 ;;;; Functions
 
@@ -319,28 +314,10 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
     (1 (car org-registry-registries))
     (t (completing-read "Registry: " org-registry-registries nil t))))
 
-(defmacro org-registry--org-with-point-at (thing &rest body)
-  "THING for now should be an org-id.
-
-Note: Previously used org-id-find but it put point above
-headline. org-mem takes me there directly.
-
-Alternatively org-id-goto could be used, but does not seem to respect
-save-excursion."
-  `(when-let* ((org-id ,thing)
-               (entry (org-mem-entry-by-id org-id))
-               (file (org-mem-entry-file-truename entry))
-               (buf (or (find-buffer-visiting file)
-                        (find-file-noselect file))))
-     (with-current-buffer buf
-       ;; Jump to correct position
-       (goto-char (org-find-property "ID" org-id))
-       ,@body)))
-
 (defun org-registry--entry-contents (entry)
   (cl-assert (org-mem-entry-p entry))
   (save-excursion
-    (org-registry--org-with-point-at
+    (utils--org-with-point-at
      (org-mem-entry-id entry)
      (org-registry--org-get-contents))))
 
@@ -407,52 +384,49 @@ save-excursion."
 
 ;;;; Register
 
-(defun org-registry--register-capture (type template &optional registry)
-  "Use org-capture to register entry with TYPE to the REGISTRY.
+(cl-defun org-registry--register (type data &key registry template)
+  "Add an entry of TYPE with DATA to the REGISTRY.
 
-TEMPLATE is a list with as first value the template string, which can be
- nil to use a default template string. The remainder is a standard
- org-capture template plist."
-  (cl-letf* ((registry (or registry (org-registry--registry-select)))
-             (default-template-props
-              (list 
-               :hook
-               (lambda ()
-                 (org-id-get-create)
-                 (org-entry-put nil "TYPE" type)
-                 (save-excursion
-                   (forward-line)
-                   (org-fold-hide-drawer-toggle nil))
-                 (when-let ((hook2 (plist-get (cdr template) :hook)))
-                   (funcall hook2))
-                 )))
-             (template-props (org-combine-plists (cdr template) default-template-props))
-             ((symbol-value 'org-capture-templates)
-              (list
-               (append 
-                (list "r" "Register"
-                      'entry
-                      `(file ,registry)
-                      (or (car template) "* %?"))
-                template-props))))
-    (org-capture nil "r")))  
+DATA is a cons with optional car and cdr is plist of properties. The car
+can be a string which will be interpreted as the entry title, or a cons
+of (title . body) to be used as entry title and body.
 
-(defun org-registry--register (type data &optional registry)
-  "Add an entry of TYPE with DATA to the REGISTRY."
-  (let ((body (plist-get data :ENTRY_BODY))
-        (title (plist-get data :ENTRY_TITLE))
-        (properties data))
-    (dolist (key (org-registry--plist-keys properties))
-      (when (s-starts-with-p ":ENTRY_" (symbol-name key))
-        (setq properties (org-plist-delete properties key))))
-    (org-registry--register-capture
-     type
-     (list
-      (format "* %s%s%s" (or title "") "%?" (if body (concat "\n" body) ""))
-      :hook
-      (lambda ()
-        (cl-loop for (p v) on properties by #'cddr
-                 do (org-entry-put nil (substring (symbol-name p) 1) v)))))))
+TEMPLATE is a cons with car optional template string and cdr plist of
+org-capture template properties."
+  (let* ((registry (or registry (org-registry--registry-select)))
+         (title-body (if (stringp (car data)) (list (car data)) (car data)))
+         (props (cdr data))
+         (template-string (or
+                           (car template)
+                           (format "* %s%s%s"
+                                   (or (car title-body) "")
+                                   "%?"
+                                   (if (cdr title-body)
+                                       (concat "\n" (cdr title-body))
+                                     "")))))
+    (cl-letf* ((default-template-props
+                (list 
+                 :hook
+                 (lambda ()
+                   (org-node-nodeify-entry)
+                   (org-entry-put nil "TYPE" type)
+                   (cl-loop for (p v) on props by #'cddr
+                            do (org-entry-put nil (substring (symbol-name p) 1) v))
+                   ;; Toggle open the properties drawer
+                   (save-excursion
+                     (forward-line)
+                     (org-fold-hide-drawer-toggle nil))
+                   ;; Call template hook if given
+                   (when-let ((hook2 (plist-get (cdr template) :hook)))
+                     (funcall hook2)))))
+               (template-props (org-combine-plists
+                                (cdr template) default-template-props))
+               ((symbol-value 'org-capture-templates)
+                (list
+                 (append 
+                  (list "r" "Register" 'entry `(file ,registry) template-string)
+                  template-props))))
+      (org-capture nil "r"))))
 
 (defun org-registry--org-get-contents ()
   (save-excursion
@@ -465,7 +439,7 @@ TEMPLATE is a list with as first value the template string, which can be
       (let ((start (point)))
         (org-next-visible-heading 1)
         (string-trim
-         (buffer-substring-no-properties start (point)))))))
+         (buffer-substring-no-props start (point)))))))
 
 ;;;; Types
 
@@ -547,15 +521,20 @@ environment (multiline), paste it in headline body."
                              (org-element-context))))
     (pcase (org-element-type org-element)
       ('latex-fragment
-       (list :LATEX (org-element-property :value org-element)))
+       (list :latex (org-element-property :value org-element) :fragment t))
       ('latex-environment
-       (list :ENTRY_BODY (org-element-property :value org-element))))))
+       (list :latex (org-element-property :value org-element))))))
 
-(defvar org-registry--type-latex-template
-  (list "* %? %^{LATEX}p"))
-
-(defun org-registry--type-latex-create ()
-  (list :LATEX ""))
+(defun org-registry--type-latex-create (&optional args)
+  (let ((latex (plist-get args :latex))
+        (fragment-p (plist-get args :fragment)))
+    (cond
+     ((null latex)
+      (list nil :LATEX ""))
+     (fragment-p
+      (list nil :LATEX latex))
+     (t
+      (list (cons nil latex))))))
 
 (org-registry-set-type
  "latex"
@@ -563,7 +542,6 @@ environment (multiline), paste it in headline body."
  :teardown #'org-registry--type-latex-teardown
  :paste #'org-registry--type-latex-paste
  :parse #'org-registry--type-latex-parse
- ;; :template #'org-registry--type-latex-template
  :create #'org-registry--type-latex-create
  )
 
@@ -599,7 +577,7 @@ environment (multiline), paste it in headline body."
     (unless (string= (plist-get data :TYPE) "file")
       data)))
 
-(defun org-registry--type-file-create ()
+(defun org-registry--type-file-create (&optional args)
   (let ((path (read-file-name "File: ")))
     (org-registry--type-file-from-path path)))
            
@@ -650,8 +628,12 @@ environment (multiline), paste it in headline body."
 
 (defun org-registry--type-org-parse ()
   (when (and (eq major-mode 'org-mode) (region-active-p))
-    (list :ENTRY_BODY (buffer-substring-no-properties
-                       (region-beginning) (region-end)))))
+    (list :body (buffer-substring-no-properties
+                 (region-beginning) (region-end)))))
+
+(defun org-registry--type-org-create (&optional args)
+  (when-let ((body (plist-get args :body)))
+    (list (cons nil body))))
 
 (org-registry-set-type
  "org"
@@ -659,7 +641,85 @@ environment (multiline), paste it in headline body."
  :teardown #'org-registry--type-org-teardown
  :paste #'org-registry--type-org-paste
  :parse #'org-registry--type-org-parse
+ :create #'org-registry--type-org-create
  )
+
+;;;; Website type
+
+(defvar org-registry--type-website-url nil)
+
+(transient-define-prefix org-registry--type-website-transient ()
+  "Website entry"
+
+  :value
+  (lambda ()
+    ;; Default values
+    (list (concat "--url=" org-registry--type-website-url)))
+  :refresh-suffixes t
+  
+  ["Options"
+   ("u" "URL" "--url="  :always-read t :allow-empty nil :prompt "URL: ")
+   ("t" "Fetch title" "--fetch-title")
+   ("d" "Download HTML" "--download-html")
+   ]
+  ["Actions"
+   ("RET" "Register"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (url (transient-arg-value "--url=" args))
+             (fetch-title-p (transient-arg-value "--fetch-title" args))
+             (download-html-p (transient-arg-value "--download-html" args))
+             (org-id (org-id-new))
+             (output-dir (org-attach-dir-from-id org-id))
+             (title org-id))
+
+        (when fetch-title-p
+          (setq title (utils--get-page-title url)))
+
+        (if download-html-p
+            (let ((attach-path (expand-file-name
+                                (concat title ".html")
+                                (org-attach-dir-from-id org-id))))
+              (make-directory (file-name-directory attach-path))
+              (convtools--convert-with-monolith
+               :process-id org-id
+               :input-path url
+               :output-path attach-path
+               :on-success
+               (lambda (proc buf id)
+                 (message "[Registry] Website download completed: %s" url)
+                 (org-registry--register
+                  "website"
+                  (list title :URL url :ID org-id)
+                  :template
+                  (list nil :hook #'org-attach-sync)))))
+          (org-registry--register
+           "website"
+           (list title :URL url :ID org-id)))
+        
+        (setq org-registry--type-website-url nil)))
+    :inapt-if-not
+    (lambda ()
+      (transient-arg-value "--url=" (transient-get-value)))
+    )]
+  )
+
+(defun org-registry--type-website-parse ()
+  ;; https://www.gnu.org/software/emacs/manual/html_node/elisp/Plist-Access.html
+  (when-let* ((url (thing-at-point 'url)))
+    (list :url url)))
+
+(defun org-registry--type-website-register (&optional args)
+  (let ((org-registry--type-website-url (plist-get args :url)))
+    (org-registry--type-website-transient)))
+
+(org-registry-set-type
+ "website"
+ :parse #'org-registry--type-website-parse
+ :register #'org-registry--type-website-register
+ )
+
 
 ;;;; Footer
 

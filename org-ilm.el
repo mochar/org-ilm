@@ -28,6 +28,7 @@
 (require 'ts)
 (require 'vtable)
 
+(require 'utils)
 (require 'convtools)
 (require 'org-registry)
 
