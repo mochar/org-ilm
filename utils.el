@@ -17,6 +17,22 @@
 (require 'url)
 (require 'org-id)
 
+;;;; Elisp
+
+(cl-defun utils--alist-to-plist (alist &key upcase remove)
+  "Convert association list ALIST into the equivalent property-list form.
+
+Direct copy from mm-decode.el"
+  (let (plist)
+    (while alist
+      (let ((el (car alist)))
+        (unless (member (car el) remove)
+	  (setq plist (cons (cdr el)
+                            (cons (if upcase (upcase (car el)) (car el))
+                                  plist)))))
+      (setq alist (cdr alist)))
+    (nreverse plist)))
+
 ;;;; String
 (defun utils--slugify-title (title)
   "From TITLE, make a filename slug meant to look nice as URL component.

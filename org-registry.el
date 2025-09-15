@@ -23,6 +23,8 @@
 (require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
+(require 'zotra)
+(require 'parsebib)
 
 (require 'utils)
 (require 'convtools)
@@ -410,8 +412,9 @@ org-capture template properties."
                  (lambda ()
                    (org-node-nodeify-entry)
                    (org-entry-put nil "TYPE" type)
-                   (cl-loop for (p v) on props by #'cddr
-                            do (org-entry-put nil (substring (symbol-name p) 1) v))
+                   (cl-loop
+                    for (p v) on props by #'cddr
+                    do (org-entry-put nil (if (stringp p) p (substring (symbol-name p) 1)) v))
                    ;; Toggle open the properties drawer
                    (save-excursion
                      (forward-line)
@@ -718,6 +721,124 @@ environment (multiline), paste it in headline body."
  "website"
  :parse #'org-registry--type-website-parse
  :register #'org-registry--type-website-register
+ )
+
+;;;; Citation type
+
+;; zotra-get-entry
+;; zotra-get-json
+;; zotra-get-enntry-from-json
+;; zotra-query-url-or-search-string
+
+(defcustom org-registry--type-citation-fields nil
+  "List of field names to include in the entry.
+See `parsebib-read-entry'."
+  :type '(repeat string)
+  :group 'org-registry)
+
+(defvar org-registry--type-citation-url nil)
+(defvar org-registry--type-citation-bibtex nil)
+
+(transient-define-prefix org-registry--type-citation-transient ()
+  "Citation entry"
+
+  :value
+  (lambda ()
+    ;; Default values
+    (list (concat "--url=" org-registry--type-citation-url)))
+  :refresh-suffixes t
+  
+  ["Options"
+   ("u" "URL or ID" "--url="  :always-read t :allow-empty nil :prompt "URL or ID: ")
+   ("d" "Download PDF" "--download-pdf")
+   ]
+  ["Actions"
+   ("RET" "Register"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (url (transient-arg-value "--url=" args))
+             (download-pdf-p (transient-arg-value "--download-pdf" args))
+             (org-id (org-id-new))
+             (output-dir (org-attach-dir-from-id org-id))
+             (bibtex org-registry--type-citation-bibtex)
+             title pdf-tmp-path)
+
+        (unless bibtex
+          (if-let ((bibtex-string (zotra-get-entry url "bibtex")))
+              (with-temp-buffer
+                (insert (s-trim bibtex-string))
+                (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
+                                            :fields org-registry--type-citation-fields
+                                            :expand-strings t
+                                            :inheritance t
+                                            :replace-TeX t)))
+                            (key (car (hash-table-keys bibtexes))))
+                  (setq bibtex (gethash key bibtexes))
+                  (unless bibtex
+                    (message "%s" bibtex-string)
+                    (user-error "Bibtex could not be parsed. See Messages buffer for returned value."))))
+            (user-error "No bibtex found")
+            (transient-quit-one)))
+
+        (setq title
+              (or
+               (alist-get "title" bibtex nil nil #'equal)
+               (alist-get "=key=" bibtex nil nil #'equal)
+               (alist-get "url" bibtex nil nil #'equal)
+               url))
+        (setq pdf-tmp-path (expand-file-name (concat title ".pdf") output-dir))
+
+        (when download-pdf-p
+          (zotra-download-attachment url nil pdf-tmp-path))
+        
+        (org-registry--register
+         "citation"
+         (append
+          (list title :KEY (alist-get "=key=" bibtex nil nil #'equal))
+          (utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
+          (list :URL url :ID org-id))
+         :template
+         (list nil :hook #'org-attach-sync))
+        
+        (setq org-registry--type-citation-url nil
+              org-registry--type-citation-bibtex nil)))
+    :inapt-if-not
+    (lambda ()
+      (transient-arg-value "--url=" (transient-get-value)))
+    )])
+
+(defun org-registry--type-citation-parse ()
+  (cond
+   ((when-let* ((bibtex (ignore-errors
+                          (parsebib-read-entry
+                           org-registry--type-citation-fields
+                           (make-hash-table :test #'equal)
+                           t)))
+                (url (or
+                      (alist-get "url" bibtex nil nil #'equal)
+                      (alist-get "doi" bibtex nil nil #'equal))))
+      (list :url url :bibtex bibtex)))
+   ((when-let ((url (thing-at-point 'url)))
+      (list :url url)))))
+
+(defun org-registry--type-citation-register (&optional args)
+  ;; With -url we could simply set it in a let without actaully changing the
+  ;; variable, as in the transient it is used in the setup to set the default
+  ;; value of the suffix. However -bibtex is an alist and not part of the
+  ;; transient so can't use that approach there. And would rather have a unified
+  ;; approach. That is, setting the global vars, and the transient sets them
+  ;; back to nil.
+  (setq org-registry--type-citation-url (plist-get args :url)
+        org-registry--type-citation-bibtex (plist-get args :bibtex))
+  (org-registry--type-citation-transient))
+
+;; https://arxiv.org/abs/2509.08834
+
+(org-registry-set-type
+ "citation"
+ :parse #'org-registry--type-citation-parse
+ :register #'org-registry--type-citation-register
  )
 
 
