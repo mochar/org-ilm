@@ -109,6 +109,7 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-minor-mode'."
+  "i" #'org-ilm-import
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract-dwim
   "z" #'org-ilm-cloze
@@ -125,6 +126,9 @@ When set to `attachment', org-transclusion will be used to transclude the conten
 
 (defvar org-ilm--targets-editable nil
   "Whether or not to allow editing/removing of target text.")
+
+(defvar org-ilm--active-collection nil
+  "The current collection that is active.")
 
 ;;;; Minor mode
 
@@ -2370,7 +2374,75 @@ A lot of formatting code from org-ql."
 
 ;;;; Import
 
-(defun org-ilm--select-import-method (&optional force-ask)
+(transient-define-infix org-ilm--import-transient-collection ()
+  :class 'transient-lisp-variable
+  :variable 'org-ilm--active-collection
+  :transient t
+  :allow-empty nil
+  :reader
+  (lambda (prompt initial-input history)
+    (car (org-ilm--select-collection))))
+
+(transient-define-prefix org-ilm--import-transient ()
+  ["Ilm import"
+   ("c" "Collection" org-ilm--import-transient-collection)
+   ]
+  ["Type"
+   ("o" "Org file" org-ilm--import-org-transient)
+   ]
+  )
+
+(defun org-ilm-import ()
+  "Import an item into your Ilm collection."
+  (interactive)
+  (org-ilm--import-transient))
+
+;;;;; Org file
+
+(defun org-ilm--import-org-transient-args ()
+  (when transient-current-command
+    (let* ((args (transient-args transient-current-command))
+           (file (transient-arg-value "file=" args))
+           (method (transient-arg-value "method=" args))
+           (collection org-ilm--active-collection))
+      (list :file file :method method :collection collection))))
+
+(transient-define-infix org-ilm--import-org-transient-file ()
+  :class 'transient-option
+  :transient t
+  :argument "file="
+  :allow-empty nil
+  :prompt "Org file: "
+  :reader
+  (lambda (prompt initial-input history)
+    (read-file-name prompt nil initial-input t)))
+
+(transient-define-prefix org-ilm--import-org-transient ()
+  :value '("method=cp")
+  :refresh-suffixes t
+  ["Org file import"
+   ("f" "Org file" org-ilm--import-org-transient-file)
+   ("m" "Method of attachment" "method="
+    :allow-empty nil
+    :choices (mv cp) :prompt "Method of attachment: ")
+   ("RET" "Import"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (file (transient-arg-value "file=" args))
+             (method (intern (transient-arg-value "method=" args)))
+             (collection (assoc org-ilm--active-collection org-ilm-collections-alist)))
+        (org-ilm-import-org-file file collection method)))
+    :inapt-if-not
+    (lambda ()
+      (let ((args (org-ilm--import-org-transient-args)))
+        (not
+         (and (plist-get args :file)
+              (plist-get args :method)
+              (plist-get args :collection))))))
+    ])
+
+(defun org-ilm--import-select-method (&optional force-ask)
   "Ask user to choose whether to copy or move file when importing.
 
 If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
@@ -2387,7 +2459,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
    (list
     (read-file-name "Import Org file: ")
     (org-ilm--select-collection)
-    (org-ilm--select-import-method)))
+    (org-ilm--import-select-method)))
 
   (let* ((org-id (org-id-new))
          (file-tmp-path (expand-file-name
@@ -2405,6 +2477,13 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
      'source
      `(file ,(cdr collection))
      (list :id org-id :file file-tmp-path))))
+
+;;;;; Website
+(defun org-ilm-import-website ()
+  "Import a website."
+  
+  )
+
 
 ;;;; Stats
 ;; Functions to work with e.g. the beta distribution.
