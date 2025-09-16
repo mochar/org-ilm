@@ -582,7 +582,18 @@ The callback ON-SUCCESS is called when capture is saved.
 The callback ON-ABORT is called when capture is cancelled."
   (cl-assert (member type '(extract card source)))
   (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
-         (target (if (stringp target-or-id) `(id ,target-or-id) target-or-id))
+         (target (if (stringp target-or-id)
+                     ;; Originally used the built-in 'id target, however for
+                     ;; some reason it sometimes finds the wrong location which
+                     ;; messes everything up. I noticed this behavior also with
+                     ;; org-id-find and such. I should probably find the root
+                     ;; cause, but org-node finds location accurately so i rely
+                     ;; on it instead to find the location of a heading by id.
+                     ;; `(id ,target-or-id)
+                     (list 'function
+                           (lambda ()
+                             (org-node-goto-id target-or-id)))
+                   target-or-id))
          (title (plist-get data :title))
          (id (or (plist-get data :id) (org-id-new)))
          (attachment-ext (plist-get data :ext))
@@ -664,6 +675,8 @@ The callback ON-ABORT is called when capture is cancelled."
                    
                    ;; Regardless of type, every headline will have an id.
                    (org-entry-put nil "ID" id)
+                   ;; Also trigger org-mem to update cache
+                   (org-node-nodeify-entry)
 
                    ;; Attachment extension if specified
                    (when attachment-ext
@@ -718,12 +731,12 @@ Will become an attachment Org file that is the child heading of current entry."
   (unless (use-region-p) (user-error "No region active."))
   (let* ((file-buf (current-buffer))
          (file-path buffer-file-name)
-         (file-name (file-name-sans-extension
-                     (file-name-nondirectory
-                      file-path)))
+         (file-name (file-name-base file-path))
          (attach-org-id (car (org-ilm--attachment-data)))
          (attach-org-id-marker (org-id-find attach-org-id t))
          (file-org-id file-name)
+         ;; TODO This doesnt work great, use what i do in other places, which
+         ;; is: i forgot. i think there is a utility function
          (file-org-id-marker (org-id-find file-org-id t)))
     (unless attach-org-id-marker
       (error "Current file is not an attachment, or failed to parse org ID."))
@@ -1659,13 +1672,19 @@ make a bunch of headers."
     (when (or not-exists-ok (file-exists-p path))
       path)))
   
-(defun org-ilm--attachment-find (&optional type org-id)
+(defun org-ilm--attachment-find (&optional ext org-id)
   "Return attachment file of the headline."
   (when-let* ((attach-dir (org-attach-dir))
               (org-id (or org-id (org-id-get)))
-              (type (or type (org-ilm--attachment-extension)))
-              (path (expand-file-name (concat org-id "." type) attach-dir)))
-      (when (file-exists-p path) path)))
+              (ext (or ext (org-ilm--attachment-extension)))
+              (path-sans-ext (expand-file-name (concat org-id ".") attach-dir)))
+    ;; `ext' gets inherited from parent, but element might be an org file. So
+    ;; first check if the explicit ext file exists, if not check for org file.
+    (cond
+     ((let ((path (concat path-sans-ext ext)))
+        (when (file-exists-p path) path)))
+     ((let ((path (concat path-sans-ext "org")))
+        (when (file-exists-p path) path))))))
 
 (defun org-ilm--attachment-find-ancestor (type &optional headline)
   ""
