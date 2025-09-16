@@ -1677,37 +1677,38 @@ make a bunch of headers."
 
 (cl-defun org-ilm--attachment-open (&key pdf-no-region)
   "Open the attachment of collection element at point, returns its buffer."
-  (if-let* ((path (org-ilm--attachment-find)))
+  (cond
+   ((when-let ((path (org-ilm--attachment-find)))
       (progn
         (run-hook-with-args 'org-attach-open-hook path)
-        (find-file path))
-    (if-let* ((pdf-range (org-entry-get nil "PDF_RANGE"))
-              ;; Returns 0 if not a number
-              (pdf-page-maybe (string-to-number pdf-range))
-              (attachment (org-ilm--attachment-find-ancestor "pdf"))
-              (buffer-name (concat (org-id-get) ".pdf")))
-        (if (not (= pdf-page-maybe 0))
-            (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
-          (org-ilm--pdf-open-ranges
-           (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
-           buffer-name
-           pdf-no-region))
-      (if-let* ((org-id (org-id-get))
+        (find-file path))))
+   ((when-let* ((pdf-range (org-entry-get nil "PDF_RANGE"))
+                ;; Returns 0 if not a number
+                (pdf-page-maybe (string-to-number pdf-range))
+                (attachment (org-ilm--attachment-find-ancestor "pdf"))
+                (buffer-name (concat (org-id-get) ".pdf")))
+      (if (not (= pdf-page-maybe 0))
+          (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
+        (org-ilm--pdf-open-ranges
+         (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
+         buffer-name
+         pdf-no-region))))
+   ((when-let* ((org-id (org-id-get))
                 (conversion (seq-find
                              (lambda (conversion)
                                (string= (plist-get conversion :id) org-id))
                              (convtools--conversions))))
-          (let ((message (pcase (plist-get conversion :state)
-                           ;; TODO for success and error, provide option to
-                           ;; delete headline and extract highlight in parent
-                           ;; attachment.
-                           ('success "Attachment finished conversion but not found.")
-                           ('error "Attachment conversion failed.")
-                           (t "Attachment still being converted."))))
-            (when (yes-or-no-p (concat message " View conversion buffer?"))
-              (pop-to-buffer (plist-get conversion :buffer))))
-        (error "Attachment not found")))))
-
+      (let ((message (pcase (plist-get conversion :state)
+                       ;; TODO for success and error, provide option to
+                       ;; delete headline and extract highlight in parent
+                       ;; attachment.
+                       ('success "Attachment finished conversion but not found.")
+                       ('error "Attachment conversion failed.")
+                       (t "Attachment still being converted."))))
+        (when (yes-or-no-p (concat message " View conversion buffer?"))
+          (pop-to-buffer (plist-get conversion :buffer))))))
+   (t (user-error "Attachment not found"))))
+  
 (defun org-ilm--attachment-open-by-id (id)
   (org-ilm--org-with-point-at
    id
