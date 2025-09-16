@@ -2156,6 +2156,7 @@ If point on subject, add all headlines of subject."
                 (lambda ()
                   (interactive)
                   (kill-buffer (current-buffer))))
+    (define-key map (kbd "r") #'org-ilm-review-start)
     (define-key map (kbd "m") #'org-ilm-queue-object-mark)
     (define-key map (kbd "g") #'org-ilm-queue-revert)
     (define-key map (kbd "RET") #'org-ilm-queue-open-attachment)
@@ -3349,6 +3350,9 @@ TODO Skip if self or descendant."
 
 Besides storing the attachment buffer, this variable contains redundant data as the current element should be the first element in org-ilm-queue. However this redundancy is useful to make sure everything is still in sync.")
 
+(defvar org-ilm--review-kill-buffer-hook nil
+  "The buffer-local kill-buffer hook that asks if you want to quit review.")
+
 (cl-defun org-ilm-review-start (&key queue)
   (interactive)
 
@@ -3431,9 +3435,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
      id
      (when is-card
        (setq card-type
-             (org-ilm--org-with-point-at
-              id
-              (org-ilm--srs-headline-item-type))))
+             (org-ilm--srs-headline-item-type)))
      (setq attachment-buffer
            ;; dont yet switch to the buffer, just return it so we can do some
            ;; processing first.
@@ -3444,12 +3446,13 @@ Besides storing the attachment buffer, this variable contains redundant data as 
       (setq header-line-format
             '(:eval (org-ilm--review-header-build)))
 
-      (org-ilm--add-hook-once
-       'kill-buffer-hook
-       (lambda ()
-         (when (yes-or-no-p "Quit review?")
-           (org-ilm-review-quit)))
-       nil t))
+      (setq org-ilm--review-kill-buffer-hook
+            (org-ilm--add-hook-once
+             'kill-buffer-hook
+             (lambda ()
+               (when (yes-or-no-p "Quit review?")
+                 (org-ilm-review-quit)))
+             nil t)))
 
     (setq org-ilm--review-current-element-info
           (list :element element
@@ -3460,7 +3463,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 (defun org-ilm--review-open-current-element ()
   (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
         (card-type (plist-get org-ilm--review-current-element-info :card-type)))
-    (with-current-buffer (pop-to-buffer buffer)
+    (with-current-buffer (switch-to-buffer buffer)
       ;; Prepare org-srs card overlays. First tried doing it before poping to
       ;; buffer, but `org-srs-item-review' immediately prompts user to type any
       ;; key to reveal the answer, so no time to switch to buffer.
@@ -3476,6 +3479,10 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 
 (defun org-ilm--review-cleanup-current-element ()
   (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
+    (remove-hook 'kill-buffer-hook
+                 org-ilm--review-kill-buffer-hook
+                 t)
+
     (kill-buffer buffer))
   (setq org-ilm--review-current-element-info nil))
 
