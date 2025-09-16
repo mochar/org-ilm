@@ -1678,10 +1678,14 @@ make a bunch of headers."
 (cl-defun org-ilm--attachment-open (&key pdf-no-region)
   "Open the attachment of collection element at point, returns its buffer."
   (cond
+   ;; Check if there is an attachment org-id.ext where org-id is current
+   ;; headline's id and ext is org by default or ILM_EXT property
    ((when-let ((path (org-ilm--attachment-find)))
       (progn
         (run-hook-with-args 'org-attach-open-hook path)
         (find-file path))))
+   ;; Check if headline represents a virtual view of a parent PDF element by
+   ;; looking at the PDF_RANGE property.
    ((when-let* ((pdf-range (org-entry-get nil "PDF_RANGE"))
                 ;; Returns 0 if not a number
                 (pdf-page-maybe (string-to-number pdf-range))
@@ -1693,6 +1697,18 @@ make a bunch of headers."
          (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
          buffer-name
          pdf-no-region))))
+   ;; Check if there is a web link in the ROAM_REFS property and open website in
+   ;; eww.
+   ((when-let* ((web-refs (utils--org-mem-website-refs))
+                (web-ref (if (= 1 (length web-refs))
+                             (car web-refs)
+                           (completing-read "Open: " web-refs nil t))))
+      ;; We use window excursion so that we can return the eww buffer
+      (save-window-excursion
+        (eww-browse-url web-ref))
+      (switch-to-buffer "*eww*")))
+   ;; Check if attachment is in the process of being generated with a conversion
+   ;; tool.
    ((when-let* ((org-id (org-id-get))
                 (conversion (seq-find
                              (lambda (conversion)
