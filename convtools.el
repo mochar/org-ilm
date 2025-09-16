@@ -405,6 +405,37 @@ does not have an option for this so it is done here.
          "-o" output-path)
         convtools-monolith-args))))))
 
+(cl-defun convtools--convert-with-monolith-defuddle (&key process-id on-success on-error monolith-args defuddle-args)
+  "Convert a URL or HTML file to single file HTML using Monolith, and
+ simplify it to Markdown or replaced HTML file with Pandoc."
+  (unless (and process-id monolith-args)
+    (error "Required args: PROCESS-ID MONOLITH-ARGS"))
+
+  (setq monolith-args
+        (plist-put monolith-args :process-id process-id))
+  
+  (cl-destructuring-bind (&key input-path output-path)
+      (apply #'convtools--monolith-compile-paths monolith-args)
+    (let* ((monolith-output-path output-path)
+           (output-format (plist-get defuddle-args :output-format))
+           (defuddle-output-path (concat
+                                  (file-name-sans-extension output-path)
+                                  "."
+                                  (if (string= output-format "markdown")
+                                      "md" "html"))))
+      (convtools--convert-multi
+       :process-name "monolith-defuddle"
+       :process-id process-id
+       :converters
+       (list
+        (cons #'convtools--convert-with-monolith monolith-args)
+        (cons #'convtools--convert-with-defuddle
+              (append
+               (list :input-path monolith-output-path)
+               defuddle-args)))
+       :on-error on-error
+       :on-final-success on-success))))
+
 (cl-defun convtools--convert-to-org-with-monolith-pandoc (&key process-id on-success on-error monolith-args pandoc-args)
   "Convert a URL or HTML file to single file HTML using Monolith, then to Org mode using Pandoc."
   (unless (and process-id monolith-args)
@@ -440,8 +471,13 @@ does not have an option for this so it is done here.
   
   (cl-destructuring-bind (&key input-path output-path)
       (apply #'convtools--monolith-compile-paths monolith-args)
-    (let ((monolith-output-path output-path)
-          (defuddle-output-path (concat (file-name-sans-extension output-path) ".md")))
+    (let* ((monolith-output-path output-path)
+           (defuddle-output-format (plist-get defuddle-args :output-format))
+           (defuddle-output-path (concat
+                                  (file-name-sans-extension output-path)
+                                  "."
+                                  (if (string= defuddle-output-format "markdown")
+                                      "md" "html"))))
     (convtools--convert-multi
      :process-name "monolith-defuddle-pandoc"
      :process-id process-id
@@ -449,15 +485,15 @@ does not have an option for this so it is done here.
      (list
       (cons #'convtools--convert-with-monolith monolith-args)
       (cons #'convtools--convert-with-defuddle
-            (list
-             :input-path monolith-output-path
-             :output-format "markdown"))
+            (append
+             (list :input-path monolith-output-path)
+             defuddle-args))
       (cons #'convtools--convert-with-pandoc
             (append
              pandoc-args
              (list
               :input-path defuddle-output-path
-              :input-format "markdown"))))
+              :input-format defuddle-output-format))))
      :on-error on-error
      :on-final-success on-success))))
 

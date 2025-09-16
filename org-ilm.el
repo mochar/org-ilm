@@ -27,6 +27,7 @@
 (require 'dash)
 (require 'ts)
 (require 'vtable)
+(require 'transient)
 
 (require 'utils)
 (require 'convtools)
@@ -586,9 +587,11 @@ The callback ON-ABORT is called when capture is cancelled."
          (id (or (plist-get data :id) (org-id-new)))
          (attachment-ext (plist-get data :ext))
          (content (plist-get data :content))
+         (props (plist-get data :props))
          (file (plist-get data :file))
          (priority (plist-get data :priority))
          (template (plist-get data :template))
+         attach-dir ; Will be set in :hook, and passed to on-success
          (before-finalize
           (lambda ()
             ;; If this is a source header where the attachments will
@@ -615,7 +618,7 @@ The callback ON-ABORT is called when capture is cancelled."
                 (when on-abort
                   (funcall on-abort))
               (when on-success
-                (funcall on-success))))))
+                (funcall on-success attach-dir))))))
 
     ;; Generate title from content if no title provided
     (when (and (not title) content)
@@ -629,7 +632,7 @@ The callback ON-ABORT is called when capture is cancelled."
 
     ;; Save content in a temporary file if no file provided
     ;; (unless (or content file)
-      ;; (error "Cannot capture without content or file."))
+    ;; (error "Cannot capture without content or file."))
     (when (and (not file) content)
       (setq file (expand-file-name
                   (format "%s.%s" id (or attachment-ext "org"))
@@ -648,48 +651,60 @@ The callback ON-ABORT is called when capture is cancelled."
 
     ;; (let ((org-capture-templates
     (cl-letf (((symbol-value 'org-capture-templates)
-           `(("i" "Import"
-              entry ,target
-              ,template
-              :hook (lambda ()
-                      ;; Regardless of type, every headline will have an id.
-                      (org-entry-put nil "ID" ,id)
+               (list
+                (list
+                 "i" "Import" 'entry target template
+                 :hook
+                 (lambda ()
+                   ;; Set attach dir which will be passed to on-success
+                   ;; callback. Has to be done in the hook so that point is on
+                   ;; the headline, and respects file-local or .dir-locals
+                   ;; `org-attach-id-dir'.
+                   (setq attach-dir (org-attach-dir-from-id id))
+                   
+                   ;; Regardless of type, every headline will have an id.
+                   (org-entry-put nil "ID" id)
 
-                      ;; Attachment extension if specified
-                      (when ,attachment-ext
-                        (org-entry-put nil "ILM_EXT" ,attachment-ext))
+                   ;; Attachment extension if specified
+                   (when attachment-ext
+                     (org-entry-put nil "ILM_EXT" attachment-ext))
 
-                      ;; Scheduling. We do not add a schedule for cards, as that
-                      ;; info is parsed with
-                      ;; `org-ilm--srs-earliest-due-timestamp'.
-                      (unless (eq ',type 'card)
-                        ;; Set initial schedule data based on priortiy
-                        (org-ilm--set-schedule-from-priority)
+                   ;; Additional properties
+                   (when props
+                     (cl-loop for (p v) on props by #'cddr
+                              do (org-entry-put nil (if (stringp p) p (substring (symbol-name p) 1)) v)))
 
-                        ;; Add advice around priority change to automatically
-                        ;; update schedule, but remove advice as soon as capture
-                        ;; is finished.
-                        (advice-add 'org-priority
-                                    :around #'org-ilm--update-from-priority-change)
-                        (add-hook 'kill-buffer-hook
-                                  (lambda ()
-                                    (advice-remove 'org-priority
-                                                   #'org-ilm--update-from-priority-change))
-                                  nil t))
+                   ;; Scheduling. We do not add a schedule for cards, as that
+                   ;; info is parsed with
+                   ;; `org-ilm--srs-earliest-due-timestamp'.
+                   (unless (eq type 'card)
+                     ;; Set initial schedule data based on priortiy
+                     (org-ilm--set-schedule-from-priority)
 
-                      ;; For cards, need to transclude the contents in order for
-                      ;; org-srs to detect the clozes.
-                      ;; TODO `org-transclusion-add' super slow!!
-                      (when (eq ',type 'card)
-                        ;; TODO this can be a nice macro
-                        ;; `org-ilm-with-attachment-transcluded'
-                        (save-excursion
-                          (org-ilm--transclusion-goto ,file 'create)
-                          (org-transclusion-add)
-                          (org-srs-item-new 'cloze)
-                          (org-ilm--transclusion-goto ,file 'delete))))
-              :before-finalize ,before-finalize
-              :after-finalize ,after-finalize))))
+                     ;; Add advice around priority change to automatically
+                     ;; update schedule, but remove advice as soon as capture
+                     ;; is finished.
+                     (advice-add 'org-priority
+                                 :around #'org-ilm--update-from-priority-change)
+                     (add-hook 'kill-buffer-hook
+                               (lambda ()
+                                 (advice-remove 'org-priority
+                                                #'org-ilm--update-from-priority-change))
+                               nil t))
+
+                   ;; For cards, need to transclude the contents in order for
+                   ;; org-srs to detect the clozes.
+                   ;; TODO `org-transclusion-add' super slow!!
+                   (when (eq type 'card)
+                     ;; TODO this can be a nice macro
+                     ;; `org-ilm-with-attachment-transcluded'
+                     (save-excursion
+                       (org-ilm--transclusion-goto file 'create)
+                       (org-transclusion-add)
+                       (org-srs-item-new 'ilm-cloze)
+                       (org-ilm--transclusion-goto file 'delete))))
+                 :before-finalize before-finalize
+                 :after-finalize after-finalize))))
       (org-capture nil "i"))))
 
 ;;;; Org attachment
@@ -726,7 +741,7 @@ Will become an attachment Org file that is the child heading of current entry."
        'extract
        file-org-id
        (list :id extract-org-id :content region-text)
-       (lambda ()
+       (lambda (&rest _)
          ;; Wrap region with targets.
          (with-current-buffer file-buf
            (save-excursion
@@ -1372,7 +1387,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
            :title (format "Page %s" current-page-real)
            :id extract-org-id
            :ext "org")
-          (lambda ()
+          (lambda (&rest _)
             (org-ilm--pdf-convert-attachment-to-org
              pdf-path
              (1- current-page-real)
@@ -1456,7 +1471,7 @@ set only (not let)."
        'extract
        org-id
        capture-data
-       (lambda ()
+       (lambda (&rest _)
          (with-current-buffer pdf-buffer
            (org-ilm--pdf-add-square-annotation
             region extract-org-id))
@@ -1568,7 +1583,7 @@ make a bunch of headers."
              :title (concat "Section: " (alist-get 'title section))
              :id extract-org-id
              :ext "org")
-            (lambda ()
+            (lambda (&rest _)
               (org-ilm--pdf-convert-attachment-to-org
                pdf-path
                (cons (1- (alist-get 'page section))
@@ -2389,6 +2404,7 @@ A lot of formatting code from org-ql."
    ]
   ["Type"
    ("o" "Org file" org-ilm--import-org-transient)
+   ("w" "Website" org-ilm--import-website-transient)
    ]
   )
 
@@ -2402,15 +2418,15 @@ A lot of formatting code from org-ql."
 (defun org-ilm--import-org-transient-args ()
   (when transient-current-command
     (let* ((args (transient-args transient-current-command))
-           (file (transient-arg-value "file=" args))
-           (method (transient-arg-value "method=" args))
+           (file (transient-arg-value "--file=" args))
+           (method (transient-arg-value "--method=" args))
            (collection org-ilm--active-collection))
       (list :file file :method method :collection collection))))
 
 (transient-define-infix org-ilm--import-org-transient-file ()
   :class 'transient-option
   :transient t
-  :argument "file="
+  :argument "--file="
   :allow-empty nil
   :prompt "Org file: "
   :reader
@@ -2418,21 +2434,21 @@ A lot of formatting code from org-ql."
     (read-file-name prompt nil initial-input t)))
 
 (transient-define-prefix org-ilm--import-org-transient ()
-  :value '("method=cp")
+  :value '("--method=cp")
   :refresh-suffixes t
   ["Org file import"
    ("f" "Org file" org-ilm--import-org-transient-file)
-   ("m" "Method of attachment" "method="
+   ("m" "Method of attachment" "--method="
     :allow-empty nil
     :choices (mv cp) :prompt "Method of attachment: ")
    ("RET" "Import"
     (lambda ()
       (interactive)
-      (let* ((args (transient-args transient-current-command))
-             (file (transient-arg-value "file=" args))
-             (method (intern (transient-arg-value "method=" args)))
-             (collection (assoc org-ilm--active-collection org-ilm-collections-alist)))
-        (org-ilm-import-org-file file collection method)))
+      (let ((args (org-ilm--import-org-transient-args)))
+        (org-ilm-import-org-file
+         (plist-get args :file)
+         (assoc org-ilm--active-collection org-ilm-collections-alist)
+         (intern (plist-get args :method)))))
     :inapt-if-not
     (lambda ()
       (let ((args (org-ilm--import-org-transient-args)))
@@ -2479,10 +2495,151 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
      (list :id org-id :file file-tmp-path))))
 
 ;;;;; Website
-(defun org-ilm-import-website ()
-  "Import a website."
+
+(defun org-ilm--import-website-transient-args (&optional args)
+  (when transient-current-command
+    (let ((args (or args (transient-args transient-current-command))))
+      (list :url (transient-arg-value "--url=" args)
+            :simplify (cond
+                       ((transient-arg-value "--simplify-to-html" args)
+                        "html")
+                       ((transient-arg-value "--simplify-to-markdown" args)
+                        "markdown"))
+            :title (transient-arg-value "--title=" args)
+            :download (transient-arg-value "--download" args)
+            :orgify (transient-arg-value "--orgify" args)
+            :collection org-ilm--active-collection))))
+
+(transient-define-infix org-ilm--import-website-transient-url ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--url="
+  :allow-empty nil
+  :always-read t
+  :prompt "URL: "
+  :reader
+  (lambda (prompt initial-input history)
+    (let ((url (read-string prompt initial-input history)))
+      (unless (string-empty-p url)
+        (let* ((args (org-ilm--import-website-transient-args))
+               (title (plist-get args :title))
+               (title-object (transient-suffix-object 'org-ilm--import-website-transient-title)))
+          (when (or (null title) (string-empty-p title))
+            (oset title-object value (utils--get-page-title url))
+            (transient-set)
+            )))
+      url)))
+
+(transient-define-infix org-ilm--import-website-transient-title ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--title="
+  :allow-empty nil
+  :always-read t
+  :prompt "Title (empty to auto-generate): "
+  :reader
+  (lambda (prompt initial-input history)
+    (let ((title (read-string prompt initial-input history)))
+      (if (string-empty-p title)
+          (utils--get-page-title
+           (plist-get (org-ilm--import-website-transient-args) :url))
+        title))))
+
+(transient-define-argument org-ilm--import-website-transient-simplify ()
+  :class 'transient-switches
+  :transient 'transient--do-call
+  :description "Simplify to HTML or Markdown"
+  :argument-format "--simplify-to-%s"
+  :argument-regexp "\\(--simplify-to-\\(html\\|markdown\\)\\)"
+  :choices '("html" "markdown"))
+
+(transient-define-prefix org-ilm--import-website-transient ()
+  :value '("--simplify-to-html" "--orgify")
+  :refresh-suffixes t
   
-  )
+  ["Website import"
+   [("u" "URL" org-ilm--import-website-transient-url)
+    ("t" "Title" org-ilm--import-website-transient-title)
+    ("d" "Download" "--download"
+     :summary "Download HTML file with Monolith"
+     :transient transient--do-call)]]
+  
+  ["Download options"
+    :hide
+    (lambda ()
+      (not (plist-get (org-ilm--import-website-transient-args) :download)))
+    [("s" "Simplify" org-ilm--import-website-transient-simplify)
+     ("o" "Org conversion" "--orgify"
+      :summary "Convert to Org mode with Pandoc"
+      :transient transient--do-call)]]
+   
+   [
+    [("RET" "Import"
+     (lambda ()
+       (interactive)
+       (let* ((args (org-ilm--import-website-transient-args
+                     (transient-args 'org-ilm--import-website-transient))))
+         (apply #'org-ilm-import-website
+                (assoc (plist-get args :collection) org-ilm-collections-alist)
+                (plist-get args :url)
+                args)
+         ))
+     :inapt-if
+     (lambda ()
+       (let ((args (org-ilm--import-website-transient-args)))
+         (not
+          (and (plist-get args :url)
+               (plist-get args :title)
+               (plist-get args :collection))))))
+    ]])
+
+(cl-defun org-ilm-import-website (collection url &key title download simplify orgify &allow-other-keys)
+  "Import a website."
+  (cl-assert (or (null simplify) (member simplify '("html" "markdown"))))
+  
+  (let* ((org-id (org-id-new))
+         (output-dir (org-attach-dir-from-id org-id)))
+
+    (org-ilm--capture
+     'source
+     `(file ,(cdr collection))
+     (list :id org-id :title title :props (list :ROAM_REFS url))
+     (lambda (attach-dir)
+       (let ((monolith-args
+              (list :input-path url
+                    :output-path (expand-file-name
+                                  (concat org-id ".html")
+                                  attach-dir))))
+         (cond
+          ((null download) nil)
+          (orgify
+           (apply
+            (if simplify
+                #'convtools--convert-to-org-with-monolith-defuddle-pandoc
+              #'convtools--convert-to-org-with-monolith-pandoc)
+            (list
+             :process-id org-id
+             :monolith-args monolith-args
+             :defuddle-args (list :output-format simplify)
+             :on-success
+             (lambda (&rest _)
+               (message "Finished import: %s" url)))))
+          (simplify
+           (apply
+            #'convtools--convert-with-monolith-defuddle
+            (list
+             :process-id org-id
+             :monolith-args monolith-args
+             :defuddle-args (list :output-format simplify)
+             :on-success
+             (lambda (&rest _)
+               (message "Finished import: %s" url)))))
+          (t ; Download, dont simplify or orgify
+             (apply
+              #'convtools--convert-with-monolith
+              :process-id org-id
+              monolith-args))))
+     ))))
 
 
 ;;;; Stats
@@ -2817,7 +2974,7 @@ command."
      'card
      file-org-id
      (list :id card-org-id :content buffer-text :title snippet)
-     (lambda ()
+     (lambda (&rest _)
        ;; Success callback. Go through each cloze in the source file and replace
        ;; it with our target tags. Render them by recreating overlays.
        (with-current-buffer file-buf
