@@ -2561,8 +2561,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (setq url (thing-at-point 'url))
       (unless url
         (when (eq major-mode 'eww-mode)
-          (setq url (eww-current-url))))
-      (when url
+          (setq url (eww-current-url))
+          (setq title (plist-get eww-data :title))))
+      (when (and (not title) url)
         (setq title (utils--get-page-title url)))
       (append
        '("--simplify-to-markdown" "--orgify")
