@@ -421,15 +421,19 @@ headline. org-mem takes me there directly.
 
 Alternatively org-id-goto could be used, but does not seem to respect
 save-excursion."
+  (declare (debug (body)) (indent 1))
   `(when-let* ((org-id ,thing)
                (entry (org-mem-entry-by-id org-id))
                (file (org-mem-entry-file-truename entry))
                (buf (or (find-buffer-visiting file)
                         (find-file-noselect file))))
      (with-current-buffer buf
-       ;; Jump to correct position
-       (goto-char (org-find-property "ID" org-id))
-       ,@body)))
+       ;; We need to widen the buffer because `find-buffer-visiting' might
+       ;; return an active, narrowed buffer.
+       (org-with-wide-buffer
+        ;; Jump to correct position
+        (goto-char (org-find-property "ID" org-id))
+        ,@body))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
@@ -512,6 +516,68 @@ The returned function can be used to call `remove-hook' if needed."
     hook-function))
 
 ;;;; Elements
+
+(defun org-ilm-parse-headline ()
+  "Parse org-ilm data of headline at point.
+
+Was thinking of org-ql--value-at this whole function, but this is
+wasteful if headline does not match query."
+  ;; Don't use (org-element-headline-parser (line-end-position)) as org-ql does, it will fail to return parents correctly.
+  (let* ((headline (org-ilm--org-headline-at-point))
+         (todo-keyword (org-element-property :todo-keyword headline))
+         (type (cond
+                 ((string= todo-keyword org-ilm-card-state) 'card)
+                 ((string= todo-keyword org-ilm-incr-state) 'incr)
+                 ((member todo-keyword org-ilm-subject-states) 'subj)))
+         (is-card (eq type 'card))
+         (scheduled (if is-card
+                        (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
+                      (ts-parse-org-element (org-element-property :scheduled headline))))
+         (now (ts-now)))
+
+    (list
+     ;; Basic headline element properties
+     :todo todo-keyword
+     :id (org-element-property :ID headline)
+     :level (org-element-property :level headline)
+     :priority (org-ilm--get-priority headline)
+     :raw-value (org-element-property :raw-value headline)
+     :tags (org-element-property :tags headline)
+     :title (org-no-properties ; Remove text properties from title
+             (org-element-interpret-data (org-element-property :title headline)))
+
+     ;; Our stuff
+     :scheduled scheduled
+     :scheduled-relative (when scheduled ; convert from sec to days
+                           (/ (ts-diff now scheduled) 86400))
+     :type type
+     ;; :logbook (unless is-card (org-ilm--logbook-read headline))
+     ;; cdr to get rid of headline priority in the car - redundant
+     :subjects (cdr (org-ilm--priority-subject-gather headline))
+     :priority-sample (org-ilm--sample-priority-from-headline headline))))
+
+(cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
+  "Return an element by their org id."
+  (cond
+   ((null if-matches-query))
+   ;; Is a function - fine
+   ((and (symbolp if-matches-query) (fboundp if-matches-query)))
+   ((eq if-matches-query t)
+    (setq if-matches-query (plist-get org-ilm-queue :query))
+    (unless if-matches-query
+      (error "No query found"))))
+    
+  (save-excursion
+    (org-ilm--org-with-point-at
+        org-id
+      (save-restriction
+        (org-ilm--org-narrow-to-header)
+        (if if-matches-query
+            (car (org-ilm-query-buffer
+                  (current-buffer)
+                  if-matches-query
+                  t))
+          (org-ilm-parse-headline))))))
 
 (defun org-ilm--select-collection ()
   "Prompt user for collection to select from.
@@ -1981,7 +2047,6 @@ See `org-ilm-attachment-transclude'."
 
 ;;;; Query
 
-
 (defcustom org-ilm-queries-alist
   `((Outstanding . org-ilm-query-outstanding))
   "Alist mapping query name to a function that returns an org-ql query."
@@ -1998,45 +2063,6 @@ See `org-ilm-attachment-transclude'."
 ;; + If any data is needed in action and query, use org-ql--value-at
 ;; + Prefer query over custom predicate
 ;; + Use regex preambles to quickly filter candidates
-
-(defun org-ilm-parse-headline ()
-  "Parse org-ilm data of headline at point.
-
-Was thinking of org-ql--value-at this whole function, but this is
-wasteful if headline does not match query."
-  ;; Don't use (org-element-headline-parser (line-end-position)) as org-ql does, it will fail to return parents correctly.
-  (let* ((headline (org-ilm--org-headline-at-point))
-         (todo-keyword (org-element-property :todo-keyword headline))
-         (type (cond
-                 ((string= todo-keyword org-ilm-card-state) 'card)
-                 ((string= todo-keyword org-ilm-incr-state) 'incr)
-                 ((member todo-keyword org-ilm-subject-states) 'subj)))
-         (is-card (eq type 'card))
-         (scheduled (if is-card
-                        (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
-                      (ts-parse-org-element (org-element-property :scheduled headline))))
-         (now (ts-now)))
-
-    (list
-     ;; Basic headline element properties
-     :todo todo-keyword
-     :id (org-element-property :ID headline)
-     :level (org-element-property :level headline)
-     :priority (org-ilm--get-priority headline)
-     :raw-value (org-element-property :raw-value headline)
-     :tags (org-element-property :tags headline)
-     :title (org-no-properties ; Remove text properties from title
-             (org-element-interpret-data (org-element-property :title headline)))
-
-     ;; Our stuff
-     :scheduled scheduled
-     :scheduled-relative (when scheduled ; convert from sec to days
-                           (/ (ts-diff now scheduled) 86400))
-     :type type
-     ;; :logbook (unless is-card (org-ilm--logbook-read headline))
-     ;; cdr to get rid of headline priority in the car - redundant
-     :subjects (cdr (org-ilm--priority-subject-gather headline))
-     :priority-sample (org-ilm--sample-priority-from-headline headline))))
 
 (defun org-ilm--compare-priority (first second)
   "Comparator of two headlines by sampled priority."
@@ -2055,6 +2081,15 @@ wasteful if headline does not match query."
                    (funcall (cdr (assoc query org-ilm-queries-alist)))
                    :action #'org-ilm-parse-headline
                    :sort #'org-ilm--compare-priority)))
+    entries))
+
+(defun org-ilm-query-buffer (buffer query &optional narrow)
+  "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
+  (let ((entries (org-ql-select buffer
+                   (funcall (cdr (assoc query org-ilm-queries-alist)))
+                   :action #'org-ilm-parse-headline
+                   :sort #'org-ilm--compare-priority
+                   :narrow narrow)))
     entries))
 
 (defun org-ilm--query-subjects (&optional collection)
@@ -2123,7 +2158,33 @@ If available, the last alias in the ROAM_ALIASES property will be used."
         (query (or (plist-get org-ilm-queue :query) (car (org-ilm--query-select)))))
     (setq org-ilm-queue (org-ilm--queue-build collection query))))
 
-;;;;; Building
+;;;;; Queue operations
+
+(defun org-ilm--queue-pop ()
+  "Remove the top most element in the queue."
+  (when org-ilm-queue
+    (pop (plist-get org-ilm-queue :queue))))
+
+(cl-defun org-ilm--queue-add-by-id (org-id &key if-matches-query position minimum-position)
+  (when-let* ((element (org-ilm--element-by-id org-id :if-matches-query if-matches-query))
+              (element (plist-put element :priority-sample 0.85))
+              (queue (plist-get org-ilm-queue :queue))
+              (priority (plist-get element :priority-sample))
+              (position (or position
+                            (max
+                             (or minimum-position 0)
+                             (cl-position-if
+                              (lambda (el) (> (plist-get el  :priority-sample)
+                                              priority))
+                              queue))
+                            (length queue))))
+    (setq queue
+          (if (= position (length queue))
+              (append queue (list element))
+            (append (cl-subseq queue 0 position)
+                    (list element)
+                    (cl-subseq queue position))))
+    (setf (plist-get org-ilm-queue :queue) queue)))
 
 ;; TODO Finish after rewriting subject cache
 (defun org-ilm-queue-add-dwim (arg)
@@ -2259,9 +2320,13 @@ DAYS can be specified as numeric prefix arg."
          (symbol-name (plist-get org-ilm-queue :collection))
          ")")))
 
-(defun org-ilm-queue-revert (&optional select-collection)
+(defun org-ilm-queue-revert (&optional arg)
   (interactive "P")
-  (org-ilm-queue-refresh select-collection)
+  (cond
+   ((equal arg '(4))   ;; C-u
+    (org-ilm-queue-refresh))
+   ((equal arg '(16))  ;; C-u C-u
+    (org-ilm-queue-refresh 'select-collection)))
   (vtable-revert-command)
   (org-ilm-queue--set-header))
 
@@ -3445,10 +3510,17 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 
 (defun org-ilm--review-next ()
   (when org-ilm--review-current-element-info
-    (org-ilm--review-cleanup-current-element)
-    (setq org-ilm-queue
-          (plist-put org-ilm-queue :queue
-                     (cdr (plist-get org-ilm-queue :queue)))))
+    (let ((element (org-ilm--queue-pop)))
+      ;; Card might already be due, eg when rating again. So need to check the
+      ;; new review time and add it back to the queue. Set a minimum position in
+      ;; the queue so that the card is not reviewed too quickly again.
+      ;; TODO Resample priority
+      (when (plist-get org-ilm--review-current-element-info :card-type)
+        (org-ilm--queue-add-by-id
+         (plist-get element :id)
+         :if-matches-query t
+         :minimum-position 5)))
+    (org-ilm--review-cleanup-current-element))
   (if (org-ilm-queue-empty-p)
       (message "Finished reviewing queue!")
     (org-ilm--review-setup-current-element)
