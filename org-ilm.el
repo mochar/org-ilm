@@ -3353,6 +3353,35 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 (defvar org-ilm--review-kill-buffer-hook nil
   "The buffer-local kill-buffer hook that asks if you want to quit review.")
 
+(defun org-ilm-reviewing-p ()
+  "Return non-nil when currently reviewing."
+  (not (null org-ilm--review-current-element-info)))
+
+(defvar-keymap org-ilm-review-mode-map
+  :doc "Keymap for `org-ilm-review-mode'."
+  "<f5>" #'org-ilm-review-rate-easy
+  "<f6>" #'org-ilm-review-rate-good
+  "<f7>" #'org-ilm-review-rate-hard
+  "<f8>" #'org-ilm-review-rate-again
+  "<f9>" #'org-ilm-review-next)
+
+;;;###autoload
+(define-minor-mode org-ilm-review-mode
+  "Minor mode on attachment buffer that is being reviewed."
+  :group 'org-ilm
+  :interactive nil ; shouldnt be a command
+  (if org-ilm-review-mode
+      (if (not (org-ilm-reviewing-p))
+          (progn
+            (message "Not reviewing - quiting minor mode")
+            (org-ilm-review-mode -1))
+        ;; Minor mode on
+        (setq header-line-format
+              (org-ilm--review-header-build))
+              ;; '(:eval (org-ilm--review-header-build))))
+    ;; Minor mode off
+    (setq header-line-format nil)))
+
 (cl-defun org-ilm-review-start (&key queue)
   (interactive)
 
@@ -3368,46 +3397,48 @@ Besides storing the attachment buffer, this variable contains redundant data as 
   (interactive)
   (org-ilm--review-cleanup-current-element))
 
-(defun org-ilm-review-next ()
+(defun org-ilm-review-next (&optional rating)
   (interactive)
-  (if (and
-       (plist-get org-ilm--review-current-element-info :card-type)
-       (not (plist-get org-ilm--review-current-element-info :rating)))
-      (call-interactively #'org-ilm-review-rate)
-    (org-ilm--review-next)))
-
-(defun org-ilm-review-rate (rating)
-  "Rate the card that is being reviewed."
-  (interactive
-   (list
-    (let ((ratings '(("Good" . :good) ("Easy" . :easy) ("Hard" . :hard) ("Again" . :again))))
-      (alist-get (completing-read "Rate:" ratings nil t) ratings nil nil #'equal))))
-  (unless org-ilm--review-current-element-info
+  (unless (org-ilm-reviewing-p)
     (user-error "Not reviewing."))
+  (when (and
+         (plist-get org-ilm--review-current-element-info :card-type)
+         (not (plist-get org-ilm--review-current-element-info :rating)))
+    (org-ilm-review--rate
+     (or rating
+         (let ((ratings '(("Good" . :good)
+                          ("Easy" . :easy)
+                          ("Hard" . :hard)
+                          ("Again" . :again))))
+           (alist-get (completing-read "Rate:" ratings nil t)
+                      ratings nil nil #'equal)))))
+  (org-ilm--review-next))
+
+(defun org-ilm-review--rate (rating)
+  "Rate the card that is being reviewed."
   (unless (plist-get org-ilm--review-current-element-info :card-type)
     (user-error "Element is not a card. Try `org-ilm-review-next'."))
   (org-ilm--org-with-point-at
    (plist-get org-ilm--review-current-element-info :id)
    (org-ilm--srs-review-rate rating))
   (setq org-ilm--review-current-element-info
-        (plist-put org-ilm--review-current-element-info :rating rating))
-  (org-ilm-review-next))
+        (plist-put org-ilm--review-current-element-info :rating rating)))
 
 (defun org-ilm-review-rate-good ()
   (interactive)
-  (org-ilm-review-rate :good))
+  (org-ilm-review-next :good))
 
 (defun org-ilm-review-rate-easy ()
   (interactive)
-  (org-ilm-review-rate :easy))
+  (org-ilm-review-next :easy))
 
 (defun org-ilm-review-rate-hard ()
   (interactive)
-  (org-ilm-review-rate :hard))
+  (org-ilm-review-next :hard))
 
 (defun org-ilm-review-rate-again ()
   (interactive)
-  (org-ilm-review-rate :again))
+  (org-ilm-review-next :again))
 
 (defun org-ilm--review-top-element ()
   (car (org-ilm-queue-elements)))
@@ -3443,9 +3474,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
              (org-ilm--attachment-open))))
 
     (with-current-buffer attachment-buffer
-      (setq header-line-format
-            '(:eval (org-ilm--review-header-build)))
-
+      ;; TODO Move this to `org-ilm-review-mode'
       (setq org-ilm--review-kill-buffer-hook
             (org-ilm--add-hook-once
              'kill-buffer-hook
@@ -3464,6 +3493,8 @@ Besides storing the attachment buffer, this variable contains redundant data as 
   (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
         (card-type (plist-get org-ilm--review-current-element-info :card-type)))
     (with-current-buffer (switch-to-buffer buffer)
+      (org-ilm-review-mode)
+
       ;; Prepare org-srs card overlays. First tried doing it before poping to
       ;; buffer, but `org-srs-item-review' immediately prompts user to type any
       ;; key to reveal the answer, so no time to switch to buffer.
@@ -3479,68 +3510,54 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 
 (defun org-ilm--review-cleanup-current-element ()
   (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
+    (with-current-buffer buffer
+      (org-ilm-review-mode -1))
     (remove-hook 'kill-buffer-hook
                  org-ilm--review-kill-buffer-hook
                  t)
-
     (kill-buffer buffer))
   (setq org-ilm--review-current-element-info nil))
 
-(defun org-ilm--review-header-make-map (func)
-  (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] 
-                (lambda () (interactive)
-                  (funcall func)))
-    map))
+(defun org-ilm--review-header-make-button (title func)
+  (propertize
+   (substitute-command-keys
+    (format 
+     "\\<org-ilm-review-mode-map>[%s `\\[%s]']"
+     title (symbol-name func)))
+   'mouse-face 'highlight
+   'local-map (let ((map (make-sparse-keymap)))
+                (define-key map [header-line mouse-1] func)
+                map)))
 
 (defun org-ilm--review-header-build ()
   (let* ((element (plist-get org-ilm--review-current-element-info :element))
          (card-type (plist-get org-ilm--review-current-element-info :card-type))
          (card-revealed (plist-get org-ilm--review-current-element-info :card-revealed)))
-    (list
+    (concat
      (propertize "Ilm Review" 'face '(:weight bold :height 1.1))
      "   "
-     (apply
+     (funcall
       #'concat
-      (append
-       (unless card-type
-         (list
-          (propertize
-           "[Next]"
-           'mouse-face 'highlight
-           'local-map (org-ilm--review-header-make-map
-                       #'org-ilm-review-next))
-          " "))
-       (when (and card-type (not card-revealed))
-         (list
-           "Continue with any key"))
-       (when (and card-type card-revealed)
-         (list
-          (propertize
-           "[Again]"
-           'mouse-face 'highlight
-           'local-map (org-ilm--review-header-make-map
-                       #'org-ilm-review-rate-again))
-          " "
-          (propertize
-           "[Hard]"
-           'mouse-face 'highlight
-           'local-map (org-ilm--review-header-make-map
-                       #'org-ilm-review-rate-hard))
-          " "
-          (propertize
-           "[Good]"
-           'mouse-face 'highlight
-           'local-map (org-ilm--review-header-make-map
-                       #'org-ilm-review-rate-good))
-          " "
-          (propertize
-           "[Easy]"
-           'mouse-face 'highlight
-           'local-map (org-ilm--review-header-make-map
-                       #'org-ilm-review-rate-easy))
+      (unless card-type
+         (org-ilm--review-header-make-button
+          "Next" 'org-ilm-review-next))
+      (when (and card-type (not card-revealed))
+        "Continue with any key")
+      (when (and card-type card-revealed)
+        (concat
 
-          ))
+         (org-ilm--review-header-make-button
+          "Easy" 'org-ilm-review-rate-easy)
+         " "
+         (org-ilm--review-header-make-button
+          "Good" 'org-ilm-review-rate-good)
+         " "
+         (org-ilm--review-header-make-button
+          "Hard" 'org-ilm-review-rate-hard)
+         " "
+         (org-ilm--review-header-make-button
+          "Again" 'org-ilm-review-rate-again))
+        ))
 
        ))
 
