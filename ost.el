@@ -172,6 +172,49 @@ Left rotation          ^
       (cl-assert (eq node (ost-tree-root tree)))
       (setf (ost-tree-root tree) new-root))))
 
+(defun ost--successor (node)
+  "Find the in-order successor of NODE.
+
+This is the node with the smallest key larger than NODE's key.
+
+1. If NODE has right child:
+   Successor is the leftmost child of its right subtree.
+2. Otherwise:
+   Successor is lowest ancestor for which NODE lies in its left subtree."
+  (if-let ((right (ost-node-right node)))
+      ;; NODE has right child: Find leftmost child of right subtree
+      (let ((successor right)
+            current)
+        (when successor
+          (while (setq current (ost-node-left successor))
+            (setq successor current))
+          successor))
+    ;; Node has no right child: Find lowest ancestor for which NODE lies in its
+    ;; left subtree.
+    (let ((current node)
+          ancestor)
+      (while (and (setq ancestor (ost-node-parent current))
+                  (eq (ost--direction current) 'right))
+        (setq current ancestor))
+      ancestor)))
+
+(defun ost--swap-values (n1 n2)
+  "Swap the values of two nodes.
+For now this means the 'key' and 'data' properties."
+  (cl-rotatef (ost-node-data n1) (ost-node-data n2))
+  (cl-rotatef (ost-node-key n1) (ost-node-key n2)))
+
+;;;; Search
+
+(cl-defun ost-search (tree key)
+  "Find node with KEY in TREE."
+  (let ((node (ost-tree-root tree)))
+    (while (and node (not (= key (ost-node-key node))))
+      (setq node (if (< key (ost-node-key node))
+                     (ost-node-left node)
+                   (ost-node-right node))))
+    node))
+
 ;;;; Insert
 
 (cl-defun ost--insert-fixup (tree node)
@@ -268,6 +311,44 @@ nodes cannot have red children."
       (ost--insert tree node parent direction))
     node))
 
+;;;; Remove
+
+(defun ost-remove (tree node)
+  "Remove NODE from TREE."
+  (let ((parent (ost-node-parent node))
+        (direction (ost--direction node))
+        (left (ost-node-left node))
+        (right (ost-node-right node)))
+    (cond
+     ;; No children
+     ((and (null left) (null right))
+      (cond
+       ;; NODE is root, replace with nil, done
+       ((eq (ost-tree-root tree) node)
+        (setf (ost-tree-root tree) nil))
+       ;; NODE is red, remove from parent, done
+       ((null (ost-node-black node))
+        (ost--set-parent-child :child nil :parent parent :direction direction))
+       ;; Node is black. Complex case, requires rebalance.
+       (t))) ;; TODO call fixup
+
+     ;; Two children: Swap its value with its in-order successor (which in this
+     ;; case, has to be the leftmost child of the right subtree), and then
+     ;; delete the successor. Since the successor is leftmost, it can only have
+     ;; a right child or no child at all.
+     ((and left right)
+      (let ((successor (ost--successor node)))
+        (ost--swap-values node successor)
+        (ost-remove tree successor)))
+
+     ;; One child. Replace NODE with child and color black
+     (t
+      (let ((child (or left right)))
+        ;; Child must be red and NODE must be black
+        (cl-assert (null (ost-node-black child)))
+        (cl-assert (ost-node-black node))
+        (ost--set-parent-child :child child :parent parent :direction direction)
+        (setf (ost-node-black child) t))))))
 
 ;;;; Build
 

@@ -70,4 +70,61 @@
        (expect (ost--no-consecutive-red-p (ost-tree-root tree))
                :to-be t)))
 
+ (it "finds correct successor"
+     (let ((tree (make-ost-tree))
+           (n 100)
+           nodes)
+       ;; No built-in way to shuffle a list in elisp!!!!!!!!!!!!!
+       (dotimes (i n)
+         (push (ost-insert tree i) nodes))
+       (dotimes (i (1- n))
+         (let ((j (- n i 1)))
+           (expect (ost-node-key (ost--successor (nth j nodes)))
+                   :to-equal (1+ i))))))
+
+ (it "swaps values"
+     (let ((n1 (make-ost-node :key 1 :data '(:a 1)))
+           (n2 (make-ost-node :key 2 :data '(:a 2))))
+       (ost--swap-values n1 n2)
+       (expect (ost-node-key n1) :to-equal 2)
+       (expect (ost-node-key n2) :to-equal 1)
+       (expect (ost-node-data n1) :to-equal '(:a 2))
+       (expect (ost-node-data n2) :to-equal '(:a 1))))
+
+ (it "search works"
+     (let* ((n 30)
+            (tree (ost--sequence-tree n)))
+       (dotimes (i n)
+         (expect (ost-node-key (ost-search tree i)) :to-equal i))
+       (expect (ost-search tree (1+ n)) :to-be nil)))
+
+ ;; For deletion tests: https://en.wikipedia.org/wiki/File:BST_node_deletion.png
+ 
+ (it "deletes correctly, two children, successor is right"
+     ;; Note because we swap values when deleted node has two children, we
+     ;; cannot rely on equality testing.
+     (let* ((tree (make-ost-tree))
+            (_ (ost-insert tree 1 "_"))
+            (q (ost-insert tree 2 "q"))
+            (l (ost-insert tree 3 "l"))
+            (z (ost-insert tree 4 "z"))
+            (y (ost-insert tree 5 "y"))
+            (x (ost-insert tree 6 "x")))
+       
+       (ost-remove tree z)
+
+       (let* ((node (ost-tree-root tree))
+              (left (ost-node-left node))
+              (right (ost-node-right node)))
+         (expect (ost-node-data node) :to-equal "q")
+         (expect (ost-node-data left) :to-equal "_")
+         (expect (ost-node-data right) :to-equal "y")
+
+         (expect (ost-node-data (ost-node-left right)) :to-equal "l")
+         (expect (ost-node-data (ost-node-right right)) :to-equal "x")
+         )))
+
+ )
+
+
               
