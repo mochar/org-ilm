@@ -72,17 +72,36 @@
    :documentation "The root node of the tree. Need not be black."
    :type ost-node))
 
+(defun ost--node-print (node &optional level direction)
+  "Print out node and descendants in hierarchical fashion."
+  (if (ost-tree-p node)
+      (ost--node-print (ost-tree-root node))
+    (let* ((level (or level 0))
+           (indent (* 2 level)))
+      (message "%s%sNode (%s) %s"
+               (make-string indent ?\s)
+               (if direction (concat (capitalize (symbol-name direction)) ": ") "")
+               (if (ost-node-black node) "B" "R")
+               (ost-node-data node))
+      (when-let ((left (ost-node-left node)))
+        (ost--node-print left (1+ level) 'left))
+      (when-let ((right (ost-node-right node)))
+        (ost--node-print right (1+ level) 'right)))))
+
 (defun ost--node-child (node direction)
   "Get the child of NODE in DIRECTION ('left or 'right)."
   (if (eq direction 'left)
       (ost-node-left node)
     (ost-node-right node)))
 
-(cl-defun ost--node-child-set (&key child parent direction)
-  "Set the child of PARENT in DIRECTION to CHILD."
-  (if (eq direction 'left)
-      (setf (ost-node-left parent) child)
-    (setf (ost-node-right parent) child)))
+(cl-defun ost--set-parent-child (&key child parent direction)
+  "Set the child of PARENT in DIRECTION to CHILD, and update CHILD to have PARENT as parent."
+  (when parent
+    (if (eq direction 'left)
+        (setf (ost-node-left parent) child)
+      (setf (ost-node-right parent) child)))
+  (when child
+    (setf (ost-node-parent child) parent)))
 
 (defun ost--direction (node)
   "Return the direction ('left or 'right) of NODE relative to its parent."
@@ -95,8 +114,32 @@
 (defun ost--opposite (direction)
   (if (eq direction 'left) 'right 'left))
 
+;;;; Operations
+
 (defun ost--rotate (tree node direction)
-  "Rotate subtree with root NODE in TREE in DIRECTION, one of 'left or 'right."
+  "Rotate subtree with root NODE in TREE in DIRECTION, one of 'left or 'right.
+
+               P                  
+              /                   
+            =L=                    
+            / \                   
+           a   R                  
+              / \                 
+             b   c               
+
+Left rotation          ^
+     |                 |
+     |                 |
+     v           Right rotation
+             
+               P
+              /
+            =R=
+            / \
+           L   c
+          / \
+         a   b
+"
   (cl-assert (member direction '(left right)))
   
   (let* ((opposite (ost--opposite direction))
@@ -109,27 +152,27 @@
     (unless new-root
       (error "Pivot node (child opposite of rotation direction) is nil"))
     (setq new-child (ost--node-child new-root direction))
-    
+
     ;; Move the new child: Assign the left/right node of NODE and update the
     ;; child node's parent if the child node is an actual node (not nil).
-    (ost--node-child-set :child new-child :parent node :direction opposite)
-    (when new-child
-      (setf (ost-node-parent new-child) node))
+    (ost--set-parent-child :child new-child :parent node :direction opposite)
 
     ;; Update the child of the new root to be NODE.
-    (ost--node-child-set :child node :parent new-root :direction direction)
+    (ost--set-parent-child :child node :parent new-root :direction direction)
 
     ;; The new root becomes the parent of NODE, so update NODE, the new root,
     ;; and the parent of NODE to reflect these changes.
-    (setf (ost-node-parent new-root) parent
-          (ost-node-parent node) new-root)
-    (if parent
-        (ost--node-child-set :child new-root :parent parent
-                             :direction (if (eq (ost-node-left parent) node)
-                                            'left 'right))
+    (setf (ost-node-parent new-root) parent)
+    (when parent
+      (let ((dir (if (eq (ost-node-left parent) node) 'left 'right)))
+        (ost--set-parent-child :child new-root :parent parent :direction dir)))
+    
+    (unless parent
       ;; If NODE was the root of the tree, set new-root to be the root.
       (cl-assert (eq node (ost-tree-root tree)))
       (setf (ost-tree-root tree) new-root))))
+
+;;;; Insert
 
 (cl-defun ost--insert-fixup (tree node)
   "Rebalance tree after inserting NODE.
@@ -160,20 +203,20 @@ nodes cannot have red children."
                   (ost-node-black grandparent) nil)
             (setq node grandparent)) ; Move up the tree
         
-        ;; In the remaining two contains, both the grandparent and the uncle
-        ;; are black (although not tested for explicitely, we know the
+        ;; In the remaining two contains, the grandparent is black, and the uncle
+        ;; is black or is missing. (although not tested for explicitely, we know the
         ;; grandparent is black as the previous insert operations guarentee
         ;; this). The cases differ in if the node and its parent share
         ;; directions or not.
             
-        ;; Case #5: Node direction is opposite of parent direction. This
-        ;; means we have to do a rotation to the right if parent is a right
-        ;; child, or to the left if parent is a left child. The consequence
-        ;; is that NODE and PARENT now swap places.
+        ;; Case #5: Node direction is opposite of parent direction. This means
+        ;; we have to do a rotation to the right if parent is a right child, or
+        ;; to the left if parent is a left child. NODE then becomes the parent
+        ;; (child of grandparent), therefore parent becomes its child. Thus we
+        ;; swap 'node' to refer to 'parent', and vice versa.
         (when (not (eq direction (ost--direction node)))
           (ost--rotate tree parent direction)
-          (setq node parent
-                parent (ost--node-child grandparent direction)))
+          (cl-rotatef node parent))
 
         ;; Case #6
         (ost--rotate tree grandparent (ost--opposite direction))
@@ -189,26 +232,24 @@ nodes cannot have red children."
   (cl-assert (null (ost-node-black node))) ; Inserted nodes must always be red
   (cl-assert (member direction '(left right)))
   
-  ;; Attach the new node
-  (setf (ost-node-parent node) parent)
+  ;; Attach the new node. New node is always inserted as a leaf node, so we are
+  ;; never replacing an existing child.
+  (when parent
+    (cl-assert (null (ost--node-child parent direction))))
+  (ost--set-parent-child :child node :parent parent :direction direction)
   
   (if (not parent)
-      ;; NODE is root, no need for fixups. Set to black and done.
-      (setf (ost-tree-root tree) node
-            (ost-node-black node) t)
+      ;; NODE is root, no need for fixups
+      (setf (ost-tree-root tree) node)
     
-    ;; New node is always insert as a leaf node, so we are never replacing an
-    ;; existing child.
-    (ost--node-child-set :child node :parent parent :direction direction)
-
     ;; Fix RB tree violations
-    (ost--insert-fixup tree node)
+    (ost--insert-fixup tree node))
 
-    ;; Ensure root is always black
-    (setf (ost-node-black (ost-tree-root tree)) t)))
+  ;; Ensure root is always black
+  (setf (ost-node-black (ost-tree-root tree)) t))
 
 (defun ost-insert (tree key &optional data)
-  "Insert a new node into TREE by its KEY."
+  "Insert a new node into TREE by its KEY, returns node."
   (let ((node (make-ost-node :key key :data data)))
     ;; Standard BST Insert. New node is insert as a leaf node by going down the
     ;; root, comparing the key to each node, going left if it is smaller and
@@ -224,8 +265,27 @@ nodes cannot have red children."
           (setq current (ost-node-right current)
                 direction 'right)))
 
-      (ost--insert tree node parent direction))))
+      (ost--insert tree node parent direction))
+    node))
 
+
+;;;; Build
+
+(defun ost--random-tree (n)
+  "Build a random red-black tree with N nodes."
+  (let ((tree (make-ost-tree)))
+    (dotimes (_ n)
+      (let ((key (random 1000)))
+        (ost-insert tree key key)))
+    tree))
+
+(defun ost--sequence-tree (n &optional print-p)
+  "Build a tree with sequence of ordered keys."
+  (let ((tree (make-ost-tree)))
+    (dotimes (key n)
+      (ost-insert tree key key)
+      (when print-p (ost--node-print tree)))
+    tree))
 
 ;;;; Footer
 

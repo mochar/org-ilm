@@ -1,28 +1,21 @@
 ;;; -*- lexical-binding: t; -*-
 (require 'ost)
 
-(defun ost--random-tree (n)
-  "Build a random red-black tree with N nodes."
-  (let ((tree (make-ost-tree)))
-    (dotimes (_ n)
-      (ost-insert tree (random 1000)))
-    tree))
-
 (describe
  "ost"
  (it "rotates correctly"
      (let* ((root (make-ost-node))
             (tree (make-ost-tree :root root))
-            (left (make-ost-node :parent root))
-            (right (make-ost-node :parent left))
-            (a (make-ost-node :parent left))
-            (b (make-ost-node :parent right))
-            (c (make-ost-node :parent right)))
-       (setf (ost-node-left root) left
-             (ost-node-left left) a
-             (ost-node-right left) right
-             (ost-node-left right) b
-             (ost-node-right right) c)
+            (left (make-ost-node))
+            (right (make-ost-node))
+            (a (make-ost-node))
+            (b (make-ost-node))
+            (c (make-ost-node)))
+       (ost--set-parent-child :child left :parent root :direction 'left)
+       (ost--set-parent-child :child a :parent left :direction 'left)
+       (ost--set-parent-child :child right :parent left :direction 'right)
+       (ost--set-parent-child :child b :parent right :direction 'left)
+       (ost--set-parent-child :child c :parent right :direction 'right)
        (ost--rotate tree left 'left)
        (expect (ost-tree-root tree) :to-equal root)
        (expect (ost-node-left root) :to-equal right)
@@ -35,6 +28,32 @@
        (expect (ost-node-parent c) :to-equal right)
        (expect (ost-node-parent left) :to-equal right)
        (expect (ost-node-parent right) :to-equal root)))
+
+ (it "insert rebalances correctly"
+     (let* ((root (make-ost-node :black t :data "P"))
+            (tree (make-ost-tree :root root))
+            (L (make-ost-node :data "L"))
+            (a (make-ost-node :data "a")))
+       (ost--insert tree L root 'left)
+       (ost--insert tree a L 'left)
+       )
+     )
+
+ (it "inserted keys ordered correctly"
+     (let ((tree (make-ost-tree))
+           (n 10)
+           nodes)
+       (dotimes (i n)
+         (push (ost-insert tree i) nodes))
+       (dotimes (i (1- n))
+         (let* ((j (- n i 1))
+                (n (nth j nodes))
+                (k (ost-node-key n)))
+           (when-let ((left (ost-node-left n)))
+             (expect (ost-node-key left) :to-be-weakly-less-than k))
+           (when-let ((right (ost-node-right n)))
+             (expect (ost-node-key right) :to-be-weakly-greater-than k))
+           ))))
 
  (it "does not have two consecutive nodes that are red"
      (defun ost--no-consecutive-red-p (node &optional parent-red)
@@ -49,5 +68,6 @@
 
      (let ((tree (ost--random-tree 1000)))
        (expect (ost--no-consecutive-red-p (ost-tree-root tree))
-               :to-be t))))
+               :to-be t)))
+
               
