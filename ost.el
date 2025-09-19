@@ -1,4 +1,4 @@
-;;; ost.el --- Ordered statistic tree with red-black B-tree base -*- lexical-binding: t; -*-
+;;; ost.el --- Order statistic tree with red-black B-tree base -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025
 
@@ -9,22 +9,10 @@
 
 ;;; Commentary:
 
-;; This package implements ordered statistic trees with a red-black binary
-;; search tree as a self-balancing base.
+;; This package implements order statistic trees with a red-black binary search
+;; tree as a self-balancing base. An order statistic tree holds an additional
+;; value in each node: the size of the subtree rooted at that node.
 
-;; An ordered statistic tree holds an additional value in each node: the size of
-;; the subtree rooted at that node (number of nodes below it).
-
-;; References:
-;; - https://en.wikipedia.org/wiki/Red-black_tree
-;; - https://en.wikipedia.org/wiki/Order_statistic_tree
-;; - https://en.wikipedia.org/wiki/Binary_search_tree
-
-;;; Code:
-
-(require 'cl-lib)
-
-;;;; Node
 ;; Red-Black Tree properties:
 ;; - Node Color: Each node is either red or black.
 ;; - Root Property: The root of the tree is always black. (contested?)
@@ -37,6 +25,17 @@
 ;; Insert and delete operations need corrections as violations can occur after
 ;; these operations.
 
+;; References:
+;; - https://en.wikipedia.org/wiki/Red-black_tree
+;; - https://en.wikipedia.org/wiki/Order_statistic_tree
+;; - https://en.wikipedia.org/wiki/Binary_search_tree
+
+;;; Code:
+
+(require 'cl-lib)
+
+;;;; Node
+
 (cl-defstruct ost-node
   "A node of a ordered statistic, red-black, binary search tree."
   (black
@@ -47,6 +46,9 @@
    nil
    :documentation "The value on which to sort. Does not need to be unique."
    :type number)
+  (data
+   nil
+   :documentation "Additional data to store in each node.")
   (left
    nil
    :documentation "The left child `ost-node'."
@@ -59,9 +61,10 @@
    nil
    :documentation "The parent `ost-node'. Only nil if root node."
    :type ost-node)
-  (data
-   nil
-   :documentation "Additional data to store in each node.")
+  (size
+   1
+   :documentation "Number of nodes in the subtree."
+   :type number)
   )
 
 (cl-defstruct ost-tree
@@ -77,10 +80,11 @@
       (ost--node-print (ost-tree-root node))
     (let* ((level (or level 0))
            (indent (* 2 level)))
-      (message "%s%sNode (%s) %s"
+      (message "%s%sNode (%s) S:%s D:%s"
                (make-string indent ?\s)
                (if direction (concat (capitalize (symbol-name direction)) ": ") "")
                (if (ost-node-black node) "B" "R")
+               (ost-node-size node)
                (ost-node-data node))
       (when-let ((left (ost-node-left node)))
         (ost--node-print left (1+ level) 'left))
@@ -95,6 +99,16 @@
 
 (defun ost-node-red (node)
   (not (ost-node-black node)))
+
+(defun ost-tree-size (tree)
+  "Return the total number of nodes in TREE."
+  (ost--node-size (ost-tree-root tree)))
+
+(defun ost--node-size (node)
+  "Return the size of NODE's subtree, or 0 if NODE is nil."
+  (if node
+      (ost-node-size node)
+    0))
 
 (cl-defun ost--set-parent-child (&key child parent direction)
   "Set the child of PARENT in DIRECTION to CHILD, and update CHILD to have PARENT as parent."
@@ -172,7 +186,16 @@ Left rotation          ^
     (unless parent
       ;; If NODE was the root of the tree, set new-root to be the root.
       (cl-assert (eq node (ost-tree-root tree)))
-      (setf (ost-tree-root tree) new-root))))
+      (setf (ost-tree-root tree) new-root))
+
+    ;; Update sizes. The new root's size becomes the old size of the original
+    ;; node. The original node's size must be recalculated based on its new
+    ;; children.
+    (setf (ost-node-size new-root) (ost-node-size node))
+    (setf (ost-node-size node) (+ 1
+                                  (ost--node-size (ost-node-left node))
+                                  (ost--node-size (ost-node-right node))))
+    ))
 
 (defun ost--successor (node)
   "Find the in-order successor of NODE.
@@ -206,7 +229,7 @@ For now this means the 'key' and 'data' properties."
   (cl-rotatef (ost-node-data n1) (ost-node-data n2))
   (cl-rotatef (ost-node-key n1) (ost-node-key n2)))
 
-;;;; Search
+;;;; Lookup
 
 (cl-defun ost-search (tree key)
   "Find node with KEY in TREE."
@@ -216,6 +239,58 @@ For now this means the 'key' and 'data' properties."
                      (ost-node-left node)
                    (ost-node-right node))))
     node))
+
+(cl-defun ost-select (tree index)
+  "Return the node with the INDEX-th smallest key in TREE (0-based).
+This is the node at a given 0-based index in the sorted sequence
+of all nodes in the tree. Returns nil or signals an error if
+INDEX is out of bounds."
+  (let* ((root (ost-tree-root tree))
+         (total-size (ost--node-size root)))
+    (when (or (< index 0) (>= index total-size))
+      (error "Index %d is out of bounds for tree of size %d (valid is 0 to %d)"
+             index total-size (1- total-size)))
+
+    (let ((node root))
+      (while node
+        (let ((left-size (ost--node-size (ost-node-left node))))
+          (cond
+           ;; The index of the current node is `left-size`.
+           ((= index left-size)
+            (cl-return-from ost-select node))
+
+           ;; The target is in the left subtree. The index remains the same
+           ;; relative to the left subtree.
+           ((< index left-size)
+            (setq node (ost-node-left node)))
+
+           ;; The target is in the right subtree. We have skipped `left-size`
+           ;; nodes in the left subtree, plus the current node (1).
+           (t
+            (setq index (- index (1+ left-size)))
+            (setq node (ost-node-right node))))))
+      ;; This part should not be reached if the bounds check is correct.
+      nil)))
+
+(defun ost-rank (tree node)
+  "Return the 0-based rank (index) of NODE in TREE.
+The rank is its position in the in-order traversal of the tree,
+starting from 0. Requires NODE to be a node within TREE."
+  (cl-assert (ost-node-p node) nil "Input must be a valid node")
+  ;; The rank starts as the number of nodes in its own left subtree.
+  (let ((rank (ost--node-size (ost-node-left node)))
+        (current node))
+    ;; Now, walk up to the root.
+    (while (ost-node-parent current)
+      ;; If we are coming from a right child, it means we have
+      ;; surpassed all the nodes in the parent's left subtree, plus
+      ;; the parent itself.
+      (when (eq (ost--direction current) 'right)
+        (let ((parent (ost-node-parent current)))
+          (setq rank (+ rank
+                        (1+ (ost--node-size (ost-node-left parent)))))))
+      (setq current (ost-node-parent current)))
+    rank))
 
 ;;;; Insert
 
@@ -304,6 +379,12 @@ nodes cannot have red children."
           (direction 'left)) ; Default for empty tree
       (while current
         (setq parent current)
+
+        ;; As we traverse down the tree to find the insertion point, we
+        ;; increment the size of each node along the path, because the new node
+        ;; will be part of their subtrees.
+        (cl-incf (ost-node-size current))
+        
         (if (< (ost-node-key node) (ost-node-key current))
             (setq current (ost-node-left current)
                   direction 'left)
@@ -314,6 +395,12 @@ nodes cannot have red children."
     node))
 
 ;;;; Remove
+
+(defun ost--decrement-ancestor-sizes (node)
+  "Walk up from NODE and decrement the size of each ancestor."
+  (while node
+    (cl-decf (ost-node-size node))
+    (setq node (ost-node-parent node))))
 
 (cl-defun ost--remove-fixup (tree node parent direction)
   "Rebalance TREE after removal of black NODE with no children.
@@ -395,6 +482,9 @@ This assumes PARENT has already replace NODE with nil."
         ;; Otherwise set the child property of its parent to nil
         (ost--set-parent-child :child nil :parent parent :direction direction)
 
+        ;; Decrement size of all ancestors before potential fixup.
+        (ost--decrement-ancestor-sizes parent)
+
         ;; When node is black, we have an inbalance that needs to be fixed
         (when (ost-node-black node)
           (ost--remove-fixup tree node parent direction))))
@@ -406,6 +496,7 @@ This assumes PARENT has already replace NODE with nil."
      ((and left right)
       (let ((successor (ost--successor node)))
         (ost--swap-values node successor)
+        ;; Node size decrements handled in recursive call
         (ost-remove tree successor)))
 
      ;; One child. Replace NODE with child and color black
@@ -414,6 +505,11 @@ This assumes PARENT has already replace NODE with nil."
         ;; Child must be red and NODE must be black
         (cl-assert (null (ost-node-black child)))
         (cl-assert (ost-node-black node))
+
+        ;; Decrement size of all ancestors. Since NODE is being replaced by 
+        ;; child, the counts don't change below PARENT.
+        (ost--decrement-ancestor-sizes parent)
+
         (ost--set-parent-child :child child :parent parent :direction direction)
         (setf (ost-node-black child) t))))))
 
@@ -434,6 +530,11 @@ This assumes PARENT has already replace NODE with nil."
       (ost-insert tree key key)
       (when print-p (ost--node-print tree)))
     tree))
+
+(defun ost--from-keys (keys)
+  (let ((tree (make-ost-tree)))
+    (dolist (key keys tree)
+      (ost-insert tree key key))))
 
 ;;;; Footer
 

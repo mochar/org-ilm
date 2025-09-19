@@ -29,6 +29,26 @@ or nil if the property is violated."
   (when tree
     (not (null (ost--black-height (ost-tree-root tree))))))
 
+(defun ost--verify-sizes-recursive (node)
+  "Recursively verify that the size of NODE and all its descendants is correct.
+For any given node, its size must be 1 + the size of its left
+child + the size of its right child. Returns t if all sizes are
+correct, nil otherwise."
+  (if (not node)
+      t
+    (let ((correct-size (+ 1
+                           (ost--node-size (ost-node-left node))
+                           (ost--node-size (ost-node-right node))))
+          (stored-size (ost-node-size node)))
+      (and (= correct-size stored-size)
+           (ost--verify-sizes-recursive (ost-node-left node))
+           (ost--verify-sizes-recursive (ost-node-right node))))))
+
+(defun ost-verify-sizes (tree)
+  "Verify that all node sizes in TREE are correct.
+Returns t if the tree is valid, nil otherwise."
+  (ost--verify-sizes-recursive (ost-tree-root tree)))
+
 (describe
  "ost"
  (it "rotates correctly"
@@ -160,6 +180,95 @@ or nil if the property is violated."
            (expect (ost--no-consecutive-red-p (ost-tree-root tree))
                    :to-be t)
            (expect (ost--black-property-p tree) :to-be t)))))
+
+ (it "sizes correct after basic insertion"
+     (let ((tree (make-ost-tree)))
+       (expect (zerop (ost-tree-size tree)))
+       
+       ;; Insert first node
+       (ost-insert tree 10 10)
+       (expect (ost-tree-size tree) :to-equal 1)
+       (expect (ost-verify-sizes tree) :to-be t)
+       
+       ;; Insert second node (left child)
+       (ost-insert tree 5 5)
+       (expect (ost-tree-size tree) :to-equal 2)
+       (expect (ost-verify-sizes tree) :to-be t)
+
+       ;; Insert third node (right child)
+       (ost-insert tree 15 15)
+       (expect (ost-tree-size tree) :to-equal 3)
+       (expect (ost-verify-sizes tree) :to-be t)
+       (let ((root (ost-tree-root tree)))
+         (expect (ost-node-size root) :to-equal 3)
+         (expect (ost-node-size (ost-node-left root)) :to-equal 1)
+         (expect (ost-node-size (ost-node-right root)) :to-equal 1))))
+
+ (it "size correct after various deletion scenarios"
+  (let ((tree (ost--from-keys '(10 5 15 3 7 12 18))))
+    (expect (ost-tree-size tree) :to-equal 7)
+    (expect (ost-verify-sizes tree) :to-be t)
+
+    ;; Case 1: Delete a leaf node (key 3)
+    (ost-remove tree (ost-search tree 3))
+    (expect (ost-tree-size tree) :to-equal 6)
+    (expect (ost-verify-sizes tree) :to-be t))
+
+    ;; Case 2: Delete a node with one child (key 18). First, let's restore the
+    ;; tree and delete 15 instead, which has one child (12)
+    (setq tree (ost--from-keys '(10 5 15 3 7 12 18)))
+    (ost-remove tree (ost-search tree 15))
+    (expect (ost-tree-size tree) :to-equal 6)
+    (expect (ost-verify-sizes tree) :to-be t)
+
+    ;; Case 3: Delete a node with two children (key 5). This involves swapping
+    ;; with the successor (7)
+    (setq tree (ost--from-keys '(10 5 15 3 7 12 18)))
+    (ost-remove tree (ost-search tree 5))
+    (expect (ost-tree-size tree) :to-equal 6)
+    (expect (ost-verify-sizes tree) :to-be t)
+    
+    ;; Case 4: Delete the root node (key 10)
+    ;; This involves swapping with successor (12)
+    (setq tree (ost--from-keys '(10 5 15 3 7 12 18)))
+    (ost-remove tree (ost-search tree 10))
+    (expect (ost-tree-size tree) :to-equal 6)
+    (expect (ost-verify-sizes tree) :to-be t))
+
+  (it "selects and ranks correctly (0-based)"
+     (let* ((n 100)
+            ;; Create a tree with keys 0, 1, 2, ..., 99
+            (tree (ost--from-keys (number-sequence 0 (1- n)))))
+       (dotimes (i n)
+         ;; Select the node that *should* be at index i
+         (let ((node-at-i (ost-select tree i)))
+           ;; Verify its key is i
+           (expect (ost-node-key node-at-i) :to-equal i)
+           ;; Verify that the rank of that node is indeed i
+           (expect (ost-rank tree node-at-i) :to-equal i)))))
+
+ (it "selects and ranks on a more complex tree (0-based)"
+     (let* (;; Insert keys in a shuffled order to create a balanced tree
+            (keys '(10 5 15 3 7 12 18 0 4 6 9 11 14 17 20))
+            (sorted-keys (sort keys #'<))
+            (tree (ost--from-keys keys)))
+       (dotimes (i (length sorted-keys))
+         (let* ((expected-key (nth i sorted-keys))
+                (selected-node (ost-select tree i))
+                (node-to-rank (ost-search tree expected-key)))
+           (expect (ost-node-key selected-node) :to-equal expected-key)
+           (expect (ost-rank tree node-to-rank) :to-equal i)))))
+
+ (it "select throws error for out-of-bounds index"
+     (let ((tree (ost--from-keys '(10 20 30))))
+       (expect (ost-node-key (ost-select tree 0)) :to-equal 10)
+       (expect (ost-node-key (ost-select tree 1)) :to-equal 20)
+       (expect (ost-node-key (ost-select tree 2)) :to-equal 30)
+       
+       ;; And confirm error with `condition-case' for a generic test
+       (expect (ost-select tree 3) :to-throw 'error)
+       (expect (ost-select tree -1) :to-throw 'error)))
+ 
  )
 
 
