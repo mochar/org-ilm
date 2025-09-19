@@ -1,4 +1,4 @@
-;;; utils.el --- Some utility functions -*- lexical-binding: t; -*-
+;;; mochar-utils.el --- Some utility functions -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025
 
@@ -19,7 +19,7 @@
 
 ;;;; Elisp
 
-(cl-defun utils--alist-to-plist (alist &key upcase remove)
+(cl-defun mochar-utils--alist-to-plist (alist &key upcase remove)
   "Convert association list ALIST into the equivalent property-list form.
 
 Direct copy from mm-decode.el"
@@ -34,7 +34,7 @@ Direct copy from mm-decode.el"
     (nreverse plist)))
 
 ;;;; String
-(defun utils--slugify-title (title)
+(defun mochar-utils--slugify-title (title)
   "From TITLE, make a filename slug meant to look nice as URL component.
 
 This is a literal copy-paste from the function
@@ -56,7 +56,7 @@ This is a literal copy-paste from the function
 
 ;;;; Org
 
-(defmacro utils--org-with-point-at (thing &rest body)
+(defmacro mochar-utils--org-with-point-at (thing &rest body)
   "THING for now should be an org-id.
 
 Note: Previously used org-id-find but it put point above
@@ -76,7 +76,7 @@ save-excursion."
 
 ;;;; org-mem / org-node
 
-(defun utils--org-mem-website-refs (&optional entry)
+(defun mochar-utils--org-mem-website-refs (&optional entry)
   (let ((entry (or entry (org-node-at-point))))
     (cl-loop for ref in (org-mem-entry-roam-refs entry)
              for type = (gethash ref org-mem--roam-ref<>type)
@@ -84,7 +84,8 @@ save-excursion."
              collect (concat type ":" ref))))
 
 ;;;; Web
-(defun utils--get-page-title (url &optional slugify)
+
+(defun mochar-utils--get-page-title (url &optional slugify)
   "Get title of web page by URL, or `nil' if not found.
 
 Uses various utilities from `url.el'."
@@ -106,13 +107,13 @@ Uses various utilities from `url.el'."
         (setq web-title-str (decode-coding-string web-title-str (intern coding-charset))))
       (kill-buffer))
     (if slugify
-        (utils--slugify-title web-title-str)
+        (mochar-utils--slugify-title web-title-str)
       web-title-str)))
 
 
 ;;;; Footer
 
-(provide 'utils)
+(provide 'mochar-utils)
 
-;;; utils.el ends here
+;;; mochar-utils.el ends here
 

@@ -26,7 +26,7 @@
 (require 'zotra)
 (require 'parsebib)
 
-(require 'utils)
+(require 'mochar-utils)
 (require 'convtools)
 
 ;;;; Customization
@@ -319,7 +319,7 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 (defun org-registry--entry-contents (entry)
   (cl-assert (org-mem-entry-p entry))
   (save-excursion
-    (utils--org-with-point-at
+    (mochar-utils--org-with-point-at
      (org-mem-entry-id entry)
      (org-registry--org-get-contents))))
 
@@ -678,7 +678,7 @@ environment (multiline), paste it in headline body."
              (title org-id))
 
         (when fetch-title-p
-          (setq title (utils--get-page-title url)))
+          (setq title (mochar-utils--get-page-title url)))
 
         (if download-html-p
             (let ((attach-path (expand-file-name
@@ -796,7 +796,7 @@ See `parsebib-read-entry'."
          "citation"
          (append
           (list title :KEY (alist-get "=key=" bibtex nil nil #'equal))
-          (utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
+          (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
           (list :URL url :ID org-id))
          :template
          (list nil :hook #'org-attach-sync))

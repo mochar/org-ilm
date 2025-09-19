@@ -29,23 +29,18 @@
 (require 'vtable)
 (require 'transient)
 
-(require 'utils)
+(require 'mochar-utils)
 (require 'convtools)
 (require 'org-registry)
+(require 'ost)
 
 ;;;; Global customization
+
 (defgroup org-ilm nil
   "Incremental learning mode."
   :group 'org
   :prefix "org-ilm-"
   :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
-
-(defcustom org-ilm-collections-alist '((ilm . "~/ilm/"))
-  "Alist mapping collection name to path to its org file or directory."
-  :type '(alist :key-type symbol
-                :value-type (choice (file :tag "File")
-                                    (directory :tag "Directory")))
-  :group 'org-ilm)
 
 (defcustom org-ilm-id-from-attachment-path-func 'org-ilm-infer-id-from-attachment-path
   "Function that accepts a path to an attachment file and returns the Org id of the header."
@@ -83,14 +78,6 @@
 (defcustom org-ilm-subject-states '("SUBJ")
   "TODO state of subjects."
   :type '(repeat string)
-  :group 'org-ilm)
-
-(defcustom org-ilm-card-default-location 'collection
-  "Whether to store the card content in the `collection' or as an `attachment'.
-
-When set to `attachment', org-transclusion will be used to transclude the content in the collection during review."
-  :type '(choice (const :tag "Collection" 'collection)
-                 (const :tag "Attachment" 'attachment))
   :group 'org-ilm)
 
 (defcustom org-ilm-debug nil
@@ -168,11 +155,6 @@ When set to `attachment', org-transclusion will be used to transclude the conten
     ))
 
 ;;;; Commands
-;; TODO move commands to appriopriate headings
-
-(defun org-ilm-import-website (url)
-  ""
-  (interactive "sURL: "))
 
 (defun org-ilm-prepare-buffer ()
   "Recreate overlays if current buffer is an attachment Org file."
@@ -339,32 +321,11 @@ If empty return nil, and if only one, return it."
     snippet))
 
 (defun org-ilm--org-narrow-to-header ()
-  ""
+  "Narrow to headline and content up to next heading or end of buffer."
   (org-narrow-to-subtree)
   (save-excursion
-    (org-next-visible-heading 1) (narrow-to-region (point-min) (point))))
-
-(defun org-ilm--collection-file (&optional file collection)
-  "Return collection of which file belongs to.
-A collection symbol COLLECTION can be passed to test if file belongs to
- that collection."
-  (when-let ((file (or file buffer-file-name))
-             (path (expand-file-name file))
-             (test (lambda (f place)
-                     (if (f-directory-p place)
-                         (file-in-directory-p f place)
-                       (file-equal-p f place)))))
-    (if collection
-        (when-let ((col (pcase (type-of collection)
-                          ('symbol
-                           (assoc collection org-ilm-collections-alist))
-                          ('string
-                           (seq-find
-                            (lambda (c) (file-equal-p collection (cdr c)))
-                            org-ilm-collections-alist))
-                          ('cons collection))))
-          (when (funcall test path (cdr col)) col))
-      (seq-find (lambda (c) (funcall test path (cdr c))) org-ilm-collections-alist))))
+    (org-next-visible-heading 1)
+    (narrow-to-region (point-min) (point))))
 
 (defun org-ilm--where-am-i ()
   "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
@@ -480,7 +441,7 @@ With non-nil ASSERT, assert headline must be found, else return nil."
 (defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
   "Return org ids of ancestors of entry."
   (when-let ((entry (if (stringp entry-or-id)
-                        (org-node-by-id entry-or-id)
+                        (org-mem-entry-by-id entry-or-id)
                       entry-or-id)))
     (let ((ancestry
            (delq nil ;; Delete nils returned when no org-id
@@ -515,9 +476,62 @@ The returned function can be used to call `remove-hook' if needed."
     (add-hook hook hook-function depth local)
     hook-function))
 
-;;;; Elements
+;;;; Collection
 
-(defun org-ilm-parse-headline ()
+(defcustom org-ilm-collections '((ilm . "~/ilm/"))
+  "Alist mapping collection name to path to its org file or directory."
+  :type '(alist :key-type symbol
+                :value-type (choice (file :tag "File")
+                                    (directory :tag "Directory")))
+  :group 'org-ilm)
+
+(defun org-ilm--collection-file (&optional file collection)
+  "Return collection of which file belongs to.
+A collection symbol COLLECTION can be passed to test if file belongs to
+ that collection."
+  (when-let ((file (or file buffer-file-name))
+             (path (expand-file-name file))
+             (test (lambda (f place)
+                     (if (f-directory-p place)
+                         (file-in-directory-p f place)
+                       (file-equal-p f place)))))
+    (if collection
+        (when-let ((col (pcase (type-of collection)
+                          ('symbol
+                           (assoc collection org-ilm-collections))
+                          ('string
+                           (seq-find
+                            (lambda (c) (file-equal-p collection (cdr c)))
+                            org-ilm-collections))
+                          ('cons collection))))
+          (when (funcall test path (cdr col)) col))
+      (seq-find (lambda (c) (funcall test path (cdr c))) org-ilm-collections))))
+
+(defun org-ilm--select-collection ()
+  "Prompt user for collection to select from.
+The collections are stored in `org-ilm-collections'."
+  (org-ilm--select-alist org-ilm-collections "Collection: "))
+
+(defun org-ilm--collection-files (collection)
+  "Return all files that belong to COLLECTION."
+  (let ((file-or-dir (alist-get collection org-ilm-collections)))
+    (cond
+     ((f-file-p file-or-dir)
+      (list (expand-file-name file-or-dir)))
+     ((f-dir-p file-or-dir)
+      (f-glob "*.org" file-or-dir))
+     (t (error "No files in collection %s" collection)))))
+
+
+
+;;;; Element
+
+(cl-defstruct org-ilm-element
+  "A piece of knowledge."
+  id state level pcookie rawval title tags sched schedrel
+  type subjects psample)
+
+(defun org-ilm-element-from-headline ()
   "Parse org-ilm data of headline at point.
 
 Was thinking of org-ql--value-at this whole function, but this is
@@ -526,35 +540,35 @@ wasteful if headline does not match query."
   (let* ((headline (org-ilm--org-headline-at-point))
          (todo-keyword (org-element-property :todo-keyword headline))
          (type (cond
-                 ((string= todo-keyword org-ilm-card-state) 'card)
-                 ((string= todo-keyword org-ilm-incr-state) 'incr)
-                 ((member todo-keyword org-ilm-subject-states) 'subj)))
+                ((string= todo-keyword org-ilm-card-state) 'card)
+                ((string= todo-keyword org-ilm-incr-state) 'incr)
+                ((member todo-keyword org-ilm-subject-states) 'subj)))
          (is-card (eq type 'card))
          (scheduled (if is-card
                         (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
                       (ts-parse-org-element (org-element-property :scheduled headline))))
          (now (ts-now)))
 
-    (list
-     ;; Basic headline element properties
-     :todo todo-keyword
+    (make-org-ilm-element
+     ;; Headline element properties
      :id (org-element-property :ID headline)
+     :state todo-keyword
      :level (org-element-property :level headline)
-     :priority (org-ilm--get-priority headline)
-     :raw-value (org-element-property :raw-value headline)
+     :pcookie (org-ilm--get-priority headline)
+     :rawval (org-element-property :raw-value headline)
      :tags (org-element-property :tags headline)
      :title (org-no-properties ; Remove text properties from title
              (org-element-interpret-data (org-element-property :title headline)))
 
-     ;; Our stuff
-     :scheduled scheduled
-     :scheduled-relative (when scheduled ; convert from sec to days
-                           (/ (ts-diff now scheduled) 86400))
+     ;; Ilm stuff
+     :sched scheduled
+     :schedrel (when scheduled ; convert from sec to days
+                 (/ (ts-diff now scheduled) 86400))
      :type type
      ;; :logbook (unless is-card (org-ilm--logbook-read headline))
      ;; cdr to get rid of headline priority in the car - redundant
      :subjects (cdr (org-ilm--priority-subject-gather headline))
-     :priority-sample (org-ilm--sample-priority-from-headline headline))))
+     :psample (org-ilm--sample-priority-from-headline headline))))
 
 (cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
   "Return an element by their org id."
@@ -577,14 +591,10 @@ wasteful if headline does not match query."
                   (current-buffer)
                   if-matches-query
                   t))
-          (org-ilm-parse-headline))))))
-
-(defun org-ilm--select-collection ()
-  "Prompt user for collection to select from.
-The collections are stored in `org-ilm-collections-alist'."
-  (org-ilm--select-alist org-ilm-collections-alist "Collection: "))
+          (org-ilm-element-from-headline))))))
 
 ;;;;; Logbook
+
 (defun org-ilm--logbook-parse (logbook)
   "Parses the Org contents of a logbook drawer entry."
   (let ((contents (org-element-contents logbook)))
@@ -636,8 +646,6 @@ If `HEADLINE' is passed, read it as org-property."
   (if (and headline (plist-member headline :logbook))
       (plist-get headline :logbook)
     (org-ilm--logbook-read headline)))
-
-
 
 ;;;; Capture
 
@@ -787,7 +795,6 @@ The callback ON-ABORT is called when capture is cancelled."
       (org-capture nil "i"))))
 
 ;;;; Org attachment
-;; Org mode attachments
 
 (defun org-ilm-org-extract ()
   "Extract text in region.
@@ -842,7 +849,6 @@ Will become an attachment Org file that is the child heading of current entry."
                (insert target-end)))
            (save-buffer)
            (org-ilm-recreate-overlays)))))))
-
 
 ;;;; PDF attachment
 
@@ -1671,8 +1677,6 @@ make a bunch of headers."
                :on-success
                (lambda (proc buf id) (message "Conversion finished.")))))))))))
 
-
-
 ;;;; Image attachment
 
 (cl-defun org-ilm--image-convert-attachment-to-org (image-path org-id &key on-success on-error)
@@ -1701,10 +1705,9 @@ make a bunch of headers."
      (when (yes-or-no-p "Conversion finished. Use as main attachment?")
        (org-entry-put nil "ILM_EXT" "org")))))
 
-
 ;;;; Attachments
 
-;; org-attach-delete-all
+;; TODO org-attach-delete-all
 
 (defun org-ilm-infer-id-from-attachment-path (path)
   "Attempt parsing the org-id from the attachment path, return (id . location)."
@@ -1784,7 +1787,7 @@ make a bunch of headers."
          pdf-no-region))))
    ;; Check if there is a web link in the ROAM_REFS property and open website in
    ;; eww.
-   ((when-let* ((web-refs (utils--org-mem-website-refs))
+   ((when-let* ((web-refs (mochar-utils--org-mem-website-refs))
                 (web-ref (if (= 1 (length web-refs))
                              (car web-refs)
                            (completing-read "Open: " web-refs nil t))))
@@ -1893,8 +1896,19 @@ See `org-ilm-attachment-transclude'."
         (org-ilm-attachment-transclusion-create)
       (org-ilm-attachment-transclusion-transclude))))
 
-
 ;;;; Targets
+
+;; Targets refer to the anchor points used to highlight extracted or clozed
+;; sections of text in org attachments. It looks like this:
+;; <<{type}:begin:{id}>>bla bla<<{type}:end:{id}>>
+;; Type can be 'card' or 'extract'.
+;; They are called targets because that's what Org mode calls them. Targets are
+;; part of the Org mode spec and are therefore parse by 'org-element'.
+
+;; When an Org mode file is loaded that is recognized as an ilm attachment, the
+;; buffer is parsed for target pairs. For each pair, three overlays are created:
+;; one for each target element to hide it, and one that encapsulates the whole
+;; target region to visually indicate it with a color.
 
 (defun org-ilm--target-parse-string (string &optional with-brackets)
   "Parse and return parts of target string as specified in `org-ilm-target-value-regexp'."
@@ -1962,8 +1976,6 @@ See `org-ilm-attachment-transclude'."
         (delete-region (plist-get (nth 0 targets) :begin)
                        (plist-get (nth 0 targets) :end)))
       (org-ilm-recreate-overlays))))
-    
-
 
 ;;;; Overlays
 
@@ -2047,18 +2059,19 @@ See `org-ilm-attachment-transclude'."
 
 ;;;; Query
 
-(defcustom org-ilm-queries-alist
+(defcustom org-ilm-queries
   `((Outstanding . org-ilm-query-outstanding))
   "Alist mapping query name to a function that returns an org-ql query."
   :type '(alist :key-type symbol :value-type function)
   :group 'org-ilm)
 
-(defcustom org-ilm-custom-queries-alist nil
-  "Do not edit. Auto saved user added queries. See `org-ilm-queries-alist'."
+(defcustom org-ilm-custom-queries nil
+  "Do not edit. Auto saved user added queries. See `org-ilm-queries'."
   :type '(alist :key-type symbol :value-type function)
   :group 'org-ilm)
 
 ;;;;; Queries
+
 ;; Optimizations: https://github.com/alphapapa/org-ql/issues/88#issuecomment-570473621
 ;; + If any data is needed in action and query, use org-ql--value-at
 ;; + Prefer query over custom predicate
@@ -2066,8 +2079,8 @@ See `org-ilm-attachment-transclude'."
 
 (defun org-ilm--compare-priority (first second)
   "Comparator of two headlines by sampled priority."
-  (when-let ((priority-first (plist-get first :priority-sample))
-             (priority-second (plist-get second :priority-sample)))
+  (when-let ((priority-first (org-ilm-element-psample first))
+             (priority-second (org-ilm-element-psample second)))
     (< priority-first priority-second)))
 
 (defun org-ilm--ql-card-due ()
@@ -2077,17 +2090,18 @@ See `org-ilm-attachment-transclude'."
 
 (defun org-ilm-query-collection (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
-  (let ((entries (org-ql-select (cdr (assoc collection org-ilm-collections-alist))
-                   (funcall (cdr (assoc query org-ilm-queries-alist)))
-                   :action #'org-ilm-parse-headline
+  (let* ((files (org-ilm--collection-files collection))
+         (entries (org-ql-select files
+                   (funcall (cdr (assoc query org-ilm-queries)))
+                   :action #'org-ilm-element-from-headline
                    :sort #'org-ilm--compare-priority)))
     entries))
 
 (defun org-ilm-query-buffer (buffer query &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
   (let ((entries (org-ql-select buffer
-                   (funcall (cdr (assoc query org-ilm-queries-alist)))
-                   :action #'org-ilm-parse-headline
+                   (funcall (cdr (assoc query org-ilm-queries)))
+                   :action #'org-ilm-element-from-headline
                    :sort #'org-ilm--compare-priority
                    :narrow narrow)))
     entries))
@@ -2096,13 +2110,11 @@ See `org-ilm-attachment-transclude'."
   "Return list of subjects from COLLECTION.
 
 TODO parse-headline pass arg to not sample priority to prevent recusrive subject search?"
-  (let ((collection (assoc
-                     (or collection (plist-get org-ilm-queue :collection))
-                     org-ilm-collections-alist)))
+  (let ((collection (or collection (plist-get org-ilm-queue :collection))))
     (cl-assert collection)
-    (org-ql-select (cdr collection)
+    (org-ql-select (files (org-ilm--collection-files collection))
       (cons 'todo org-ilm-subject-states)
-      :action #'org-ilm-parse-headline)))
+      :action #'org-ilm-element-from-headline)))
 
 (defun org-ilm-query-outstanding ()
   "Query for org-ql to retrieve the outstanding elements."
@@ -2112,8 +2124,8 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
 
 (defun org-ilm--query-select ()
   "Prompt user for query to select from.
-The queries are stored in `org-ilm-queries-alist'."
-  (org-ilm--select-alist org-ilm-queries-alist "Query: "))
+The queries are stored in `org-ilm-queries'."
+  (org-ilm--select-alist org-ilm-queries "Query: "))
 
 
 ;;;; Queue
@@ -2134,7 +2146,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 (defun org-ilm-queue-elements ()
   "Return elements in the queue."
-  (plist-get org-ilm-queue :queue))
+  (plist-get org-ilm-queue :elements))
 
 (defun org-ilm-queue-empty-p ()
   (= 0 (length (org-ilm-queue-elements))))
@@ -2143,7 +2155,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   (let ((collection (or collection (car (org-ilm--select-collection))))
         (query (or query (car (org-ilm--query-select)))))
     (list
-     :queue (org-ilm-query-collection collection query)
+     :elements (org-ilm-query-collection collection query)
      :collection collection
      :query query)))
 
@@ -2162,20 +2174,19 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 (defun org-ilm--queue-pop ()
   "Remove the top most element in the queue."
-  (when org-ilm-queue
-    (pop (plist-get org-ilm-queue :queue))))
+  (when org-ilm-queue (pop (org-ilm-queue-elements))))
 
 (cl-defun org-ilm--queue-add-by-id (org-id &key if-matches-query position minimum-position)
   (when-let* ((element (org-ilm--element-by-id org-id :if-matches-query if-matches-query))
-              (element (plist-put element :priority-sample 0.85))
-              (queue (plist-get org-ilm-queue :queue))
-              (priority (plist-get element :priority-sample))
+              (_ (setf (org-ilm-element-psample element) 0.85))
+              (queue (org-ilm-queue-elements))
+              (priority (org-ilm-element-psample element))
               (position (or position
                             (max
                              (or minimum-position 0)
                              (cl-position-if
-                              (lambda (el) (> (plist-get el  :priority-sample)
-                                              priority))
+                              (lambda (el)
+                                (> (org-ilm-element-psample el) priority))
                               queue))
                             (length queue))))
     (setq queue
@@ -2184,7 +2195,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
             (append (cl-subseq queue 0 position)
                     (list element)
                     (cl-subseq queue position))))
-    (setf (plist-get org-ilm-queue :queue) queue)))
+    (setf (plist-get org-ilm-queue :elements) queue)))
 
 ;; TODO Finish after rewriting subject cache
 (defun org-ilm-queue-add-dwim (arg)
@@ -2200,8 +2211,8 @@ If point on subject, add all headlines of subject."
         
         )))))
 
-
 ;;;;; Queue view
+
 (defvar org-ilm-queue-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "n")
@@ -2238,29 +2249,30 @@ If point on subject, add all headlines of subject."
 (defun org-ilm--vtable-get-object (&optional index)
   "Return queue object at point or by index."
   (let ((index (or index (vtable-current-object))))
-    (nth index (plist-get org-ilm-queue :queue))))
+    (nth index (org-ilm-queue-elements))))
 
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
   (interactive (list (org-ilm--vtable-get-object)))
-  (org-ilm--attachment-open-by-id (plist-get object :id)))
+  (org-ilm--attachment-open-by-id (org-ilm-element-id object)))
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
   (interactive (list (org-ilm--vtable-get-object)))
-  (org-ilm--org-goto-id (plist-get object :id)))
+  (org-ilm--org-goto-id (org-ilm-element-id object)))
 
 (defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
   (interactive (list (org-ilm--vtable-get-object)))
-  (let* ((id (plist-get object :id)))
+  (let ((id (org-ilm-element-id object)))
     (if (member id org-ilm--queue-marked-objects)
         ;; Only toggle if called interactively
         (when (called-interactively-p)
           ;; not sure why but inconsistent behavior when not setq, even though
           ;; cl-delete is meant to remove destructively.
-          (setq org-ilm--queue-marked-objects (cl-delete id org-ilm--queue-marked-objects  :test #'equal)))
-      (cl-pushnew id org-ilm--queue-marked-objects  :test #'equal))
+          (setq org-ilm--queue-marked-objects
+                (cl-delete id org-ilm--queue-marked-objects :test #'equal)))
+      (cl-pushnew id org-ilm--queue-marked-objects :test #'equal))
     ;; TODO gives cache error no idea why
     ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
     ;; (vtable-update-object (vtable-current-table) object)
@@ -2279,15 +2291,16 @@ If point on subject, add all headlines of subject."
      (lambda (subject) ; Formatter
        (mapconcat
         (lambda (crumb) (nth 3 crumb))
-        (cdr (reverse (org-mem-entry-crumbs (org-node-by-id (plist-get subject :id)))))
+        (cdr (reverse (org-mem-entry-crumbs
+                       (org-mem-entry-by-id (plist-get subject :id)))))
         " > ")))))
 
   ;; Alternatively, we could have used
   ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
   ;; descendancy, but this would require a list-to-list comparison eg with
   ;; `seq-some' per object, instead of just an `assoc'.
-  (dolist (object (plist-get org-ilm-queue :queue))
-    (let ((ancestor-ids (mapcar #'car (car (plist-get object :subjects)))))
+  (dolist (object (org-ilm-queue-elements))
+    (let ((ancestor-ids (mapcar #'car (car (org-ilm-element-subjects object)))))
       (when (member (plist-get subject :id) ancestor-ids)
         (org-ilm-queue-object-mark object)))))
 
@@ -2299,16 +2312,16 @@ If point on subject, add all headlines of subject."
      "Tag: "
      (with-current-buffer (find-file-noselect (cdr (plist-get org-ilm-queue :collection)))
        (org-get-buffer-tags)))))
-  (dolist (object (plist-get org-ilm-queue :queue))
-    (when (member tag (plist-get object :tags))
+  (dolist (object (org-ilm-queue-elements))
+    (when (member tag (org-ilm-element-tags object))
       (org-ilm-queue-object-mark object))))
 
 (defun org-ilm-queue-mark-by-scheduled (days)
   "Mark all elements in queue that are scheduled in DAYS days.
 DAYS can be specified as numeric prefix arg."
   (interactive "N")
-  (dolist (object (plist-get org-ilm-queue :queue))
-    (when-let ((due (* -1 (plist-get object :scheduled-relative))))
+  (dolist (object (org-ilm-queue-elements))
+    (when-let ((due (* -1 (org-ilm-element-schedrel object))))
       (when (<= (round due) days) 
         (org-ilm-queue-object-mark object)))))
 
@@ -2443,17 +2456,17 @@ A lot of formatting code from org-ql."
    :getter
    (lambda (row column vtable)
      (let* ((object (org-ilm--vtable-get-object row))
-            (id (plist-get object :id))
+            (id (org-ilm-element-id object))
             (marked (member id org-ilm--queue-marked-objects))
-            (subjects (plist-get object :subjects)))
+            (subjects (org-ilm-element-subjects object)))
        (pcase (vtable-column vtable column)
          ("Index" (list marked row))
-         ("Type" (list marked (plist-get object :type)))
-         ("Priority" (list marked (plist-get object :priority-sample)))
-         ;; ("Cookie" (list marked (plist-get object :priority)))
-         ("Title" (list marked (plist-get object :title)))
-         ("Due" (list marked (plist-get object :scheduled-relative)))
-         ;; ("Tags" (list marked (plist-get object :tags)))
+         ("Type" (list marked (org-ilm-element-type object)))
+         ("Priority" (list marked (org-ilm-element-psample object)))
+         ;; ("Cookie" (list marked (org-ilm-element-pcookie object)))
+         ("Title" (list marked (org-ilm-element-title object)))
+         ("Due" (list marked (org-ilm-element-schedrel object)))
+         ;; ("Tags" (list marked (org-ilm-element-tags object)))
          ("Subjects"
           (list marked
                 (when (nth 0 subjects)
@@ -2549,7 +2562,7 @@ A lot of formatting code from org-ql."
       (let ((args (org-ilm--import-org-transient-args)))
         (org-ilm-import-org-file
          (plist-get args :file)
-         (assoc org-ilm--active-collection org-ilm-collections-alist)
+         (assoc org-ilm--active-collection org-ilm-collections)
          (intern (plist-get args :method)))))
     :inapt-if-not
     (lambda ()
@@ -2627,7 +2640,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                (title (plist-get args :title))
                (title-object (transient-suffix-object 'org-ilm--import-website-transient-title)))
           (when (or (null title) (string-empty-p title))
-            (oset title-object value (utils--get-page-title url))
+            (oset title-object value (mochar-utils--get-page-title url))
             (transient-set)
             )))
       url)))
@@ -2643,7 +2656,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (lambda (prompt initial-input history)
     (let ((title (read-string prompt initial-input history)))
       (if (string-empty-p title)
-          (utils--get-page-title
+          (mochar-utils--get-page-title
            (plist-get (org-ilm--import-website-transient-args) :url))
         title))))
 
@@ -2666,7 +2679,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           (setq url (eww-current-url))
           (setq title (plist-get eww-data :title))))
       (when (and (not title) url)
-        (setq title (utils--get-page-title url)))
+        (setq title (mochar-utils--get-page-title url)))
       (append
        '("--simplify-to-markdown" "--orgify")
        (when url
@@ -2697,7 +2710,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
        (let* ((args (org-ilm--import-website-transient-args
                      (transient-args 'org-ilm--import-website-transient))))
          (apply #'org-ilm-import-website
-                (assoc (plist-get args :collection) org-ilm-collections-alist)
+                (assoc (plist-get args :collection) org-ilm-collections)
                 (plist-get args :url)
                 args)
          ))
@@ -2760,8 +2773,10 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
 
 ;;;; Stats
+
 ;; Functions to work with e.g. the beta distribution.
-;; Random generation code from Claude.
+;; TODO Out of laziness this code was mostly generated by Claude. Seems ok from
+;; some experiments but need to go through it properly.
 
 (defun org-ilm--random-uniform ()
   "Generate a uniform random number between 0 and 1."
@@ -2865,7 +2880,6 @@ If SEED is provided, sets the random seed first for reproducible results."
     (let ((alpha (- (/ (* mean (- 1 mean)) var) mean)))
       (let ((beta (* alpha (/ (- 1 mean) mean))))
         (list alpha beta)))))
-
 
 ;;;; Priority
 
@@ -3019,7 +3033,6 @@ Headline can be a subject or not."
             ;; Return data
             priority-data)))))
 
-
 ;;;; Scheduling
 
 (defun org-ilm--days-from-now (days)
@@ -3050,6 +3063,7 @@ Headline can be a subject or not."
       (org-ilm--set-schedule-from-priority))))
 
 ;;;; SRS
+
 ;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
 ;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
 ;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
@@ -3221,7 +3235,6 @@ https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169"
 (advice-add 'org-srs-item-goto
             :override #'org-ilm--org-srs-item-goto-override)
 
-
 ;;;; Subjects
 
 ;; TODO Probably still incredibly inefficient as we have to go up the hierarchy
@@ -3240,7 +3253,7 @@ parents, which is defined differently for subjects and extracts/cards:
 - Others: First outline parent + property links of itself or inherited from _non-subject_ ancestors only"
   (let* ((headline (org-ilm--org-headline-from-thing headline-thing 'assert))
          (headline-id (org-element-property :ID headline))
-         (headline-entry (org-node-by-id headline-id))
+         (headline-entry (org-mem-entry-by-id headline-id))
          (headline-ancestry (org-ilm--org-mem-ancestry-ids headline-entry))
          (headline-is-subj (member (org-element-property :todo-keyword headline) org-ilm-subject-states))
          (property-subjects-str "")
@@ -3407,7 +3420,6 @@ TODO Skip if self or descendant."
         (org-entry-put nil "SUBJECTS+"
                        (concat cur-subjects " " subject-link))))))
 
-
 ;;;; Review
 
 (defvar org-ilm--review-current-element-info nil
@@ -3445,7 +3457,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
               (org-ilm--review-header-build))
               ;; '(:eval (org-ilm--review-header-build))))
     ;; Minor mode off
-    (setq header-line-format nil)))
+    (setq header-line-format nil))))
 
 (cl-defun org-ilm-review-start (&key queue)
   (interactive)
@@ -3517,7 +3529,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
       ;; TODO Resample priority
       (when (plist-get org-ilm--review-current-element-info :card-type)
         (org-ilm--queue-add-by-id
-         (plist-get element :id)
+         (org-ilm-element-id element)
          :if-matches-query t
          :minimum-position 5)))
     (org-ilm--review-cleanup-current-element))
@@ -3530,8 +3542,8 @@ Besides storing the attachment buffer, this variable contains redundant data as 
   (cl-assert (not (org-ilm-queue-empty-p)))
   
   (let* ((element (org-ilm--review-top-element))
-         (id (plist-get element :id))
-         (is-card (eq 'card (plist-get element :type)))
+         (id (org-ilm-element-id element))
+         (is-card (eq 'card (org-ilm-element-type element)))
          card-type attachment-buffer)
 
     (org-ilm--org-with-point-at
@@ -3557,7 +3569,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 
     (setq org-ilm--review-current-element-info
           (list :element element
-                :id (plist-get element :id)
+                :id (org-ilm-element-id element)
                 :buffer attachment-buffer
                 :card-type card-type))))
 
@@ -3631,10 +3643,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
           "Again" 'org-ilm-review-rate-again))
         ))
 
-       ))
-
-     )))
-
+       )))
 
 ;;;; Footer
 
