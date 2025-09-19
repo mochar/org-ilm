@@ -325,7 +325,7 @@ This assumes PARENT has already replace NODE with nil."
            (close-nephew (when sibling (ost--node-child sibling direction)))
            (distant-nephew (when sibling (ost--node-child sibling opposite))))
 
-      (when (and sibling (ost-node-red node))
+      (when (and sibling (ost-node-red sibling))
         ;; Case #3
         (ost--rotate tree parent direction)
         (setf (ost-node-black parent) nil
