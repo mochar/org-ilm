@@ -1,6 +1,34 @@
 ;;; -*- lexical-binding: t; -*-
 (require 'ost)
 
+(defun ost--no-consecutive-red-p (node &optional parent-red)
+  "Return t if subtree rooted at NODE has no consecutive red nodes."
+  (if (null node)
+      t
+    (let ((red (not (ost-node-black node))))
+      (if (and parent-red red)
+          nil
+        (and (ost--no-consecutive-red-p (ost-node-left node) red)
+             (ost--no-consecutive-red-p (ost-node-right node) red))))))
+
+(defun ost--black-height (node)
+  "Return the black height of NODE if the subtree satisfies the black property,
+or nil if the property is violated."
+  (if (null node)
+      1  ;; nil nodes count as black
+    (let ((left-height  (ost--black-height (ost-node-left node)))
+          (right-height (ost--black-height (ost-node-right node)))
+          (is-black     (ost-node-black node)))
+      (if (and left-height right-height
+               (= left-height right-height))
+          (+ left-height (if is-black 1 0))
+        nil))))
+
+(defun ost--black-property-p (tree)
+  "Return t if TREE satisfies the black property."
+  (when tree
+    (not (null (ost--black-height (ost-tree-root tree))))))
+
 (describe
  "ost"
  (it "rotates correctly"
@@ -55,21 +83,17 @@
              (expect (ost-node-key right) :to-be-weakly-greater-than k))
            ))))
 
- (it "does not have two consecutive nodes that are red"
-     (defun ost--no-consecutive-red-p (node &optional parent-red)
-       "Return t if subtree rooted at NODE has no consecutive red nodes."
-       (if (null node)
-           t
-         (let ((red (not (ost-node-black node))))
-           (if (and parent-red red)
-               nil
-             (and (ost--no-consecutive-red-p (ost-node-left node) red)
-                  (ost--no-consecutive-red-p (ost-node-right node) red))))))
-
+ ;; Does not have two consecutive nodes that are red
+ (it "red property holds"
      (let ((tree (ost--random-tree 1000)))
        (expect (ost--no-consecutive-red-p (ost-tree-root tree))
                :to-be t)))
 
+ ;; Every path from node to descendant leave has same numberof black nodes
+ (it "black property holds"
+     (let ((tree (ost--random-tree 1000)))
+       (expect (ost--black-property-p tree) :to-be t)))
+ 
  (it "finds correct successor"
      (let ((tree (make-ost-tree))
            (n 100)
@@ -124,6 +148,18 @@
          (expect (ost-node-data (ost-node-right right)) :to-equal "x")
          )))
 
+ (it "deletes correctly (exhaustive)"
+     (let* ((n 1000)
+            (tree (ost--sequence-tree n))
+            done key)
+       (dotimes (i 30)
+         (while (member (setq key (random n)) done))
+         (let ((node (ost-search tree key)))
+           (ost-remove tree node)
+           (push key done)
+           (expect (ost--no-consecutive-red-p (ost-tree-root tree))
+                   :to-be t)
+           (expect (ost--black-property-p tree) :to-be t)))))
  )
 
 

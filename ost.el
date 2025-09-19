@@ -18,8 +18,7 @@
 ;; References:
 ;; - https://en.wikipedia.org/wiki/Red-black_tree
 ;; - https://en.wikipedia.org/wiki/Order_statistic_tree
-;; - https://www.geeksforgeeks.org/dsa/introduction-to-red-black-tree/
-
+;; - https://en.wikipedia.org/wiki/Binary_search_tree
 
 ;;; Code:
 
@@ -93,6 +92,9 @@
   (if (eq direction 'left)
       (ost-node-left node)
     (ost-node-right node)))
+
+(defun ost-node-red (node)
+  (not (ost-node-black node)))
 
 (cl-defun ost--set-parent-child (&key child parent direction)
   "Set the child of PARENT in DIRECTION to CHILD, and update CHILD to have PARENT as parent."
@@ -313,25 +315,90 @@ nodes cannot have red children."
 
 ;;;; Remove
 
+(cl-defun ost--remove-fixup (tree node parent direction)
+  "Rebalance TREE after removal of black NODE with no children.
+
+This assumes PARENT has already replace NODE with nil."
+  (while parent
+    (let* ((opposite (ost--opposite direction))
+           (sibling (ost--node-child parent opposite))
+           (close-nephew (when sibling (ost--node-child sibling direction)))
+           (distant-nephew (when sibling (ost--node-child sibling opposite))))
+
+      (when (and sibling (ost-node-red node))
+        ;; Case #3
+        (ost--rotate tree parent direction)
+        (setf (ost-node-black parent) nil
+              (ost-node-black sibling) t)
+
+        ;; Reassign value after rotation
+        (setq sibling (ost--node-child parent opposite))
+        (setq close-nephew (when sibling (ost--node-child sibling direction))
+              distant-nephew (when sibling (ost--node-child sibling opposite))))
+
+      (when (or (and distant-nephew (ost-node-red distant-nephew))
+                (and close-nephew (ost-node-red close-nephew)))
+
+        (when (and close-nephew
+                   (ost-node-red close-nephew)
+                   (or (null distant-nephew)
+                       (ost-node-black distant-nephew)))
+          ;; Case #5
+          (ost--rotate tree sibling opposite)
+          (setf (ost-node-black sibling) nil
+                (ost-node-black close-nephew) t)
+
+          ;; Update sibling and distant nephew for case #6
+          (setq distant-nephew sibling)
+          (setq sibling close-nephew))
+
+        ;; Case #6
+        (ost--rotate tree parent direction)
+        (setf (ost-node-black sibling) (ost-node-black parent))
+        (setf (ost-node-black parent) t)
+        (when distant-nephew
+          (setf (ost-node-black distant-nephew) t))
+        (cl-return-from ost--remove-fixup))
+
+      (when (ost-node-red parent)
+        ;; Case #4
+        (setf (ost-node-black sibling) nil
+              (ost-node-black parent) t)
+        (cl-return-from ost--remove-fixup))
+
+      ;; Case #2
+      (setf (ost-node-black sibling) nil)
+      (setq node parent)
+      (setq parent (ost-node-parent node))
+      (when parent
+        (setq direction (ost--direction node)))
+
+      )
+    ))
+
 (defun ost-remove (tree node)
   "Remove NODE from TREE."
+  (cl-assert (ost-tree-p tree))
+  (cl-assert (ost-node-p node))
+  
   (let ((parent (ost-node-parent node))
         (direction (ost--direction node))
         (left (ost-node-left node))
         (right (ost-node-right node)))
     (cond
-     ;; No children
+     ;; No children. In standard BST, simply set to nil.
      ((and (null left) (null right))
-      (cond
-       ;; NODE is root, replace with nil, done
-       ((eq (ost-tree-root tree) node)
-        (setf (ost-tree-root tree) nil))
-       ;; NODE is red, remove from parent, done
-       ((null (ost-node-black node))
-        (ost--set-parent-child :child nil :parent parent :direction direction))
-       ;; Node is black. Complex case, requires rebalance.
-       (t))) ;; TODO call fixup
+      (if (eq (ost-tree-root tree) node)
+          ;; NODE is root. Set root to nil.
+          (setf (ost-tree-root tree) nil)
+        
+        ;; Otherwise set the child property of its parent to nil
+        (ost--set-parent-child :child nil :parent parent :direction direction)
 
+        ;; When node is black, we have an inbalance that needs to be fixed
+        (when (ost-node-black node)
+          (ost--remove-fixup tree node parent direction))))
+      
      ;; Two children: Swap its value with its in-order successor (which in this
      ;; case, has to be the leftmost child of the right subtree), and then
      ;; delete the successor. Since the successor is leftmost, it can only have
