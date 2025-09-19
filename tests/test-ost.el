@@ -78,10 +78,10 @@ Returns t if the tree is valid, nil otherwise."
        (expect (ost-node-parent right) :to-equal root)))
 
  (it "insert rebalances correctly"
-     (let* ((root (make-ost-node :black t :data "P"))
+     (let* ((root (make-ost-node :black t :id "P"))
             (tree (make-ost-tree :root root))
-            (L (make-ost-node :data "L"))
-            (a (make-ost-node :data "a")))
+            (L (make-ost-node :id "L"))
+            (a (make-ost-node :id "a")))
        (ost--insert tree L root 'left)
        (ost--insert tree a L 'left)
        )
@@ -127,13 +127,13 @@ Returns t if the tree is valid, nil otherwise."
                    :to-equal (1+ i))))))
 
  (it "swaps values"
-     (let ((n1 (make-ost-node :key 1 :data '(:a 1)))
-           (n2 (make-ost-node :key 2 :data '(:a 2))))
+     (let ((n1 (make-ost-node :key 1 :id '(:a 1)))
+           (n2 (make-ost-node :key 2 :id '(:a 2))))
        (ost--swap-values n1 n2)
        (expect (ost-node-key n1) :to-equal 2)
        (expect (ost-node-key n2) :to-equal 1)
-       (expect (ost-node-data n1) :to-equal '(:a 2))
-       (expect (ost-node-data n2) :to-equal '(:a 1))))
+       (expect (ost-node-id n1) :to-equal '(:a 2))
+       (expect (ost-node-id n2) :to-equal '(:a 1))))
 
  (it "search works"
      (let* ((n 30)
@@ -141,6 +141,13 @@ Returns t if the tree is valid, nil otherwise."
        (dotimes (i n)
          (expect (ost-node-key (ost-search tree i)) :to-equal i))
        (expect (ost-search tree (1+ n)) :to-be nil)))
+
+ (it "search works with id tiebreaker"
+     (let* ((tree (make-ost-tree))
+            (n1 (ost-insert tree 1 "a"))
+            (n2 (ost-insert tree 1 "b")))
+       (expect (ost-search tree 1 "a") :to-be n1)
+       (expect (ost-search tree 1 "b") :to-be n2)))
 
  ;; For deletion tests: https://en.wikipedia.org/wiki/File:BST_node_deletion.png
  
@@ -160,12 +167,12 @@ Returns t if the tree is valid, nil otherwise."
        (let* ((node (ost-tree-root tree))
               (left (ost-node-left node))
               (right (ost-node-right node)))
-         (expect (ost-node-data node) :to-equal "q")
-         (expect (ost-node-data left) :to-equal "_")
-         (expect (ost-node-data right) :to-equal "y")
+         (expect (ost-node-id node) :to-equal "q")
+         (expect (ost-node-id left) :to-equal "_")
+         (expect (ost-node-id right) :to-equal "y")
 
-         (expect (ost-node-data (ost-node-left right)) :to-equal "l")
-         (expect (ost-node-data (ost-node-right right)) :to-equal "x")
+         (expect (ost-node-id (ost-node-left right)) :to-equal "l")
+         (expect (ost-node-id (ost-node-right right)) :to-equal "x")
          )))
 
  (it "deletes correctly (exhaustive)"
@@ -268,8 +275,24 @@ Returns t if the tree is valid, nil otherwise."
        ;; And confirm error with `condition-case' for a generic test
        (expect (ost-select tree 3) :to-throw 'error)
        (expect (ost-select tree -1) :to-throw 'error)))
- 
+
+ (it "keeps tree nodes hashmap in sync"
+     (let* ((tree (make-ost-tree))
+            (n1 (ost-tree-insert tree 1 "a"))
+            (n2 (ost-tree-insert tree 2 "b")))
+       (expect (hash-table-count (ost-tree-nodes tree)) :to-equal 2)
+       (expect (ost-tree-node-by-id tree "a") :to-be n1)
+       (expect (ost-tree-node-by-id tree "b") :to-be n2)
+
+       ;; Swap updates nodes hashmap correctly
+       (setq tree (ost--sequence-tree 5 'with-map))
+       ;; node with id/key 3 has 2 children, so will be swapped with right
+       ;; child, which is node 4.
+       (setq n1 (ost-search tree 3))
+       (expect (ost-node-id n1) :to-be 3)
+       (ost-tree-remove tree n1)
+       (expect (ost-node-id n1) :to-be 4)
+       (expect (gethash 3 (ost-tree-nodes tree)) :to-be nil)
+       (expect (ost-node-key (gethash 4 (ost-tree-nodes tree))) :to-equal 4)))
  )
-
-
               
