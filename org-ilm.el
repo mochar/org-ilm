@@ -2168,7 +2168,10 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   "List of elements.")
 
 (defvar org-ilm-queue-active-buffer nil
-  "The active queue buffer.")
+  "The active queue buffer. Reviewing will happen on this queue.")
+
+(defvar org-ilm-queue-active-buffer-change-hook nil
+  "Hook called when `org-ilm-queue-active-buffer' changes.")
 
 ;;;;; Building a queue buffer
 
@@ -2193,8 +2196,9 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 ;; TODO I think this should be removed
 (cl-defun org-ilm-queue-build (&key buffer select-collection)
-  "Built the queue and store it in `org-ilm-queue'."
+  "Built the queue and store it in a queue buffer, which is returned."
   (interactive "P")
+
   (org-ilm-with-queue-buffer buffer
     (let ((collection (if select-collection
                           (car (org-ilm--select-collection))
@@ -2202,7 +2206,8 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                          (plist-get org-ilm-queue :collection)
                          (car (org-ilm--select-collection)))))
           (query (or (plist-get org-ilm-queue :query) (car (org-ilm--query-select)))))
-      (setq org-ilm-queue (org-ilm--queue-build collection query)))))
+      (setq org-ilm-queue (org-ilm--queue-build collection query))
+      (current-buffer))))
 
 (cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
   "Create a new queue buffer."
@@ -2211,7 +2216,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                          (plist-get queue :collection)
                          (plist-get queue :query)))))
     (when active-p
-      (setq org-ilm-queue-active-buffer buffer))
+      (org-ilm-queue--set-active-buffer buffer))
     (with-current-buffer buffer
       (setq-local org-ilm-queue queue)
 
@@ -2220,7 +2225,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
       (add-hook 'kill-buffer-hook
                 (lambda ()
                   (when (eq (current-buffer) org-ilm-queue-active-buffer)
-                    (setq org-ilm-queue-active-buffer nil)))
+                    (org-ilm-queue--set-active-buffer nil)))
                 nil 'local)
       
       (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p))
@@ -2245,12 +2250,23 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   (ibuffer nil "*Ilm Queue Buffers*"
            '((name . "^\\*Ilm Queue"))))
 
+(defun org-ilm-queue--set-active-buffer (buffer)
+  (cl-assert (or (null buffer) (org-ilm--queue-buffer-p buffer)))
+  (setq org-ilm-queue-active-buffer buffer)
+  (run-hooks 'org-ilm-queue-active-buffer-change-hook))
+
+(defun org-ilm--queue-buffer-current ()
+  "Return the current queue buffer.
+This is either the current buffer if its a queue buffer, or the active
+queue buffer."
+  (or (and (org-ilm--queue-buffer-p (current-buffer)) (current-buffer))
+      org-ilm--review-queue-buffer
+      org-ilm-queue-active-buffer))
+
 (defmacro org-ilm-with-queue-buffer (buffer &rest body)
   "Run BODY with BUFFER set to a valid queue buffer."
   (declare (indent 1))
-  `(let ((buf (or ,buffer
-                  (and (org-ilm--queue-buffer-p (current-buffer)) (current-buffer))
-                  org-ilm-queue-active-buffer)))
+  `(let ((buf (or ,buffer (org-ilm--queue-buffer-current))))
      (unless (and buf (buffer-live-p buf))
        (error "No valid queue buffer found"))
      (with-current-buffer buf
@@ -2270,7 +2286,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
           (unless (eq (current-buffer) org-ilm-queue-active-buffer)
             (switch-to-buffer org-ilm-queue-active-buffer))
         (when (yes-or-no-p "Make current queue the active queue?")
-          (setq org-ilm-queue-active-buffer (current-buffer)))))
+          (org-ilm-queue--set-active-buffer (current-buffer)))))
      ;; If outside a queue buffer and there is an active queue buffer, switch to
      ;; it.
      (org-ilm-queue-active-buffer
@@ -2287,7 +2303,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                  (org-ilm--queue-build)
                  :active-p t :switch-p t)
               (with-current-buffer (switch-to-buffer choice)
-                (setq org-ilm-queue-active-buffer (current-buffer)))))
+                (org-ilm-queue--set-active-buffer (current-buffer)))))
         ;; If outside a queue buffer and there are no active or inactive queue
         ;; buffers, make one and make it active.
         (org-ilm--queue-buffer-create
@@ -2335,7 +2351,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
        (number-sequence 0 (or n (1- (org-ilm-queue-count))))))))
 
 (cl-defun org-ilm-queue-head (&key buffer)
-  (car (org-ilm-queue-select 1 :buffer buffer)))
+  (org-ilm-queue-select 1 :buffer buffer))
 
 (cl-defun org-ilm-queue-elements (&key ordered buffer)
   "Return elements in the queue."
@@ -2381,6 +2397,10 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
                     (cl-subseq queue position))))
     (setf (plist-get org-ilm-queue :elements) queue)))
 
+;; TODO With prefix arg: transient with additional settings
+;; - Mainly queue-specific priorities.
+;; - Exclude cards.
+;; Replace current arg with double arg
 (defun org-ilm-queue-add-dwim (arg)
   "Add element at point to queue. With ARG, add to new queue.
 
@@ -3631,57 +3651,84 @@ TODO Skip if self or descendant."
 
 ;;;; Review
 
+;; Thought about making review stuff buffer local to queue buffer (as
+;; `org-ilm-queue' itself is) but it might get messy. For example org only
+;; allows for having one headline clocked in. In reality there should be only
+;; one review session active anyway.
+
+;; Besides storing the attachment buffer, this variable contains redundant data
+;; as the current element should be the first element in org-ilm-queue. However
+;; this redundancy is useful to make sure everything is still in sync.
 (defvar org-ilm--review-current-element-info nil
-  "Info of the current element being reviewed.
-
-Besides storing the attachment buffer, this variable contains redundant data as the current element should be the first element in org-ilm-queue. However this redundancy is useful to make sure everything is still in sync.")
-
-(defvar org-ilm--review-kill-buffer-hook nil
-  "The buffer-local kill-buffer hook that asks if you want to quit review.")
+  "Info of the current element being reviewed.")
 
 (defun org-ilm-reviewing-p ()
-  "Return non-nil when currently reviewing."
+  "Return t when currently reviewing."
   (not (null org-ilm--review-current-element-info)))
 
-(defvar-keymap org-ilm-review-mode-map
-  :doc "Keymap for `org-ilm-review-mode'."
+(defvar-keymap org-ilm-review-attachment-mode-map
+  :doc "Keymap for `org-ilm-review-attachment-mode'."
   "<f5>" #'org-ilm-review-rate-easy
   "<f6>" #'org-ilm-review-rate-good
   "<f7>" #'org-ilm-review-rate-hard
   "<f8>" #'org-ilm-review-rate-again
   "<f9>" #'org-ilm-review-next)
 
+(defun org-ilm--review-confirm-quit ()
+  "Confirmation before killing the active attachment buffer or queue buffer
+during review."
+  (when (yes-or-no-p "Quit review?")
+    (org-ilm-review-quit)))
+
+;; TODO Might want to make it a global minor mode instead of stuck to just the attachmen
 ;;;###autoload
-(define-minor-mode org-ilm-review-mode
+(define-minor-mode org-ilm-review-attachment-mode
   "Minor mode on attachment buffer that is being reviewed."
   :group 'org-ilm
   :interactive nil ; shouldnt be a command
-  (if org-ilm-review-mode
+  (if org-ilm-review-attachment-mode
       (if (not (org-ilm-reviewing-p))
           (progn
             (message "Not reviewing - quiting minor mode")
-            (org-ilm-review-mode -1))
+            (org-ilm-review-attachment-mode -1))
         ;; Minor mode on
         (setq header-line-format
-              (org-ilm--review-header-build))
-              ;; '(:eval (org-ilm--review-header-build))))
+              (org-ilm--review-header-build)))
     ;; Minor mode off
-    (setq header-line-format nil))))
+    (setq header-line-format nil)))
 
-(cl-defun org-ilm-review-start (&key queue)
+(cl-defun org-ilm-review-start (&key queue-buffer)
+  "Start a review session."
   (interactive)
 
-  ;; TODO dont set manually, use helper function (org-ilm--queue-refresh?)
-  (setq org-ilm-queue (or queue org-ilm-queue (org-ilm--queue-build)))
-  (when (org-ilm-queue-empty-p)
-    (org-ilm-queue-build)
-    (when (org-ilm-queue-empty-p)    
-      (user-error "Queue is empty!")))
+  (when queue-buffer
+    (org-ilm-queue--set-active-buffer queue-buffer))
+
+  (unless org-ilm-queue-active-buffer
+    ;; TODO let user choose inactive one and make it active
+    (user-error "No active queue buffer!"))
+    
+  (org-ilm-with-queue-buffer org-ilm-queue-active-buffer
+    (when (org-ilm-queue-empty-p)
+      (org-ilm-queue-build)
+      (when (org-ilm-queue-empty-p)    
+        (user-error "Queue is empty!")))
+
+    (add-hook 'kill-buffer-hook
+              #'org-ilm--review-confirm-quit nil t))
 
   (org-ilm--review-next))
 
 (defun org-ilm-review-quit ()
   (interactive)
+  ;; Remove kill buffer hooks
+  (dolist (buf (list org-ilm-queue-active-buffer
+                     (plist-get org-ilm--review-current-element-info :buffer)))
+    (when (and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        (remove-hook 'kill-buffer-hook
+                     #'org-ilm--review-confirm-quit
+                     t))))
   (org-ilm--review-cleanup-current-element))
 
 (defun org-ilm-review-next (&optional rating)
@@ -3734,11 +3781,12 @@ Besides storing the attachment buffer, this variable contains redundant data as 
       ;; new review time and add it back to the queue. Set a minimum position in
       ;; the queue so that the card is not reviewed too quickly again.
       ;; TODO Resample priority
-      (when (plist-get org-ilm--review-current-element-info :card-type)
-        (org-ilm--queue-add-by-id
-         (org-ilm-element-id element)
-         :if-matches-query t
-         :minimum-position 5)))
+      ;; (when (plist-get org-ilm--review-current-element-info :card-type)
+      ;;   (org-ilm--queue-add-by-id
+      ;;    (org-ilm-element-id element)
+      ;;    :if-matches-query t
+      ;;    :minimum-position 5))
+      )
     (org-ilm--review-cleanup-current-element))
   (if (org-ilm-queue-empty-p)
       (message "Finished reviewing queue!")
@@ -3753,26 +3801,20 @@ Besides storing the attachment buffer, this variable contains redundant data as 
          (is-card (eq 'card (org-ilm-element-type element)))
          card-type attachment-buffer)
 
-    (org-ilm--org-with-point-at
-     id
-     (when is-card
-       (setq card-type
-             (org-ilm--srs-headline-item-type)))
-     (setq attachment-buffer
-           ;; dont yet switch to the buffer, just return it so we can do some
-           ;; processing first.
-           (save-window-excursion
-             (org-ilm--attachment-open))))
+    (org-ilm--org-with-point-at id
+      (when is-card
+        (setq card-type
+              (org-ilm--srs-headline-item-type)))
+      (setq attachment-buffer
+            ;; dont yet switch to the buffer, just return it so we can do some
+            ;; processing first.
+            (save-window-excursion
+              (org-ilm--attachment-open))))
 
     (with-current-buffer attachment-buffer
-      ;; TODO Move this to `org-ilm-review-mode'
-      (setq org-ilm--review-kill-buffer-hook
-            (org-ilm--add-hook-once
-             'kill-buffer-hook
-             (lambda ()
-               (when (yes-or-no-p "Quit review?")
-                 (org-ilm-review-quit)))
-             nil t)))
+      (add-hook 'kill-buffer-hook
+                #'org-ilm--review-confirm-quit
+                nil t))
 
     (setq org-ilm--review-current-element-info
           (list :element element
@@ -3784,7 +3826,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
   (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
         (card-type (plist-get org-ilm--review-current-element-info :card-type)))
     (with-current-buffer (switch-to-buffer buffer)
-      (org-ilm-review-mode)
+      (org-ilm-review-attachment-mode)
 
       ;; Prepare org-srs card overlays. First tried doing it before poping to
       ;; buffer, but `org-srs-item-review' immediately prompts user to type any
@@ -3793,6 +3835,8 @@ Besides storing the attachment buffer, this variable contains redundant data as 
         (add-hook
          'org-srs-item-after-confirm-hook
          (lambda ()
+           ;; (setq header-line-format
+           ;;    (org-ilm--review-header-build))
            (setq org-ilm--review-current-element-info
                  (plist-put org-ilm--review-current-element-info
                             :card-revealed t)))
@@ -3802,10 +3846,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 (defun org-ilm--review-cleanup-current-element ()
   (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
     (with-current-buffer buffer
-      (org-ilm-review-mode -1))
-    (remove-hook 'kill-buffer-hook
-                 org-ilm--review-kill-buffer-hook
-                 t)
+      (org-ilm-review-attachment-mode -1))
     (kill-buffer buffer))
   (setq org-ilm--review-current-element-info nil))
 
@@ -3813,7 +3854,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
   (propertize
    (substitute-command-keys
     (format 
-     "\\<org-ilm-review-mode-map>[%s `\\[%s]']"
+     "\\<org-ilm-review-attachment-mode-map>[%s `\\[%s]']"
      title (symbol-name func)))
    'mouse-face 'highlight
    'local-map (let ((map (make-sparse-keymap)))
@@ -3821,11 +3862,12 @@ Besides storing the attachment buffer, this variable contains redundant data as 
                 map)))
 
 (defun org-ilm--review-header-build ()
+  "Build the header string of the attachment currently being reviewed."
   (let* ((element (plist-get org-ilm--review-current-element-info :element))
          (card-type (plist-get org-ilm--review-current-element-info :card-type))
          (card-revealed (plist-get org-ilm--review-current-element-info :card-revealed)))
     (concat
-     (propertize "Ilm Review" 'face '(:weight bold :height 1.1))
+     (propertize "Ilm Review" 'face '(:weight bold :height 1.0))
      "   "
      (funcall
       #'concat
