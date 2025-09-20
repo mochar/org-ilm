@@ -261,26 +261,28 @@ If empty return nil, and if only one, return it."
   (pcase (length alist)
     (0 nil)
     (1 (nth 0 alist))
-    (t (let* ((choices (mapcar
-                        (lambda (thing)
-                          (let ((second (if (consp (cdr thing))
-                                            (car (cdr thing))
-                                          (cdr thing))))
-                            (cons
-                             (if formatter
-                                 (funcall formatter thing)
-                               (format "%s %s"
-                                       (propertize
-                                        (if (symbolp (car thing))
-                                            (symbol-name (car thing))
-                                          (car thing))
-                                        'face '(:weight bold))
-                                       (propertize second 'face '(:slant italic))))
-                             thing)))
-                        alist))
-              (choice (completing-read (or prompt "Select: ") choices nil t))
-              (item (cdr (assoc choice choices))))
-         item))))
+    (t
+     (let* ((choices
+             (mapcar
+              (lambda (thing)
+                (let ((second (if (consp (cdr thing))
+                                  (car (cdr thing))
+                                (cdr thing))))
+                  (cons
+                   (if formatter
+                       (funcall formatter thing)
+                     (format "%s %s"
+                             (propertize
+                              (if (symbolp (car thing))
+                                  (symbol-name (car thing))
+                                (car thing))
+                              'face '(:weight bold))
+                             (propertize second 'face '(:slant italic))))
+                   thing)))
+              alist))
+            (choice (completing-read (or prompt "Select: ") choices nil t))
+            (item (cdr (assoc choice choices))))
+       item))))
 
 (defun org-ilm-get-subjects (&optional headline)
   "Returns subjects of headline or parses "
@@ -2133,7 +2135,7 @@ See `org-ilm-attachment-transclude'."
 TODO parse-headline pass arg to not sample priority to prevent recusrive subject search?"
   (let ((collection (or collection (plist-get org-ilm-queue :collection))))
     (cl-assert collection)
-    (org-ql-select (files (org-ilm--collection-files collection))
+    (org-ql-select (org-ilm--collection-files collection)
       (cons 'todo org-ilm-subject-states)
       :action #'org-ilm-element-from-headline)))
 
@@ -2317,6 +2319,8 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
   (org-ilm-with-queue-buffer buffer
     (= 0 (org-ilm-queue-count))))
 
+;; TODO Some type of caching so that repeated selects doesnt search tree again
+;; Should be implemented in `ost-tree-select'.
 (cl-defun org-ilm-queue-select (index &key buffer)
   (org-ilm-with-queue-buffer buffer
     (let ((node (ost-select (plist-get org-ilm-queue :ost) index)))
@@ -2376,7 +2380,6 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
                     (cl-subseq queue position))))
     (setf (plist-get org-ilm-queue :elements) queue)))
 
-;; TODO Finish after rewriting subject cache
 (defun org-ilm-queue-add-dwim (arg)
   "Add element at point to queue. With ARG, add to new queue.
 
@@ -2387,11 +2390,10 @@ If point on subject, add all headlines of subject."
               (type (org-ilm-type headline)))
     (pcase type
       ('subj
-       
+       ;; TODO
        )
 
       ('incr
-       ;; `org-ilm-queue-insert' can throw error that element already in queue.
        (save-excursion
          (org-back-to-heading t)
          (let ((end (save-excursion (org-end-of-subtree t)))
@@ -2399,10 +2401,7 @@ If point on subject, add all headlines of subject."
            (while (< (point) end)
              (when (setq el (org-ilm-element-from-headline))
                (org-ilm-queue-insert el :exists-ok t)
-               (outline-next-heading))))))
-      )
-    
-    ))
+               (outline-next-heading)))))))))
 
 ;;;;; Queue view
 
@@ -2478,15 +2477,7 @@ If point on subject, add all headlines of subject."
   "Mark all elements in queue that are part of SUBJECT."
   (interactive
    (list
-    (org-ilm--select-alist
-     (org-ilm--query-subjects)
-     "Subject: " ; Prompt
-     (lambda (subject) ; Formatter
-       (mapconcat
-        (lambda (crumb) (nth 3 crumb))
-        (cdr (reverse (org-mem-entry-crumbs
-                       (org-mem-entry-by-id (plist-get subject :id)))))
-        " > ")))))
+    (org-ilm--subject-select)))
 
   ;; Alternatively, we could have used
   ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
@@ -2494,7 +2485,7 @@ If point on subject, add all headlines of subject."
   ;; `seq-some' per object, instead of just an `assoc'.
   (dolist (object (org-ilm-queue-elements))
     (let ((ancestor-ids (mapcar #'car (car (org-ilm-element-subjects object)))))
-      (when (member (plist-get subject :id) ancestor-ids)
+      (when (member (org-ilm-element-id subject) ancestor-ids)
         (org-ilm-queue-object-mark object)))))
 
 (defun org-ilm-queue-mark-by-tag (tag)
@@ -3586,6 +3577,26 @@ and again by `org-ilm-queue-mark-by-subject'."
               (push subj-id queue))))))
 
     subject-and-descendants))
+
+;;;;; Functions
+
+(defun org-ilm--subject-select ()
+  (car
+   (org-ilm--select-alist
+    (mapcar
+     (lambda (subject)
+       (cons
+        subject
+        (mapconcat
+         (lambda (crumb) (nth 3 crumb))
+         (cdr (reverse (org-mem-entry-crumbs
+                        (org-mem-entry-by-id
+                         (org-ilm-element-id subject)))))
+         " > ")))
+     (org-ilm--query-subjects))
+    "Subject: " ; Prompt
+    (lambda (subject) ; Formatter
+      (cdr subject)))))
 
 ;;;;; Commands
 
