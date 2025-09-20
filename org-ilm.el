@@ -2215,8 +2215,6 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                  (format "*Ilm Queue (%s|%s)*"
                          (plist-get queue :collection)
                          (plist-get queue :query)))))
-    (when active-p
-      (org-ilm-queue--set-active-buffer buffer))
     (with-current-buffer buffer
       (setq-local org-ilm-queue queue)
 
@@ -2228,7 +2226,10 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                     (org-ilm-queue--set-active-buffer nil)))
                 nil 'local)
       
-      (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p))
+      (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p)
+      
+      (when active-p
+        (org-ilm-queue--set-active-buffer buffer)))
     buffer))
 
 (defun org-ilm--queue-buffer-p (buf)
@@ -3662,40 +3663,54 @@ TODO Skip if self or descendant."
 (defvar org-ilm--review-current-element-info nil
   "Info of the current element being reviewed.")
 
-(defun org-ilm-reviewing-p ()
-  "Return t when currently reviewing."
-  (not (null org-ilm--review-current-element-info)))
+(defvar org-ilm-review-next-hook nil
+  "Hook run when new element has been setup for review.")
 
-(defvar-keymap org-ilm-review-attachment-mode-map
-  :doc "Keymap for `org-ilm-review-attachment-mode'."
+(defvar-keymap org-ilm-review-mode-map
+  :doc "Keymap for `org-ilm-review-mode'."
   "<f5>" #'org-ilm-review-rate-easy
   "<f6>" #'org-ilm-review-rate-good
   "<f7>" #'org-ilm-review-rate-hard
   "<f8>" #'org-ilm-review-rate-again
   "<f9>" #'org-ilm-review-next)
 
+;;;###autoload
+(define-minor-mode org-ilm-review-mode
+  "Minor mode during review."
+  :group 'org-ilm
+  :interactive nil ;; shouldnt be a command
+  (if org-ilm-review-mode
+      (if (null org-ilm-queue-active-buffer)
+          (progn
+            (error "No active queue buffer")
+            (org-ilm-review-mode -1))
+
+        ;;; Minor mode on
+        ;; Add kill hook on queue buffer
+        (with-current-buffer org-ilm-queue-active-buffer
+          (add-hook 'kill-buffer-hook
+                    #'org-ilm--review-confirm-quit nil t))
+        )
+    
+    ;;; Minor mode off
+    ;; Remove kill buffer hooks
+    (when (and org-ilm-queue-active-buffer
+               (buffer-live-p org-ilm-queue-active-buffer))
+      (with-current-buffer org-ilm-queue-active-buffer
+        (remove-hook 'kill-buffer-hook
+                     #'org-ilm--review-confirm-quit
+                     t)))
+    ))
+
+(defun org-ilm-reviewing-p ()
+  "Return t when currently reviewing."
+  org-ilm-review-mode)
+
 (defun org-ilm--review-confirm-quit ()
   "Confirmation before killing the active attachment buffer or queue buffer
 during review."
   (when (yes-or-no-p "Quit review?")
     (org-ilm-review-quit)))
-
-;; TODO Might want to make it a global minor mode instead of stuck to just the attachmen
-;;;###autoload
-(define-minor-mode org-ilm-review-attachment-mode
-  "Minor mode on attachment buffer that is being reviewed."
-  :group 'org-ilm
-  :interactive nil ; shouldnt be a command
-  (if org-ilm-review-attachment-mode
-      (if (not (org-ilm-reviewing-p))
-          (progn
-            (message "Not reviewing - quiting minor mode")
-            (org-ilm-review-attachment-mode -1))
-        ;; Minor mode on
-        (setq header-line-format
-              (org-ilm--review-header-build)))
-    ;; Minor mode off
-    (setq header-line-format nil)))
 
 (cl-defun org-ilm-review-start (&key queue-buffer)
   "Start a review session."
@@ -3707,31 +3722,25 @@ during review."
   (unless org-ilm-queue-active-buffer
     ;; TODO let user choose inactive one and make it active
     (user-error "No active queue buffer!"))
-    
-  (org-ilm-with-queue-buffer org-ilm-queue-active-buffer
+
+  ;; Make sure queue is not empty
+  (with-current-buffer org-ilm-queue-active-buffer
     (when (org-ilm-queue-empty-p)
       (org-ilm-queue-build)
       (when (org-ilm-queue-empty-p)    
-        (user-error "Queue is empty!")))
+        (user-error "Queue is empty!"))))
 
-    (add-hook 'kill-buffer-hook
-              #'org-ilm--review-confirm-quit nil t))
-
+  (org-ilm-review-mode 1)
   (org-ilm--review-next))
 
 (defun org-ilm-review-quit ()
+  "Quit ilm review."
   (interactive)
-  ;; Remove kill buffer hooks
-  (dolist (buf (list org-ilm-queue-active-buffer
-                     (plist-get org-ilm--review-current-element-info :buffer)))
-    (when (and buf (buffer-live-p buf))
-      (with-current-buffer buf
-        (remove-hook 'kill-buffer-hook
-                     #'org-ilm--review-confirm-quit
-                     t))))
-  (org-ilm--review-cleanup-current-element))
+  (org-ilm--review-cleanup-current-element)
+  (org-ilm-review-mode -1))
 
 (defun org-ilm-review-next (&optional rating)
+  "Finish review of current element and go to the next one."
   (interactive)
   (unless (org-ilm-reviewing-p)
     (user-error "Not reviewing."))
@@ -3791,6 +3800,7 @@ during review."
   (if (org-ilm-queue-empty-p)
       (message "Finished reviewing queue!")
     (org-ilm--review-setup-current-element)
+    (run-hooks 'org-ilm-review-next-hook)
     (org-ilm--review-open-current-element)))
 
 (defun org-ilm--review-setup-current-element ()
@@ -3823,10 +3833,12 @@ during review."
                 :card-type card-type))))
 
 (defun org-ilm--review-open-current-element ()
+  ;; TODO Allow for elements with no buffer. Maybe just switch to element in collection.
   (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
         (card-type (plist-get org-ilm--review-current-element-info :card-type)))
     (with-current-buffer (switch-to-buffer buffer)
-      (org-ilm-review-attachment-mode)
+      (setq header-line-format
+              (org-ilm--review-header-build))
 
       ;; Prepare org-srs card overlays. First tried doing it before poping to
       ;; buffer, but `org-srs-item-review' immediately prompts user to type any
@@ -3835,19 +3847,22 @@ during review."
         (add-hook
          'org-srs-item-after-confirm-hook
          (lambda ()
-           ;; (setq header-line-format
-           ;;    (org-ilm--review-header-build))
            (setq org-ilm--review-current-element-info
                  (plist-put org-ilm--review-current-element-info
-                            :card-revealed t)))
+                            :card-revealed t))
+           (setq header-line-format
+              (org-ilm--review-header-build)))
          nil t)
         (org-srs-item-review card-type)))))
 
 (defun org-ilm--review-cleanup-current-element ()
   (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
     (with-current-buffer buffer
-      (org-ilm-review-attachment-mode -1))
-    (kill-buffer buffer))
+      (org-srs-item-cloze-remove-overlays (point-min) (point-max))
+      (setq header-line-format nil)
+      (remove-hook 'kill-buffer-hook
+                   #'org-ilm--review-confirm-quit
+                   t)))
   (setq org-ilm--review-current-element-info nil))
 
 (defun org-ilm--review-header-make-button (title func)
