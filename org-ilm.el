@@ -104,7 +104,8 @@
   "c" #'org-ilm-cloze-toggle-this
   "t" #'org-ilm-attachment-transclude
   "j" #'org-ilm-subject-add
-  "q" #'org-ilm-queue)
+  "q" #'org-ilm-queue
+  "+" #'org-ilm-queue-add-dwim)
 
 (defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
   "Regexp to match values of targets enclosing extracts and clozes.")
@@ -523,6 +524,24 @@ The collections are stored in `org-ilm-collections'."
      (t (error "No files in collection %s" collection)))))
 
 
+;;;; Types
+
+;; There are three headline types: Subjects, Incrs, and Cards.
+
+(defun org-ilm-type (headline-or-state)
+  "Return ilm type from an org headline or its todo state.
+
+See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
+  (let ((state (cond
+                ((org-element-type-p headline-or-state 'headline)
+                 (org-element-property :todo-keyword headline-or-state))
+                ((stringp headline-or-state)
+                 headline-or-state)
+                (t (error "Input must be org headline element or string")))))
+    (cond
+     ((string= state org-ilm-card-state) 'card)
+     ((string= state org-ilm-incr-state) 'incr)
+     ((member state org-ilm-subject-states) 'subj))))
 
 ;;;; Element
 
@@ -531,44 +550,46 @@ The collections are stored in `org-ilm-collections'."
   id state level pcookie rawval title tags sched schedrel
   type subjects psample)
 
-(defun org-ilm-element-from-headline ()
+(defun org-ilm-element-from-headline (&optional headline)
   "Parse org-ilm data of headline at point.
 
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
-  ;; Don't use (org-element-headline-parser (line-end-position)) as org-ql does, it will fail to return parents correctly.
-  (let* ((headline (org-ilm--org-headline-at-point))
-         (todo-keyword (org-element-property :todo-keyword headline))
-         (type (cond
-                ((string= todo-keyword org-ilm-card-state) 'card)
-                ((string= todo-keyword org-ilm-incr-state) 'incr)
-                ((member todo-keyword org-ilm-subject-states) 'subj)))
+
+  (unless headline
+    (setq headline (org-ilm--org-headline-at-point)))
+  
+  (let* ((todo-keyword (org-element-property :todo-keyword headline))
+         (type (org-ilm-type todo-keyword))
          (is-card (eq type 'card))
          (scheduled (if is-card
+                        ;; TODO Move this out to srs section
                         (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
+                      ;; TODO ts-parse-org-element returns non-nil even if no scheduled
                       (ts-parse-org-element (org-element-property :scheduled headline))))
          (now (ts-now)))
 
-    (make-org-ilm-element
-     ;; Headline element properties
-     :id (org-element-property :ID headline)
-     :state todo-keyword
-     :level (org-element-property :level headline)
-     :pcookie (org-ilm--get-priority headline)
-     :rawval (org-element-property :raw-value headline)
-     :tags (org-element-property :tags headline)
-     :title (org-no-properties ; Remove text properties from title
-             (org-element-interpret-data (org-element-property :title headline)))
+    (when type ; non-nil only when org-ilm type
+      (make-org-ilm-element
+       ;; Headline element properties
+       :id (org-element-property :ID headline)
+       :state todo-keyword
+       :level (org-element-property :level headline)
+       :pcookie (org-ilm--get-priority headline)
+       :rawval (org-element-property :raw-value headline)
+       :tags (org-element-property :tags headline)
+       :title (org-no-properties ; Remove text properties from title
+               (org-element-interpret-data (org-element-property :title headline)))
 
-     ;; Ilm stuff
-     :sched scheduled
-     :schedrel (when scheduled ; convert from sec to days
-                 (/ (ts-diff now scheduled) 86400))
-     :type type
-     ;; :logbook (unless is-card (org-ilm--logbook-read headline))
-     ;; cdr to get rid of headline priority in the car - redundant
-     :subjects (cdr (org-ilm--priority-subject-gather headline))
-     :psample (org-ilm--sample-priority-from-headline headline))))
+       ;; Ilm stuff
+       :sched scheduled
+       :schedrel (when scheduled ; convert from sec to days
+                   (/ (ts-diff now scheduled) 86400))
+       :type type
+       ;; :logbook (unless is-card (org-ilm--logbook-read headline))
+       ;; cdr to get rid of headline priority in the car - redundant
+       :subjects (cdr (org-ilm--priority-subject-gather headline))
+       :psample (org-ilm--sample-priority-from-headline headline)))))
 
 (cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
   "Return an element by their org id."
@@ -2141,44 +2162,202 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   :type 'integer
   :group 'org-ilm)
 
-(defvar org-ilm-queue nil
-  "List of elements. This will form the review queue.")
+(defvar-local org-ilm-queue nil
+  "List of elements.")
 
-(defun org-ilm-queue-elements ()
-  "Return elements in the queue."
-  (plist-get org-ilm-queue :elements))
+(defvar org-ilm-queue-active-buffer nil
+  "The active queue buffer.")
 
-(defun org-ilm-queue-empty-p ()
-  (= 0 (length (org-ilm-queue-elements))))
+;;;;; Building a queue buffer
+
+;; Queues are stored locally within each queue buffer.
 
 (defun org-ilm--queue-build (&optional collection query)
-  (let ((collection (or collection (car (org-ilm--select-collection))))
-        (query (or query (car (org-ilm--query-select)))))
+  "Build a queue and return it."
+  (let* ((collection (or collection (car (org-ilm--select-collection))))
+         (query (or query (car (org-ilm--query-select))))
+         (elements (org-ilm-query-collection collection query))
+         (element-map (make-hash-table :test #'equal))
+         (ost (make-ost-tree)))
+    (dolist (element elements)
+      (puthash (org-ilm-element-id element) element element-map)
+      (ost-tree-insert ost (org-ilm-element-psample element)
+                       (org-ilm-element-id element)))
     (list
-     :elements (org-ilm-query-collection collection query)
+     :elements element-map
+     :ost ost
      :collection collection
      :query query)))
 
-(defun org-ilm-queue-refresh (&optional select-collection)
-  "Call the query again."
+;; TODO I think this should be removed
+(cl-defun org-ilm-queue-build (&key buffer select-collection)
+  "Built the queue and store it in `org-ilm-queue'."
   (interactive "P")
-  (let ((collection (if select-collection
-                        (car (org-ilm--select-collection))
-                      (or
-                       (plist-get org-ilm-queue :collection)
-                       (car (org-ilm--select-collection)))))
-        (query (or (plist-get org-ilm-queue :query) (car (org-ilm--query-select)))))
-    (setq org-ilm-queue (org-ilm--queue-build collection query))))
+  (org-ilm-with-queue-buffer buffer
+    (let ((collection (if select-collection
+                          (car (org-ilm--select-collection))
+                        (or
+                         (plist-get org-ilm-queue :collection)
+                         (car (org-ilm--select-collection)))))
+          (query (or (plist-get org-ilm-queue :query) (car (org-ilm--query-select)))))
+      (setq org-ilm-queue (org-ilm--queue-build collection query)))))
+
+(cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
+  "Create a new queue buffer."
+  (let ((buffer (generate-new-buffer
+                 (format "*Ilm Queue (%s|%s)*"
+                         (plist-get queue :collection)
+                         (plist-get queue :query)))))
+    (when active-p
+      (setq org-ilm-queue-active-buffer buffer))
+    (with-current-buffer buffer
+      (setq-local org-ilm-queue queue)
+
+      ;; Make sure that when the queue buffer is killed we update the active
+      ;; buffer.
+      (add-hook 'kill-buffer-hook
+                (lambda ()
+                  (when (eq (current-buffer) org-ilm-queue-active-buffer)
+                    (setq org-ilm-queue-active-buffer nil)))
+                nil 'local)
+      
+      (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p))
+    buffer))
+
+(defun org-ilm--queue-buffer-p (buf)
+  "Tests whether or not BUF is a queue buffer."
+  (with-current-buffer buf
+    (bound-and-true-p org-ilm-queue)))
+
+(defun org-ilm--queue-buffers ()
+  "Return all queue buffers."
+  (seq-filter
+   #'org-ilm--queue-buffer-p
+   (buffer-list)))
+
+(defun org-ilm-queue-buffers ()
+  "View queue buffers in ibuffer."
+  (interactive)
+  ;; TODO use `org-ilm--queue-buffer-p'
+  ;; cannot seem to figure out how!!!!!!!!!!!!!!!!!!!
+  (ibuffer nil "*Ilm Queue Buffers*"
+           '((name . "^\\*Ilm Queue"))))
+
+(defmacro org-ilm-with-queue-buffer (buffer &rest body)
+  "Run BODY with BUFFER set to a valid queue buffer."
+  (declare (indent 1))
+  `(let ((buf (or ,buffer
+                  (and (org-ilm--queue-buffer-p (current-buffer)) (current-buffer))
+                  org-ilm-queue-active-buffer)))
+     (unless (and buf (buffer-live-p buf))
+       (error "No valid queue buffer found"))
+     (with-current-buffer buf
+       ,@body)))
+
+(defun org-ilm-queue (new)
+  "Build a queue and view it in Agenda-like buffer."
+  (interactive "P")
+  (if new
+      (org-ilm--queue-buffer-create
+       (org-ilm--queue-build) :switch-p t)
+    (cond
+     ;; If current buffer is queue buffer, switch to active queue buffer, or ask
+     ;; to make this the active queue buffer.
+     ((org-ilm--queue-buffer-p (current-buffer))
+      (if org-ilm-queue-active-buffer
+          (unless (eq (current-buffer) org-ilm-queue-active-buffer)
+            (switch-to-buffer org-ilm-queue-active-buffer))
+        (when (yes-or-no-p "Make current queue the active queue?")
+          (setq org-ilm-queue-active-buffer (current-buffer)))))
+     ;; If outside a queue buffer and there is an active queue buffer, switch to
+     ;; it.
+     (org-ilm-queue-active-buffer
+      (switch-to-buffer org-ilm-queue-active-buffer))
+     (t
+      (if-let ((buffers (org-ilm--queue-buffers)))
+          ;; If outside a queue buffer and there is no active queue buffer but there
+          ;; are inactive ones, user can choose between switching to one of those,
+          ;; making it active, or creating a new one, making it active.
+          (let* ((candidates (mapcar #'buffer-name buffers))
+                 (choice (completing-read "Queue: " candidates)))
+            (if (string-empty-p choice)
+                (org-ilm--queue-buffer-create
+                 (org-ilm--queue-build)
+                 :active-p t :switch-p t)
+              (with-current-buffer (switch-to-buffer choice)
+                (setq org-ilm-queue-active-buffer (current-buffer)))))
+        ;; If outside a queue buffer and there are no active or inactive queue
+        ;; buffers, make one and make it active.
+        (org-ilm--queue-buffer-create
+         (org-ilm--queue-build)
+         :active-p t :switch-p t))))))
 
 ;;;;; Queue operations
 
-(defun org-ilm--queue-pop ()
+(cl-defun org-ilm-queue-insert (element &key buffer exists-ok)
+  "Insert ELEMENT into the queue.
+When EXISTS-OK, don't throw error if ELEMENT already in queue."
+  (cl-assert (org-ilm-element-p element))
+  (org-ilm-with-queue-buffer buffer
+    (let* ((priority (org-ilm-element-psample element))
+           (id (org-ilm-element-id element))
+           (exists (gethash id (plist-get org-ilm-queue :elements))))
+      (if exists
+          (unless exists-ok
+            (error "Element already in queue (%s)" (org-ilm-element-id element)))
+        (ost-tree-insert (plist-get org-ilm-queue :ost) priority id)
+        (puthash id element (plist-get org-ilm-queue :elements))))))
+
+(cl-defun org-ilm-queue-count (&key buffer)
+  "Return number of elements in the queue."
+  (org-ilm-with-queue-buffer buffer
+    (hash-table-count (plist-get org-ilm-queue :elements))))
+
+(cl-defun org-ilm-queue-empty-p (&key buffer)
+  (org-ilm-with-queue-buffer buffer
+    (= 0 (org-ilm-queue-count))))
+
+(cl-defun org-ilm-queue-select (index &key buffer)
+  (org-ilm-with-queue-buffer buffer
+    (let ((node (ost-select (plist-get org-ilm-queue :ost) index)))
+      (gethash (ost-node-id node) (plist-get org-ilm-queue :elements)))))
+
+(cl-defun org-ilm-queue-top (&key n buffer)
+  (org-ilm-with-queue-buffer buffer
+    (unless (org-ilm-queue-empty-p)
+      (mapcar
+       #'org-ilm-queue-select
+       (number-sequence 0 (or n (1- (org-ilm-queue-count))))))))
+
+(cl-defun org-ilm-queue-head (&key buffer)
+  (car (org-ilm-queue-select 1 :buffer buffer)))
+
+(cl-defun org-ilm-queue-elements (&key ordered buffer)
+  "Return elements in the queue."
+  (org-ilm-with-queue-buffer buffer
+    (if ordered
+        (error "Todo")
+      (hash-table-values (plist-get org-ilm-queue :elements)))))
+
+(cl-defun org-ilm-queue-remove (id &key buffer)
+  (org-ilm-with-queue-buffer buffer
+    (if-let ((element (gethash id (plist-get org-ilm-queue :elements))))
+        (progn
+          (ost-tree-remove (plist-get org-ilm-queue :ost) id)
+          (remhash id (plist-get org-ilm-queue :elements))
+          element)
+      (error "Element not in queue %s" id))))
+
+(cl-defun org-ilm-queue-pop (&key buffer)
   "Remove the top most element in the queue."
-  (when org-ilm-queue (pop (org-ilm-queue-elements))))
+  (org-ilm-with-queue-buffer buffer
+    (when (org-ilm-queue-empty-p)
+      (error "Can't pop an empty queue"))
+    (let ((top (org-ilm-queue-head)))
+      (org-ilm-queue-remove (org-ilm-element-id top)))))
 
 (cl-defun org-ilm--queue-add-by-id (org-id &key if-matches-query position minimum-position)
   (when-let* ((element (org-ilm--element-by-id org-id :if-matches-query if-matches-query))
-              (_ (setf (org-ilm-element-psample element) 0.85))
               (queue (org-ilm-queue-elements))
               (priority (org-ilm-element-psample element))
               (position (or position
@@ -2199,17 +2378,31 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 ;; TODO Finish after rewriting subject cache
 (defun org-ilm-queue-add-dwim (arg)
-  "Add element at point to queue. With ARG, empty queue before adding.
+  "Add element at point to queue. With ARG, add to new queue.
 
 If point on headline, add headline and descendants.
 If point on subject, add all headlines of subject."
   (interactive "P")
-  (when-let ((headline (org-ilm--org-headline-at-point)))
-    (let ((state (org-element-property :todo-keyword headline)))
-      (cond
-       ((member state org-ilm-subject-states)
-        
-        )))))
+  (when-let* ((headline (org-ilm--org-headline-at-point))
+              (type (org-ilm-type headline)))
+    (pcase type
+      ('subj
+       
+       )
+
+      ('incr
+       ;; `org-ilm-queue-insert' can throw error that element already in queue.
+       (save-excursion
+         (org-back-to-heading t)
+         (let ((end (save-excursion (org-end-of-subtree t)))
+               el)
+           (while (< (point) end)
+             (when (setq el (org-ilm-element-from-headline))
+               (org-ilm-queue-insert el :exists-ok t)
+               (outline-next-heading))))))
+      )
+    
+    ))
 
 ;;;;; Queue view
 
@@ -2249,7 +2442,7 @@ If point on subject, add all headlines of subject."
 (defun org-ilm--vtable-get-object (&optional index)
   "Return queue object at point or by index."
   (let ((index (or index (vtable-current-object))))
-    (nth index (org-ilm-queue-elements))))
+    (org-ilm-queue-select index)))
 
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
@@ -2337,9 +2530,10 @@ DAYS can be specified as numeric prefix arg."
   (interactive "P")
   (cond
    ((equal arg '(4))   ;; C-u
-    (org-ilm-queue-refresh))
+    (when (yes-or-no-p "Query again?")
+      (org-ilm-queue-build)))
    ((equal arg '(16))  ;; C-u C-u
-    (org-ilm-queue-refresh 'select-collection)))
+    (org-ilm-queue-build 'select-collection)))
   (vtable-revert-command)
   (org-ilm-queue--set-header))
 
@@ -2363,7 +2557,7 @@ A lot of formatting code from org-ql."
       (lambda (data)
         (pcase-let* ((`(,marked ,index) data)
                      ;; (index-str (format "%d" index)))
-                     (index-str (format "%4d" index)))
+                     (index-str (format "%4d" (1+ index))))
           (org-ilm--vtable-format-marked index-str marked))))
      (:name
       "Priority"
@@ -2450,9 +2644,8 @@ A lot of formatting code from org-ql."
                 "")))))
    :objects-function
    (lambda ()
-     (let ((queue (org-ilm-queue-elements)))
-       (unless (= 0 (length queue))
-         (number-sequence 0 (- (length queue) 1)))))
+     (unless (org-ilm-queue-empty-p)
+       (number-sequence 0 (1- (org-ilm-queue-count)))))
    :getter
    (lambda (row column vtable)
      (let* ((object (org-ilm--vtable-get-object row))
@@ -2474,32 +2667,24 @@ A lot of formatting code from org-ql."
                           (last (nth 0 subjects) (nth 1 subjects)))))))))
    :keymap org-ilm-queue-map))
 
-(defun org-ilm--queue-display ()
-  "Open the active queue."
-  (when (org-ilm-queue-empty-p)
-    (org-ilm-queue-refresh)
+(cl-defun org-ilm--queue-buffer-build (&key buffer switch-p)
+  "Build the contents of the queue buffer, and optionally switch to it."
+  (org-ilm-with-queue-buffer buffer
     (when (org-ilm-queue-empty-p)
-      (user-error "Queue is empty!")))
-  
-  (let ((buf (get-buffer-create "*ilm queue*")))
-    (with-current-buffer buf
-      (setq-local buffer-read-only nil)
-      (erase-buffer)
-      (goto-char (point-min))
-      (vtable-insert (org-ilm--queue-make-vtable))
-      (org-ilm-queue--set-header)
-      (setq-local buffer-read-only t)
-      (hl-line-mode 1)
-      (goto-char (point-min)))
-    (switch-to-buffer buf)))
-
-(defun org-ilm-queue (reset)
-  "View queue in Agenda-like buffer."
-  (interactive "P")
-  (if (and org-ilm-queue (not reset))
-      (org-ilm--queue-display)
-    (org-ilm-queue-refresh)
-    (org-ilm--queue-display)))
+      (org-ilm-queue-build)
+      (when (org-ilm-queue-empty-p)
+        (user-error "Queue is empty!")))
+    
+    (setq-local buffer-read-only nil)
+    (erase-buffer)
+    (goto-char (point-min))
+    (vtable-insert (org-ilm--queue-make-vtable))
+    (org-ilm-queue--set-header)
+    (setq-local buffer-read-only t)
+    (hl-line-mode 1)
+    (goto-char (point-min))
+    (when switch-p
+      (switch-to-buffer buffer))))
 
 
 ;;;; Import
@@ -3402,6 +3587,8 @@ and again by `org-ilm-queue-mark-by-subject'."
 
     subject-and-descendants))
 
+;;;;; Commands
+
 (defun org-ilm-subject-add ()
   "Annotate headline at point with a subject.
 
@@ -3462,9 +3649,10 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 (cl-defun org-ilm-review-start (&key queue)
   (interactive)
 
+  ;; TODO dont set manually, use helper function (org-ilm--queue-refresh?)
   (setq org-ilm-queue (or queue org-ilm-queue (org-ilm--queue-build)))
   (when (org-ilm-queue-empty-p)
-    (org-ilm-queue-refresh)
+    (org-ilm-queue-build)
     (when (org-ilm-queue-empty-p)    
       (user-error "Queue is empty!")))
 
@@ -3517,12 +3705,9 @@ Besides storing the attachment buffer, this variable contains redundant data as 
   (interactive)
   (org-ilm-review-next :again))
 
-(defun org-ilm--review-top-element ()
-  (car (org-ilm-queue-elements)))
-
 (defun org-ilm--review-next ()
   (when org-ilm--review-current-element-info
-    (let ((element (org-ilm--queue-pop)))
+    (let ((element (org-ilm-queue-pop)))
       ;; Card might already be due, eg when rating again. So need to check the
       ;; new review time and add it back to the queue. Set a minimum position in
       ;; the queue so that the card is not reviewed too quickly again.
@@ -3541,7 +3726,7 @@ Besides storing the attachment buffer, this variable contains redundant data as 
 (defun org-ilm--review-setup-current-element ()
   (cl-assert (not (org-ilm-queue-empty-p)))
   
-  (let* ((element (org-ilm--review-top-element))
+  (let* ((element (org-ilm-queue-head))
          (id (org-ilm-element-id element))
          (is-card (eq 'card (org-ilm-element-type element)))
          card-type attachment-buffer)
