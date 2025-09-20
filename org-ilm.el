@@ -2308,7 +2308,8 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
           (unless exists-ok
             (error "Element already in queue (%s)" (org-ilm-element-id element)))
         (ost-tree-insert (plist-get org-ilm-queue :ost) priority id)
-        (puthash id element (plist-get org-ilm-queue :elements))))))
+        (puthash id element (plist-get org-ilm-queue :elements))
+        t))))
 
 (cl-defun org-ilm-queue-count (&key buffer)
   "Return number of elements in the queue."
@@ -2396,12 +2397,15 @@ If point on subject, add all headlines of subject."
       ('incr
        (save-excursion
          (org-back-to-heading t)
-         (let ((end (save-excursion (org-end-of-subtree t)))
+         (let ((n-added 0)
+               (end (save-excursion (org-end-of-subtree t)))
                el)
            (while (< (point) end)
              (when (setq el (org-ilm-element-from-headline))
-               (org-ilm-queue-insert el :exists-ok t)
-               (outline-next-heading)))))))))
+               (when (org-ilm-queue-insert el :exists-ok t)
+                 (cl-incf n-added))
+               (outline-next-heading)))
+           (message "Added %s element(s) to the queue" n-added)))))))
 
 ;;;;; Queue view
 
@@ -2428,6 +2432,7 @@ If point on subject, add all headlines of subject."
     (define-key map (kbd "M j") #'org-ilm-queue-mark-by-subject)
     (define-key map (kbd "M :") #'org-ilm-queue-mark-by-tag)
     (define-key map (kbd "M s") #'org-ilm-queue-mark-by-scheduled)
+    (define-key map (kbd "M u") #'org-ilm-queue-mark-unmark-all)
     ;; TODO r: Review start command
     ;; TODO G: query again - undo manual changes
     ;; TODO C-u G: like G but also select collection
@@ -2435,7 +2440,7 @@ If point on subject, add all headlines of subject."
     map)
   "Keymap for the queue buffer.")
 
-(defvar org-ilm--queue-marked-objects nil
+(defvar-local org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
 
 (defun org-ilm--vtable-get-object (&optional index)
@@ -2508,6 +2513,12 @@ DAYS can be specified as numeric prefix arg."
     (when-let ((due (* -1 (org-ilm-element-schedrel object))))
       (when (<= (round due) days) 
         (org-ilm-queue-object-mark object)))))
+
+(defun org-ilm-queue-mark-unmark-all ()
+  "Unmark all marked elements."
+  (interactive)
+  (setq-local org-ilm--queue-marked-objects nil)
+  (org-ilm-queue-revert))
 
 (defun org-ilm-queue--set-header ()
   (setq header-line-format
