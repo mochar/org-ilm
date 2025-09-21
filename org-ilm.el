@@ -3776,7 +3776,8 @@ during review."
       (with-current-buffer (marker-buffer org-ilm--review-interrupted-clock-marker)
         (save-excursion
           (goto-char org-ilm--review-interrupted-clock-marker)
-          (org-clock-in))))
+          ;; '(64) means to set start-time to be last clock out time
+          (org-clock-in '(64)))))
     (setq org-ilm--review-interrupted-clock-marker nil))
   (run-hooks 'org-ilm-review-quit-hook))
 
