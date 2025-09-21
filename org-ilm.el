@@ -3690,13 +3690,19 @@ TODO Skip if self or descendant."
             (org-ilm-review-mode -1))
 
         ;;; Minor mode on
-        ;; Add kill hook on queue buffer
         (with-current-buffer org-ilm-queue-active-buffer
+          ;; Add kill hook on queue buffer
           (add-hook 'kill-buffer-hook
-                    #'org-ilm--review-confirm-quit nil t))
+                    #'org-ilm--review-confirm-quit nil t)
 
+          ;; Every time the queue buffer is opened during review, refresh it
+          (add-hook 'window-selection-change-functions
+                    #'org-ilm-queue-revert nil t))
+
+        ;; Quit review when the active queue changes
         (add-hook 'org-ilm-queue-active-buffer-change-hook
                   #'org-ilm-review-quit)
+        
         )
     
     ;;; Minor mode off
@@ -3706,6 +3712,9 @@ TODO Skip if self or descendant."
       (with-current-buffer org-ilm-queue-active-buffer
         (remove-hook 'kill-buffer-hook
                      #'org-ilm--review-confirm-quit
+                     t)
+        (remove-hook 'window-selection-change-functions
+                     #'org-ilm-queue-revert
                      t)))
 
     (remove-hook 'org-ilm-queue-active-buffer-change-hook
