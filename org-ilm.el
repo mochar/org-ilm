@@ -397,6 +397,10 @@ save-excursion."
        (org-with-wide-buffer
         ;; Jump to correct position
         (goto-char (org-find-property "ID" org-id))
+        ;; Reveal entry contents, otherwise run into problems parsing the
+        ;; metadata, such as with org-srs drawer
+        (org-fold-show-entry)
+        ;; (org-fold-show-children)
         ,@body))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
@@ -3809,7 +3813,9 @@ during review."
       )
     (org-ilm--review-cleanup-current-element))
   (if (org-ilm-queue-empty-p)
-      (message "Finished reviewing queue!")
+      (progn
+        (message "Finished reviewing queue!")
+        (org-ilm-review-quit))
     (org-ilm--review-setup-current-element)
     (run-hooks 'org-ilm-review-next-hook)
     (org-ilm--review-open-current-element)))
@@ -3826,6 +3832,14 @@ during review."
       (org-ilm--review-open-current-element))))
 
 (defun org-ilm--review-setup-current-element ()
+  "Setup the element about to be reviewed.
+
+The main job is to prepare the variable
+`org-ilm--review-current-element-info', which needs the card-type stored
+in the collection and the attachment buffer.
+TODO Store card type in org-ilm-element? Reason against it is for cards with
+back and front, which are different types, so depends on what is due. But that's
+a whole other problem, since we can only deal with one card (type?) now."
   (cl-assert (not (org-ilm-queue-empty-p)))
 
   (let* ((element (org-ilm-queue-head))

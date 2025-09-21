@@ -240,7 +240,13 @@ Returns t if the tree is valid, nil otherwise."
     (setq tree (ost--from-keys '(10 5 15 3 7 12 18)))
     (ost-remove tree (ost-search tree 10))
     (expect (ost-tree-size tree) :to-equal 6)
-    (expect (ost-verify-sizes tree) :to-be t))
+    (expect (ost-verify-sizes tree) :to-be t)
+
+    ;; Delete remaining nodes
+    (dotimes (i (ost-tree-size tree))
+      (ost-remove tree (ost-select tree 0)))
+
+    )
 
   (it "selects and ranks correctly (0-based)"
      (let* ((n 100)
@@ -279,11 +285,19 @@ Returns t if the tree is valid, nil otherwise."
  (it "keeps tree nodes hashmap in sync"
      (let* ((tree (make-ost-tree))
             (n1 (ost-tree-insert tree 1 "a"))
-            (n2 (ost-tree-insert tree 2 "b")))
-       (expect (hash-table-count (ost-tree-nodes tree)) :to-equal 2)
+            (n2 (ost-tree-insert tree 2 "b"))
+            (n3 (ost-tree-insert tree 3 "c")))
+       (expect (hash-table-count (ost-tree-nodes tree)) :to-equal 3)
        (expect (ost-tree-node-by-id tree "a") :to-be n1)
        (expect (ost-tree-node-by-id tree "b") :to-be n2)
+       (expect (ost-tree-node-by-id tree "c") :to-be n3)
 
+       ;; Remove lowest (index 0)
+       (ost-tree-remove tree (ost-select tree 0))
+       (expect (ost-select tree 0) :to-be (ost-tree-node-by-id tree "b"))
+       (ost-tree-remove tree (ost-select tree 0))
+       (expect (ost-select tree 0) :to-be (ost-tree-node-by-id tree "c"))
+       
        ;; Swap updates nodes hashmap correctly
        (setq tree (ost--sequence-tree 5 'with-map))
        ;; node with id/key 3 has 2 children, so will be swapped with right

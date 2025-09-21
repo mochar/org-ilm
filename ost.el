@@ -163,18 +163,20 @@ Returns the node."
   "Print out node and descendants in hierarchical fashion."
   (if (ost-tree-p node)
       (ost-print (ost-tree-root node))
-    (let* ((level (or level 0))
-           (indent (* 2 level)))
-      (message "%s%sNode %s (%s) S:%s"
-               (make-string indent ?\s)
-               (if direction (concat (capitalize (symbol-name direction)) ": ") "")
-               (ost-node-id node)
-               (if (ost-node-black node) "B" "R")
-               (ost-node-size node))
-      (when-let ((left (ost-node-left node)))
-        (ost-print left (1+ level) 'left))
-      (when-let ((right (ost-node-right node)))
-        (ost-print right (1+ level) 'right)))))
+    (if (null node)
+        (message "Node is nil")
+      (let* ((level (or level 0))
+             (indent (* 2 level)))
+        (message "%s%sNode %s (%s) S:%s"
+                 (make-string indent ?\s)
+                 (if direction (concat (capitalize (symbol-name direction)) ": ") "")
+                 (ost-node-id node)
+                 (if (ost-node-black node) "B" "R")
+                 (ost-node-size node))
+        (when-let ((left (ost-node-left node)))
+          (ost-print left (1+ level) 'left))
+        (when-let ((right (ost-node-right node)))
+          (ost-print right (1+ level) 'right))))))
 
 ;;;; Operations
 
@@ -579,7 +581,19 @@ This assumes PARENT has already replace NODE with nil."
         ;; child, the counts don't change below PARENT.
         (ost--decrement-ancestor-sizes parent)
 
-        (ost--set-parent-child :child child :parent parent :direction direction)
+        ;; (ost--set-parent-child :child child :parent parent :direction direction)
+        
+        ;; Replace node with its child.
+        (if parent
+            ;; If there's a parent, connect child to it.
+            (ost--set-parent-child :child child :parent parent :direction direction)
+          ;; Otherwise, NODE was the root. The child is the new root.
+          (progn
+            (setf (ost-tree-root tree) child)
+            ;; The new root has no parent.
+            (setf (ost-node-parent child) nil)))
+
+        ;; The replacing child must become black.
         (setf (ost-node-black child) t))))))
 
 ;;;; Build
