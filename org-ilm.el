@@ -2229,6 +2229,12 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                   (when (eq (current-buffer) org-ilm-queue-active-buffer)
                     (org-ilm-queue--set-active-buffer nil)))
                 nil 'local)
+
+      ;; Refresh when queue popped during review
+      (add-hook 'org-ilm-review-next-hook
+                #'org-ilm-queue-revert nil t)
+      (add-hook 'org-ilm-review-quit-hook
+                #'org-ilm-queue-revert nil t)
       
       (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p)
       
@@ -3669,6 +3675,9 @@ TODO Skip if self or descendant."
 (defvar org-ilm-review-next-hook nil
   "Hook run when new element has been setup for review.")
 
+(defvar org-ilm-review-quit-hook nil
+  "Hook run when review session stopped.")
+
 (defvar-keymap org-ilm-review-mode-map
   :doc "Keymap for `org-ilm-review-mode'."
   "<f5>" #'org-ilm-review-rate-easy
@@ -3693,11 +3702,7 @@ TODO Skip if self or descendant."
         (with-current-buffer org-ilm-queue-active-buffer
           ;; Add kill hook on queue buffer
           (add-hook 'kill-buffer-hook
-                    #'org-ilm--review-confirm-quit nil t)
-
-          ;; Every time the queue buffer is opened during review, refresh it
-          (add-hook 'window-selection-change-functions
-                    #'org-ilm-queue-revert nil t))
+                    #'org-ilm--review-confirm-quit nil t))
 
         ;; Quit review when the active queue changes
         (add-hook 'org-ilm-queue-active-buffer-change-hook
@@ -3712,9 +3717,6 @@ TODO Skip if self or descendant."
       (with-current-buffer org-ilm-queue-active-buffer
         (remove-hook 'kill-buffer-hook
                      #'org-ilm--review-confirm-quit
-                     t)
-        (remove-hook 'window-selection-change-functions
-                     #'org-ilm-queue-revert
                      t)))
 
     (remove-hook 'org-ilm-queue-active-buffer-change-hook
@@ -3761,7 +3763,8 @@ during review."
   "Quit ilm review."
   (interactive)
   (org-ilm--review-cleanup-current-element)
-  (org-ilm-review-mode -1))
+  (org-ilm-review-mode -1)
+  (run-hooks 'org-ilm-review-quit-hook))
 
 (defun org-ilm-review-next (&optional rating)
   "Finish review of current element and go to the next one."
