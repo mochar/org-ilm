@@ -3672,6 +3672,9 @@ TODO Skip if self or descendant."
 (defvar org-ilm--review-current-element-info nil
   "Info of the current element being reviewed.")
 
+(defvar org-ilm--review-interrupted-clock-marker nil
+  "Stores the `org-clock-marker' of the interrupted clock when review started.")
+
 (defvar org-ilm-review-next-hook nil
   "Hook run when new element has been setup for review.")
 
@@ -3756,6 +3759,10 @@ during review."
       (when (org-ilm-queue-empty-p)    
         (user-error "Queue is empty!"))))
 
+  ;; Store clocked-in task so that we can clock back in when done
+  (setq org-ilm--review-interrupted-clock-marker
+        (when (org-clocking-p) (copy-marker org-clock-marker)))
+
   (org-ilm-review-mode 1)
   (org-ilm--review-next))
 
@@ -3764,6 +3771,13 @@ during review."
   (interactive)
   (org-ilm--review-cleanup-current-element)
   (org-ilm-review-mode -1)
+  (when org-ilm--review-interrupted-clock-marker
+    (when (markerp org-ilm--review-interrupted-clock-marker)
+      (with-current-buffer (marker-buffer org-ilm--review-interrupted-clock-marker)
+        (save-excursion
+          (goto-char org-ilm--review-interrupted-clock-marker)
+          (org-clock-in))))
+    (setq org-ilm--review-interrupted-clock-marker nil))
   (run-hooks 'org-ilm-review-quit-hook))
 
 (defun org-ilm-review-next (&optional rating)
@@ -3867,7 +3881,8 @@ a whole other problem, since we can only deal with one card (type?) now."
             ;; dont yet switch to the buffer, just return it so we can do some
             ;; processing first.
             (save-window-excursion
-              (org-ilm--attachment-open))))
+              (org-ilm--attachment-open)))
+      (org-clock-in))
 
     (with-current-buffer attachment-buffer
       (add-hook 'kill-buffer-hook
@@ -3912,6 +3927,9 @@ a whole other problem, since we can only deal with one card (type?) now."
                    #'org-ilm--review-confirm-quit
                    t))
     (kill-buffer buffer))
+  ;; Strictly speaking not necessary: clocking into next task will clock out
+  ;; this one. 
+  (org-clock-out nil 'fail-quietly)
   (setq org-ilm--review-current-element-info nil))
 
 (defun org-ilm--review-header-make-button (title func)
