@@ -2261,7 +2261,6 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 This is either the current buffer if its a queue buffer, or the active
 queue buffer."
   (or (and (org-ilm--queue-buffer-p (current-buffer)) (current-buffer))
-      org-ilm--review-queue-buffer
       org-ilm-queue-active-buffer))
 
 (defmacro org-ilm-with-queue-buffer (buffer &rest body)
@@ -2352,7 +2351,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
        (number-sequence 0 (or n (1- (org-ilm-queue-count))))))))
 
 (cl-defun org-ilm-queue-head (&key buffer)
-  (org-ilm-queue-select 1 :buffer buffer))
+  (org-ilm-queue-select 0 :buffer buffer))
 
 (cl-defun org-ilm-queue-elements (&key ordered buffer)
   "Return elements in the queue."
@@ -3678,6 +3677,7 @@ TODO Skip if self or descendant."
 (define-minor-mode org-ilm-review-mode
   "Minor mode during review."
   :group 'org-ilm
+  :global t
   :interactive nil ;; shouldnt be a command
   (if org-ilm-review-mode
       (if (null org-ilm-queue-active-buffer)
@@ -3690,6 +3690,9 @@ TODO Skip if self or descendant."
         (with-current-buffer org-ilm-queue-active-buffer
           (add-hook 'kill-buffer-hook
                     #'org-ilm--review-confirm-quit nil t))
+
+        (add-hook 'org-ilm-queue-active-buffer-change-hook
+                  #'org-ilm-review-quit)
         )
     
     ;;; Minor mode off
@@ -3700,6 +3703,9 @@ TODO Skip if self or descendant."
         (remove-hook 'kill-buffer-hook
                      #'org-ilm--review-confirm-quit
                      t)))
+
+    (remove-hook 'org-ilm-queue-active-buffer-change-hook
+                 #'org-ilm-review-quit)
     ))
 
 (defun org-ilm-reviewing-p ()
@@ -3715,6 +3721,11 @@ during review."
 (cl-defun org-ilm-review-start (&key queue-buffer)
   "Start a review session."
   (interactive)
+
+  (when (org-ilm-reviewing-p)
+    (when (yes-or-no-p "Already reviewing! Jump to element being reviewed? ")
+      (org-ilm-review-open-current))
+    (cl-return-from org-ilm-review-start))
 
   (when queue-buffer
     (org-ilm-queue--set-active-buffer queue-buffer))
@@ -3803,9 +3814,20 @@ during review."
     (run-hooks 'org-ilm-review-next-hook)
     (org-ilm--review-open-current-element)))
 
+(defun org-ilm-review-open-current ()
+  (interactive)
+  (let ((buf (plist-get org-ilm--review-current-element-info :buffer)))
+    (if (and org-ilm--review-current-element-info (buffer-live-p buf))
+        (switch-to-buffer buf)
+      ;; Setup current element again if that data somehow lost. Mainly for when the
+      ;; buffer is killed, it needs to be setup again. The setup function doesn't
+      ;; change the queue or anything, so its safe to call it again.
+      (org-ilm--review-setup-current-element)
+      (org-ilm--review-open-current-element))))
+
 (defun org-ilm--review-setup-current-element ()
   (cl-assert (not (org-ilm-queue-empty-p)))
-  
+
   (let* ((element (org-ilm-queue-head))
          (id (org-ilm-element-id element))
          (is-card (eq 'card (org-ilm-element-type element)))
@@ -3862,7 +3884,8 @@ during review."
       (setq header-line-format nil)
       (remove-hook 'kill-buffer-hook
                    #'org-ilm--review-confirm-quit
-                   t)))
+                   t))
+    (kill-buffer buffer))
   (setq org-ilm--review-current-element-info nil))
 
 (defun org-ilm--review-header-make-button (title func)
