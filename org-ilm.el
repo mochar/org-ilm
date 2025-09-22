@@ -27,6 +27,7 @@
 (require 'dash)
 (require 'ts)
 (require 'vtable)
+(require 'eldoc)
 (require 'transient)
 
 (require 'mochar-utils)
@@ -65,12 +66,12 @@
   :type 'number
   :group 'org-ilm)
 
-(defcustom org-ilm-incr-state "INCR"
+(defcustom org-ilm-incr-states '("INCR")
   "TODO state of elements to be processed incrementally."
   :type 'string
   :group 'org-ilm)
 
-(defcustom org-ilm-card-state "CARD"
+(defcustom org-ilm-card-states '("CARD")
   "TODO state of flash cards."
   :type 'string
   :group 'org-ilm)
@@ -363,12 +364,22 @@ If empty return nil, and if only one, return it."
   (org-mem-entry-by-id string))
 
 (defun org-ilm--org-headline-at-point ()
-  "Return headline at point.
-
-TODO org-ql uses following snippet in query action, is it more efficient?
-(org-element-headline-parser (line-end-position))"
+  "Return headline at point."
   (let ((element (org-element-at-point)))
     (when (eq (car element) 'headline)
+      ;; TODO Seems that when buffer local priority ranges differ from global
+      ;; ones, org-element returns nil as priority. Also sometimes priority
+      ;; returned as their numerical value, sometimes as char number. Solution
+      ;; is to parse the header manually.
+      (save-excursion
+        (beginning-of-line)
+        ;; Previously used org-entry-get but it fails sometimes and I forgot why :)
+        ;; (let ((priority (string-trim (org-entry-get nil "PRIORITY"))))
+        (looking-at org-priority-regexp)
+        (let ((priority (match-string-no-properties 2)))
+          (when priority
+            (setq priority (string-to-number priority)))
+        (setq element (org-element-put-property element :priority priority))))
       element)))
 
 (defun org-ilm--org-goto-id (org-id)
@@ -398,10 +409,14 @@ save-excursion."
         ;; Jump to correct position
         (goto-char (org-find-property "ID" org-id))
         ;; Reveal entry contents, otherwise run into problems parsing the
-        ;; metadata, such as with org-srs drawer
-        (org-fold-show-entry)
-        ;; (org-fold-show-children)
-        ,@body))))
+        ;; metadata, such as with org-srs drawer. Need to save outline
+        ;; visiblity, otherwise will unfold headers.
+        (org-save-outline-visibility nil
+          ;; Just folding line region also seems to work from limited testing,
+          ;; but play it safe
+          ;; (org-fold-region (line-end-position 0) (line-end-position) nil)
+          (org-fold-show-entry)
+          ,@body)))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
@@ -545,8 +560,8 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
                  headline-or-state)
                 (t (error "Input must be org headline element or string")))))
     (cond
-     ((string= state org-ilm-card-state) 'card)
-     ((string= state org-ilm-incr-state) 'incr)
+     ((member state org-ilm-card-states) 'card)
+     ((member state org-ilm-incr-states) 'incr)
      ((member state org-ilm-subject-states) 'subj))))
 
 ;;;; Element
@@ -554,18 +569,15 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
   id state level pcookie rawval title tags sched schedrel
-  type subjects psample)
+  type subjects prelative psample)
 
-(defun org-ilm-element-from-headline (&optional headline)
+(defun org-ilm-element-at-point ()
   "Parse org-ilm data of headline at point.
 
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
-
-  (unless headline
-    (setq headline (org-ilm--org-headline-at-point)))
-  
-  (let* ((todo-keyword (org-element-property :todo-keyword headline))
+  (let* ((headline (org-ilm--org-headline-at-point))
+         (todo-keyword (org-element-property :todo-keyword headline))
          (type (org-ilm-type todo-keyword))
          (is-card (eq type 'card))
          (scheduled (if is-card
@@ -573,7 +585,8 @@ wasteful if headline does not match query."
                         (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
                       ;; TODO ts-parse-org-element returns non-nil even if no scheduled
                       (ts-parse-org-element (org-element-property :scheduled headline))))
-         (now (ts-now)))
+         (now (ts-now))
+         (priority (org-ilm--get-priority headline)))
 
     (when type ; non-nil only when org-ilm type
       (make-org-ilm-element
@@ -581,7 +594,7 @@ wasteful if headline does not match query."
        :id (org-element-property :ID headline)
        :state todo-keyword
        :level (org-element-property :level headline)
-       :pcookie (org-ilm--get-priority headline)
+       :pcookie (car priority)
        :rawval (org-element-property :raw-value headline)
        :tags (org-element-property :tags headline)
        :title (org-no-properties ; Remove text properties from title
@@ -595,7 +608,8 @@ wasteful if headline does not match query."
        ;; :logbook (unless is-card (org-ilm--logbook-read headline))
        ;; cdr to get rid of headline priority in the car - redundant
        :subjects (cdr (org-ilm--priority-subject-gather headline))
-       :psample (org-ilm--sample-priority-from-headline headline)))))
+       :prelative (cdr priority)
+       :psample (org-ilm--sample-priority-at-point headline)))))
 
 (cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
   "Return an element by their org id."
@@ -618,7 +632,7 @@ wasteful if headline does not match query."
                   (current-buffer)
                   if-matches-query
                   t))
-          (org-ilm-element-from-headline))))))
+          (org-ilm-element-at-point))))))
 
 ;;;;; Logbook
 
@@ -682,7 +696,7 @@ If `HEADLINE' is passed, read it as org-property."
 The callback ON-SUCCESS is called when capture is saved.
 The callback ON-ABORT is called when capture is cancelled."
   (cl-assert (member type '(extract card source)))
-  (let* ((state (if (eq type 'card) org-ilm-card-state org-ilm-incr-state))
+  (let* ((state (car (if (eq type 'card) org-ilm-card-states org-ilm-incr-states)))
          (target (if (stringp target-or-id)
                      ;; Originally used the built-in 'id target, however for
                      ;; some reason it sometimes finds the wrong location which
@@ -693,7 +707,8 @@ The callback ON-ABORT is called when capture is cancelled."
                      ;; `(id ,target-or-id)
                      (list 'function
                            (lambda ()
-                             (org-node-goto-id target-or-id)))
+                             (org-node-goto-id target-or-id)
+                             (org-back-to-heading)))
                    target-or-id))
          (title (plist-get data :title))
          (id (or (plist-get data :id) (org-id-new)))
@@ -1447,7 +1462,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     (list org-id attach-dir attachment buffer collection headline
           (org-element-property :level headline)
           (org-ilm--interval-to-schedule-string
-           (org-ilm--schedule-interval-from-priority 5)))))
+           (org-ilm--schedule-interval-from-priority .5)))))
 
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
@@ -1812,16 +1827,6 @@ make a bunch of headers."
          (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
          buffer-name
          pdf-no-region))))
-   ;; Check if there is a web link in the ROAM_REFS property and open website in
-   ;; eww.
-   ((when-let* ((web-refs (mochar-utils--org-mem-website-refs))
-                (web-ref (if (= 1 (length web-refs))
-                             (car web-refs)
-                           (completing-read "Open: " web-refs nil t))))
-      ;; We use window excursion so that we can return the eww buffer
-      (save-window-excursion
-        (eww-browse-url web-ref))
-      (switch-to-buffer "*eww*")))
    ;; Check if attachment is in the process of being generated with a conversion
    ;; tool.
    ((when-let* ((org-id (org-id-get))
@@ -1838,6 +1843,16 @@ make a bunch of headers."
                        (t "Attachment still being converted."))))
         (when (yes-or-no-p (concat message " View conversion buffer?"))
           (pop-to-buffer (plist-get conversion :buffer))))))
+   ;; Check if there is a web link in the ROAM_REFS property and open website in
+   ;; eww.
+   ((when-let* ((web-refs (mochar-utils--org-mem-website-refs))
+                (web-ref (if (= 1 (length web-refs))
+                             (car web-refs)
+                           (completing-read "Open: " web-refs nil t))))
+      ;; We use window excursion so that we can return the eww buffer
+      (save-window-excursion
+        (eww-browse-url web-ref))
+      (switch-to-buffer "*eww*")))
    (t (user-error "Attachment not found"))))
   
 (defun org-ilm--attachment-open-by-id (id)
@@ -2120,16 +2135,14 @@ See `org-ilm-attachment-transclude'."
   (let* ((files (org-ilm--collection-files collection))
          (entries (org-ql-select files
                    (funcall (cdr (assoc query org-ilm-queries)))
-                   :action #'org-ilm-element-from-headline
-                   :sort #'org-ilm--compare-priority)))
+                   :action #'org-ilm-element-at-point)))
     entries))
 
 (defun org-ilm-query-buffer (buffer query &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
   (let ((entries (org-ql-select buffer
                    (funcall (cdr (assoc query org-ilm-queries)))
-                   :action #'org-ilm-element-from-headline
-                   :sort #'org-ilm--compare-priority
+                   :action #'org-ilm-element-at-point
                    :narrow narrow)))
     entries))
 
@@ -2141,13 +2154,13 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     (cl-assert collection)
     (org-ql-select (org-ilm--collection-files collection)
       (cons 'todo org-ilm-subject-states)
-      :action #'org-ilm-element-from-headline)))
+      :action #'org-ilm-element-at-point)))
 
 (defun org-ilm-query-outstanding ()
   "Query for org-ql to retrieve the outstanding elements."
   `(or
-    (and (todo ,org-ilm-incr-state) (scheduled :to today))
-    (and (todo ,org-ilm-card-state) (org-ilm--ql-card-due))))
+    (and ,(cons 'todo org-ilm-incr-states) (scheduled :to today))
+    (and ,(cons 'todo org-ilm-card-states) (org-ilm--ql-card-due))))
 
 (defun org-ilm--query-select ()
   "Prompt user for query to select from.
@@ -2237,6 +2250,9 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                 #'org-ilm-queue-revert nil t)
       
       (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p)
+
+      ;; This doesn't seem to activate when called in `org-ilm--queue-buffer-build'
+      (eldoc-mode 1)
       
       (when active-p
         (org-ilm-queue--set-active-buffer buffer)))
@@ -2431,7 +2447,7 @@ If point on subject, add all headlines of subject."
                (end (save-excursion (org-end-of-subtree t)))
                el)
            (while (< (point) end)
-             (when (setq el (org-ilm-element-from-headline))
+             (when (setq el (org-ilm-element-at-point))
                (when (org-ilm-queue-insert el :exists-ok t)
                  (cl-incf n-added))
                (outline-next-heading)))
@@ -2473,6 +2489,8 @@ If point on subject, add all headlines of subject."
 (defvar-local org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
 
+;; TODO This is ineffcient. Instead we should give vtable the selected-ed
+;; objects directly.
 (defun org-ilm--vtable-get-object (&optional index)
   "Return queue object at point or by index."
   (let ((index (or index (vtable-current-object))))
@@ -2596,11 +2614,12 @@ A lot of formatting code from org-ql."
       :width 6
       :formatter
       (lambda (data)
-        (pcase-let ((`(,marked ,p) data))
-          (if p
-              (org-ilm--vtable-format-marked
-               (propertize (format "%.2f" (* 100 p)) 'face 'shadow)
-               marked)))))
+        (pcase-let ((`(,marked ,psample ,prelative ,pcookie) data))
+          (when psample
+            (org-ilm--vtable-format-marked
+             (propertize (format "%.2f" (* 100 psample))
+                         'face 'shadow)
+             marked)))))
      (:name
       "Type"
       :width 5
@@ -2687,7 +2706,10 @@ A lot of formatting code from org-ql."
        (pcase (vtable-column vtable column)
          ("Index" (list marked row))
          ("Type" (list marked (org-ilm-element-type object)))
-         ("Priority" (list marked (org-ilm-element-psample object)))
+         ("Priority" (list marked
+                           (org-ilm-element-psample object)
+                           (org-ilm-element-prelative object)
+                           (org-ilm-element-pcookie object)))
          ;; ("Cookie" (list marked (org-ilm-element-pcookie object)))
          ("Title" (list marked (org-ilm-element-title object)))
          ("Due" (list marked (org-ilm-element-schedrel object)))
@@ -2698,6 +2720,12 @@ A lot of formatting code from org-ql."
                   (mapcar (lambda (s) (org-mem-entry-by-id (car s)))
                           (last (nth 0 subjects) (nth 1 subjects)))))))))
    :keymap org-ilm-queue-map))
+
+(defun org-ilm--queue-eldoc-show-info ()
+  "Return info about the element at point in the queue buffer."
+  (when-let* ((element (org-ilm--vtable-get-object)))
+    (propertize (format "[#%s]" (org-ilm-element-pcookie element))
+                'face 'org-priority)))
 
 (cl-defun org-ilm--queue-buffer-build (&key buffer switch-p)
   "Build the contents of the queue buffer, and optionally switch to it."
@@ -2714,6 +2742,8 @@ A lot of formatting code from org-ql."
     (org-ilm-queue--set-header)
     (setq-local buffer-read-only t)
     (hl-line-mode 1)
+    (eldoc-mode 1)
+    (setq-local eldoc-documentation-function #'org-ilm--queue-eldoc-show-info)
     (goto-char (point-min))
     (when switch-p
       (switch-to-buffer buffer))))
@@ -2995,6 +3025,11 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 ;; TODO Out of laziness this code was mostly generated by Claude. Seems ok from
 ;; some experiments but need to go through it properly.
 
+(defun org-ilm--round-float (x decimals)
+  "Round float X to DECIMALS decimals."
+  (let ((factor (expt 10 decimals)))
+    (/ (round (* factor x)) (float factor))))
+
 (defun org-ilm--random-uniform ()
   "Generate a uniform random number between 0 and 1."
   (/ (random 1000000) 1000000.0))
@@ -3100,56 +3135,58 @@ If SEED is provided, sets the random seed first for reproducible results."
 
 ;;;; Priority
 
-(defun org-ilm--validated-priority (priority)
-  "Returns numeric value of priority if valid value, else nil."
-  (cond
-   ((stringp priority)
-    (when (member priority '("1" "2" "3" "4" "5" "6" "7" "8" "9"))
-      (string-to-number priority)))
-   ((numberp priority)
-    (when (member priority '(1 2 3 4 5 6 7 8 9))
-      priority))))
-
 (defun org-ilm--get-priority (&optional headline)
-  "Return priority value of HEADLINE, or if nil, the one at point.
+  "Return priority data of HEADLINE, or if nil, the one at point.
 
-If no priority is set, return default value of 5."
-  (let ((priority (if headline
-                      (org-element-property :priority headline)
-                    (org-entry-get nil "PRIORITY"))))
-    ;; When HEADLINE is parsed with org-element, buffer local
-    ;; `org-priority-lowest' and highest not respected, returns a high number
-    ;; instead that can be converted back to our priority.
-    ;; TODO its a char, use (char-to-string) 
-    (if (and (numberp priority) (> priority 48))
-        (- priority 48)
-      (or
-       (org-ilm--validated-priority priority)
-       5))))
+The return value is a cons with car the numerical value as set in the
+cookie, and cdr a relative value between 0 and 1 based on the minimum
+and maximum priority value."
+  (unless headline
+    (setq headline (org-ilm--org-headline-at-point)))
+  (cl-assert (org-element-type-p headline 'headline))
+  (let ((min org-priority-highest)
+        (max org-priority-lowest)
+        (pcookie (org-element-property :priority headline))
+        prelative)
+    ;; If nothing set, set it to be the average value. In captures i found that
+    ;; the returned value can be 0... so deal with that too.
+    (when (or (null pcookie) (= pcookie 0))
+      (setq pcookie (round (/ (+ min max) 2))))
+    ;; Normalize to [0, 1]
+    (setq prelative
+          (org-ilm--round-float (/ (float (- pcookie min))
+                                   (- max min))
+                                2))
+    (cons pcookie prelative)))
 
-(defun org-ilm--beta-from-priority (priority &optional scale)
-  "Beta parameters from priority value.
-SCALE influence variance."
-  (let* ((scale (or scale 1.))
-         (a priority)
-         (b (+ 1 (- 9 a))))
-    (list (* scale a) (* scale b))))
+(defun org-ilm--priority-to-beta (priority &optional k)
+  "Return (alpha . beta) for a Beta distribution with MODE in (0,1)
+and concentration K >= 0 using the symmetric parametrisation.
+MODE should be a number in [0,1], K >= 0."
+  (cl-assert (<= 0 priority 1))
+  (let* ((k (or k 10))
+         (a (1+ (* k priority)))
+         (b (1+ (* k (- 1 priority)))))
+    (cons a b)))
 
-(defun org-ilm--beta-combine (&rest params-list)
+(defun org-ilm--priority-combine-betas (&rest params-list)
   "Combine multiple Beta distributions."
-  (list
-   (apply #'+ -1 (mapcar (lambda (x) (nth 0 x)) params-list))
-   (apply #'+ -1 (mapcar (lambda (x) (nth 1 x)) params-list))))
+  (cons
+   (apply #'+ -1 (mapcar #'car params-list))
+   (apply #'+ -1 (mapcar #'cdr params-list))))
 
-(defun org-ilm--priority-adjusted-from-logbook (params logbook)
-  "Calculate the variance adjusted beta parameters from logbook data.
+(defun org-ilm--priority-spread-from-logbook (logbook)
+  "Calculate the measure of spread K from logbook data.
 
-For now, decrease variance by proportionally scaling a and b by some
-factor that increases with the number of reviews."
-  (let* ((reviews (length logbook))
-         (a (* (nth 0 params) (+ 1 reviews)))
-         (b (* (nth 1 params) (+ 1 reviews))))
-    (list a b)))
+For now, map through logistic k from 10 to 1000 based on number of reviews."
+  (let* ((n (length logbook))
+         (k-min 10)
+         (k-max 1000)
+         (n-max 10) ;; Number of reviews to max out k
+         (kappa 5)) ;; Steepness curve
+    (+ k-min
+       (/ (- k-max k-min)
+          (1+ (exp (- (* kappa (- (/ n n-max) 0.5)))))))))
 
 (defun org-ilm--priority-adjusted-from-subjects (params subjects)
   "Average the priority out over the subject priorities."
@@ -3157,37 +3194,39 @@ factor that increases with the number of reviews."
     (org-ilm--debug nil ancestors)
     (if (= 0 (length ancestors))
         params
-      (apply #'org-ilm--beta-combine params
+      (apply #'org-ilm--priority-combine-betas params
              ;; Tighter variance for subjects
-             (mapcar (lambda (p) (org-ilm--beta-from-priority p 5.))
+             (mapcar (lambda (p) (org-ilm--priority-to-beta p 10.))
                      (mapcar #'cdr ancestors))))))
 
 (defun org-ilm--priority-beta-compile (priority subjects logbook)
   "Compile the finale beta parameters from priority value, subjects, and logbook history."
-  (let ((params (org-ilm--beta-from-priority priority)))
-    (setq params (org-ilm--priority-adjusted-from-logbook params logbook))
+  (let* ((k (org-ilm--priority-spread-from-logbook logbook))
+         (params (org-ilm--priority-to-beta priority)))
     (setq params (org-ilm--priority-adjusted-from-subjects params subjects))))
 
 (defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
-  (let ((priority (org-ilm--get-priority headline))
+  (let ((priority (cdr (org-ilm--get-priority headline)))
         (logbook (org-ilm-logbook-get headline))
         (subjects (org-ilm-get-subjects headline)))
     (org-ilm--priority-beta-compile priority subjects logbook)))
 
 (defun org-ilm--sample-priority (beta-params &optional seed)
-  "Sample a priority value given the beta params."
-  (interactive (list (org-ilm--priority-get-params)))
-  (org-ilm--random-beta (nth 0 beta-params)
-                        (nth 1 beta-params)
+  "Sample a priority value given the beta params and a seed."
+  (org-ilm--random-beta (car beta-params)
+                        (cdr beta-params)
                         seed))
 
-(defun org-ilm--sample-priority-from-headline (headline)
-  "This still assumes there is a headline at point. Used in `org-ilm--ql-headline-action'."
+(defun org-ilm--sample-priority-at-point (headline &optional seed)
+  "Sample a priority from headline at point.
+Used in `org-ilm-element-at-point'."
   (when-let* ((beta (org-ilm--priority-get-params headline))
-              (seed (format "%s%s"
-                            (org-ilm--current-date-utc)
-                            (org-element-property :ID headline)))
+              (seed (if seed
+                        (format "%s" seed)
+                      (format "%s%s"
+                              (org-ilm--current-date-utc)
+                              (org-element-property :ID headline))))
               (sample (org-ilm--sample-priority beta seed)))
     sample))
 
@@ -3222,13 +3261,13 @@ Headline can be a subject or not."
                             (org-element-property :todo-keyword headline)
                             org-ilm-subject-states))
                (parent-ids (cdr parents-data))
-               (priority (org-ilm--get-priority headline))
+               (priority (cdr (org-ilm--get-priority headline)))
                (ancestor-data
                 (mapcar
                  (lambda (parent-id)
                    (cons parent-id
-                         (org-ilm--get-priority
-                          (org-ilm--org-headline-element-from-id parent-id))))
+                         (cdr (org-ilm--get-priority
+                               (org-ilm--org-headline-element-from-id parent-id)))))
                  parent-ids)))
 
           (org-ilm--debug nil ancestor-data)
@@ -3257,19 +3296,16 @@ Headline can be a subject or not."
   (ts-adjust 'day -1 (ts-now)))
 
 (defun org-ilm--schedule-interval-from-priority (priority)
-  "Calculate a schedule interval from priority value."
-  (setq priority (org-ilm--validated-priority priority))
-  (unless priority
-    (error "Priority value invalid."))
-  (let* ((priority-normalized (/ (- (- 10 priority) 1) 8.0))
-         (priority-bounded (min (max priority-normalized 0.05) 0.95))
+  "Calculate a schedule interval from the normalized priority value."
+  (cl-assert (<= 0 priority 1))
+  (let* ((priority-bounded (min (max (- 1 priority) 0.05) 0.95))
          (rate (* 25 (- 1 priority-bounded)))
          (interval (+ (org-ilm--random-poisson rate) 1)))
     interval))
 
 (defun org-ilm--set-schedule-from-priority ()
   "Set the schedule based on the priority."
-  (when-let ((interval (org-ilm--schedule-interval-from-priority (org-ilm--get-priority))))
+  (when-let ((interval (org-ilm--schedule-interval-from-priority (cdr (org-ilm--get-priority)))))
     (org-schedule nil (format "+%sd" interval))))
 
 (defun org-ilm--update-from-priority-change (func &rest args)
@@ -3489,7 +3525,7 @@ parents, which is defined differently for subjects and extracts/cards:
              ;; Headline is self or incremental ancestor, store linked subjects
              ((or is-self
                   (and (not headline-is-subj) ; Subject never inherit!
-                       (string= state org-ilm-incr-state)))
+                       (member state org-ilm-incr-states)))
               (when-let ((prop (org-entry-get element "SUBJECTS")))
                 (setq property-subjects-str
                       (concat property-subjects-str " " prop))
@@ -3759,12 +3795,14 @@ during review."
       (when (org-ilm-queue-empty-p)    
         (user-error "Queue is empty!"))))
 
-  ;; Store clocked-in task so that we can clock back in when done
-  (setq org-ilm--review-interrupted-clock-marker
-        (when (org-clocking-p) (copy-marker org-clock-marker)))
+  (when (yes-or-no-p "Start reviewing?")
 
-  (org-ilm-review-mode 1)
-  (org-ilm--review-next))
+    ;; Store clocked-in task so that we can clock back in when done
+    (setq org-ilm--review-interrupted-clock-marker
+          (when (org-clocking-p) (copy-marker org-clock-marker)))
+
+    (org-ilm-review-mode 1)
+    (org-ilm--review-next)))
 
 (defun org-ilm-review-quit ()
   "Quit ilm review."
@@ -3937,7 +3975,7 @@ a whole other problem, since we can only deal with one card (type?) now."
   (propertize
    (substitute-command-keys
     (format 
-     "\\<org-ilm-review-attachment-mode-map>[%s `\\[%s]']"
+     "\\<org-ilm-review-mode-map>[%s `\\[%s]']"
      title (symbol-name func)))
    'mouse-face 'highlight
    'local-map (let ((map (make-sparse-keymap)))
