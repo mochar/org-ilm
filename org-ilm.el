@@ -744,6 +744,11 @@ The callback ON-ABORT is called when capture is cancelled."
             (if org-note-abort
                 (when on-abort
                   (funcall on-abort))
+              ;; More often than not org-node doens't register a newly created
+              ;; node so I need to rerun the scan. Org-mem is fast, but this is
+              ;; still very wasteful.
+              ;; TODO Figure out how to prevent doing a full rescan
+              (org-mem-reset)
               (when on-success
                 (funcall on-success attach-dir))))))
 
