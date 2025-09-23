@@ -136,6 +136,7 @@
   (if org-ilm-global-minor-mode
       ;; Enable
       (progn
+        (add-hook 'after-change-major-mode-hook #'org-ilm--attachment-prepare-buffer)
         (add-hook 'org-mode-hook #'org-ilm-prepare-buffer)
         (add-hook 'org-mem-post-full-scan-functions
                   #'org-ilm--org-mem-hook)
@@ -146,7 +147,7 @@
                     :around #'org-ilm--pdf-annot-create-context-menu-advice)
         )
     ;; Disable
-    (remove-hook 'org-mode-hook #'org-ilm-prepare-buffer)
+    (add-hook 'after-change-major-mode-hook #'org-ilm--attachment-prepare-buffer)
     (remove-hook 'org-mem-post-full-scan-functions
               #'org-ilm--org-mem-hook)
     (remove-hook 'org-mem-post-targeted-scan-functions
@@ -157,12 +158,6 @@
     ))
 
 ;;;; Commands
-
-(defun org-ilm-prepare-buffer ()
-  "Recreate overlays if current buffer is an attachment Org file."
-  (interactive)
-  (when (org-ilm--attachment-data)
-    (org-ilm-recreate-overlays)))
 
 (defun org-ilm-open-attachment ()
   "Open attachment of item at point."
@@ -338,7 +333,8 @@ If empty return nil, and if only one, return it."
 (defun org-ilm--generate-text-snippet (text)
   ""
   (let* ((text (replace-regexp-in-string "\n" " " text))
-         (text (org-link-display-format text))) ;; Remove org links
+         (text (org-link-display-format text)) ;; Remove org links
+         (text (string-trim text))) ;; Trim whitespace
     (substring text 0 (min 50 (length text)))))
 
 (defun org-ilm--org-narrow-to-header ()
@@ -350,15 +346,11 @@ If empty return nil, and if only one, return it."
 
 (defun org-ilm--where-am-i ()
   "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
+  ;; For collection, we return file as well, useful in a directory based collection.
   (if-let ((collection (org-ilm--collection-file buffer-file-name)))
       (cons 'collection collection)
-    (when-let* ((file-title (file-name-base
-                             ;; Allow for non-file buffer: pdf virtual view
-                             (or buffer-file-name (buffer-name))))
-                (_ (org-ilm--org-id-p file-title))
-                (src-file (car (org-id-find file-title))))
-      (when-let (collection (org-ilm--collection-file (expand-file-name src-file)))
-        (list 'attachment file-title collection)))))
+    (when-let ((attachment (org-ilm--attachment-data)))
+      (cons 'attachment attachment))))
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
   "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
@@ -586,7 +578,7 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
   id state level pcookie rawval title tags sched schedrel
-  type subjects prelative psample)
+  type subjects prelative psample pbeta)
 
 (defun org-ilm-element-at-point ()
   "Parse org-ilm data of headline at point.
@@ -594,6 +586,7 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
   (let* ((headline (org-ilm--org-headline-at-point))
+         (id (org-element-property :ID headline))
          (todo-keyword (org-element-property :todo-keyword headline))
          (type (org-ilm-type todo-keyword))
          (is-card (eq type 'card))
@@ -603,12 +596,14 @@ wasteful if headline does not match query."
                       ;; TODO ts-parse-org-element returns non-nil even if no scheduled
                       (ts-parse-org-element (org-element-property :scheduled headline))))
          (now (ts-now))
-         (priority (org-ilm--get-priority headline)))
+         (priority (org-ilm--get-priority headline))
+         (beta (org-ilm--priority-get-params headline))
+         (psample (org-ilm--priority-sample beta id)))
 
     (when type ; non-nil only when org-ilm type
       (make-org-ilm-element
        ;; Headline element properties
-       :id (org-element-property :ID headline)
+       :id id
        :state todo-keyword
        :level (org-element-property :level headline)
        :pcookie (car priority)
@@ -626,7 +621,8 @@ wasteful if headline does not match query."
        ;; cdr to get rid of headline priority in the car - redundant
        :subjects (cdr (org-ilm--priority-subject-gather headline))
        :prelative (cdr priority)
-       :psample (org-ilm--sample-priority-at-point headline)))))
+       :pbeta beta
+       :psample psample))))
 
 (cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
   "Return an element by their org id."
@@ -891,7 +887,8 @@ Will become an attachment Org file that is the child heading of current entry."
        'extract
        file-org-id
        (list :id extract-org-id :content region-text)
-       (lambda (&rest _)
+       (lambda (&rest _) ;; on-success
+
          ;; Wrap region with targets.
          (with-current-buffer file-buf
            (save-excursion
@@ -912,7 +909,74 @@ Will become an attachment Org file that is the child heading of current entry."
                (goto-char (+ region-end (length target-begin)))
                (insert target-end)))
            (save-buffer)
-           (org-ilm-recreate-overlays)))))))
+           (org-ilm-recreate-overlays))
+
+         (org-ilm--attachment-log-extract))))))
+
+(defun org-ilm-cloze ()
+  "Create a cloze card.
+
+A cloze is made automatically of the element at point or active
+region. If instead a grouped set of clozes must be made, you can first
+call `org-ilm-cloze-toggle-this' a couple times before calling this
+command."
+  (interactive)
+
+  (let* ((file-buf (current-buffer))
+         (card-org-id (org-id-new))
+         (file-org-id (file-name-sans-extension
+                       (file-name-nondirectory
+                        buffer-file-name)))
+         (clozes (org-srs-item-cloze-collect))
+         buffer-text snippet auto-clozed)
+
+    ;; When no clozes have been made, make cloze of element at point or active
+    ;; region. We set the flag auto-clozed to t, so that when capture is
+    ;; aborted, we can toggle it back.
+    (unless clozes
+      (org-srs-item-cloze-dwim)
+      (setq clozes (org-srs-item-cloze-collect))
+      (setq auto-clozed t))
+    (cl-assert clozes)
+
+    ;; The buffer text we export should be cleaned of targets but not of clozes.
+    ;; The text we use to make a snippet should not contain clozes as well.
+    ;; TODO Inefficient, snippet should be cleaned afterwards
+    (setq buffer-text (org-ilm--buffer-text-process nil nil t)
+          snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text-process)))
+
+    (org-ilm--capture
+     'card
+     file-org-id
+     (list :id card-org-id :content buffer-text :title snippet)
+     (lambda (&rest _)
+       ;; Success callback. Go through each cloze in the source file and replace
+       ;; it with our target tags. Render them by recreating overlays.
+       (with-current-buffer file-buf
+         (save-excursion
+           ;; TODO similar functionality `org-ilm--buffer-text-process', extract
+           ;; to own function.
+           (while (let ((clz (org-srs-item-cloze-collect))) clz)
+             (let* ((cloze (car (org-srs-item-cloze-collect)))
+                    (region-begin (nth 1 cloze))
+                    (region-end   (nth 2 cloze))
+                    (inner (substring-no-properties (nth 3 cloze)))
+                    (target-template (format "<<card:%s:%s>>" "%s" card-org-id))
+                    (target-begin (format target-template "begin"))
+                    (target-end (format target-template "end")))
+               (goto-char region-begin)
+               (delete-region region-begin region-end)
+               (insert target-begin inner target-end))))
+         (save-buffer)
+         (org-ilm-recreate-overlays)
+
+         (org-ilm--attachment-log-cloze)))
+     (lambda ()
+       ;; Abort callback. Undo cloze if made automatically by this function.
+       (when auto-clozed
+         (with-current-buffer file-buf
+           (org-srs-item-uncloze-dwim)))))))
+
 
 ;;;; PDF attachment
 
@@ -1007,6 +1071,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
           (pdf-path (nth 0 document))
           (page (nth 1 document))
           (region (nth 2 document)))
+     ;; TODO use org-ilm--attachment-data
      (when-let* ((org-id (file-name-base (if ,of-document pdf-path (buffer-name))))
                  (headline (org-ilm--org-headline-element-from-id org-id)))
        (org-with-point-at headline
@@ -1123,7 +1188,7 @@ When not specified, REGION is active region."
      ((eq major-mode 'pdf-virtual-view-mode)
       (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
              (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
-        (pcase-let* ((`(,LE ,TO, RI, BO) page-region)
+        (pcase-let* ((`(,LE ,TO ,RI, BO) page-region)
                      (`(,le ,to ,ri ,bo) region)
                      (w (- RI LE))
                      (h (- BO TO)))
@@ -1771,6 +1836,10 @@ make a bunch of headers."
 
 ;;;; Attachments
 
+(defvar-local org-ilm--data nil
+  "Buffer-local ilm data stored in element attachment buffers.
+This is used to keep track of changes in priority and scheduling.")
+
 ;; TODO org-attach-delete-all
 
 (defun org-ilm-infer-id-from-attachment-path (path)
@@ -1786,16 +1855,20 @@ make a bunch of headers."
 
 (defun org-ilm--attachment-data ()
   "Returns (org-id collection) if current buffer is collection attachment file."
-  (when-let ((location (org-ilm--where-am-i)))
-    (when (eq 'attachment (car location))
-      (cdr location))))
-
+  (when-let* ((file-title (file-name-base
+                           ;; Allow for non-file buffer: pdf virtual view
+                           (or buffer-file-name (buffer-name))))
+              (_ (org-ilm--org-id-p file-title))
+              (src-file (car (org-id-find file-title))))
+    (when-let (collection (org-ilm--collection-file (expand-file-name src-file)))
+      (list file-title collection))))
+  
 (defun org-ilm--attachment-extension ()
   "Return the extension of the attachment at point, assuming in collection."
   (or (org-entry-get nil "ILM_EXT" 'inherit) "org"))
 
 (cl-defun org-ilm--attachment-path (&key not-exists-ok allowed-exts)
-  "Return path to the attachment of heading at point."
+  "Return path to the attachment of element at point."
   (when (and allowed-exts (not (listp allowed-exts)))
     (error "ALLOWED-EXTS must be list of extensions"))
   (when-let* ((org-id (org-id-get))
@@ -1806,7 +1879,7 @@ make a bunch of headers."
       path)))
   
 (defun org-ilm--attachment-find (&optional ext org-id)
-  "Return attachment file of the headline."
+  "Return attachment file of element at point."
   (when-let* ((attach-dir (org-attach-dir))
               (org-id (or org-id (org-id-get)))
               (ext (or ext (org-ilm--attachment-extension)))
@@ -1878,9 +1951,70 @@ make a bunch of headers."
    (t (user-error "Attachment not found"))))
   
 (defun org-ilm--attachment-open-by-id (id)
-  (org-ilm--org-with-point-at
-   id
-   (org-ilm--attachment-open)))
+  (org-ilm--org-with-point-at id
+    (org-ilm--attachment-open)))
+
+(defun org-ilm--attachment-prepare-buffer ()
+  "Prepare ilm attachment buffers."
+  (when-let ((data (org-ilm--attachment-data)))
+    (pcase-let* ((`(,id ,collection) data)
+                 (element (org-ilm--org-with-point-at id
+                            (org-ilm-element-at-point))))
+
+      ;; Prepare the buffer local data object which contains info about the
+      ;; attachment as well as data used to update the priority.
+      (setq-local
+       org-ilm--data
+       (list :id id
+             :collection collection
+             :element element
+             :beta (org-ilm--priority-to-beta
+                    (org-ilm-element-prelative element))
+             ;; Manual accumalating change in the priority
+             :a 0
+             :b 0
+             ;; Data that is compiled to form change in priority
+             :start (current-time)
+             :extracts 0
+             :cards 0
+             :characters 0
+             ))
+
+      (pcase major-mode
+        ('org-mode
+         (org-ilm-recreate-overlays)
+         (setf (plist-get org-ilm--data :size)
+               (save-restriction
+                 (widen)
+                 (- (point-max) (point-min)))))
+        ))))
+
+(defmacro org-ilm--attachment-priority-update (&rest body)
+  `(if (not (bound-and-true-p org-ilm--data))
+       (progn
+         (org-ilm--attachment-prepare-buffer)
+         (unless (bound-and-true-p org-ilm--data)
+           (error "Could not create attachment data `org-ilm--data'")))
+     (cl-destructuring-bind
+         (&key id beta start a b cards extracts &allow-other-keys) org-ilm--data
+       ,@body
+       (let ((actions (+ cards extracts))
+             (duration (float-time (time-subtract (current-time) start))))
+         (cl-incf b (org-ilm--priority-b-from-actions actions))
+         (when (org-ilm-reviewing-id-p id)
+           (cl-incf a (org-ilm--priority-a-from-duration duration)))
+         (org-ilm--org-with-point-at id
+           (org-ilm--priority-update :beta beta :a a :b b))))))
+
+(defun org-ilm--attachment-log-extract (&optional size)
+  (org-ilm--attachment-priority-update
+   (cl-incf (plist-get org-ilm--data :extracts))))
+
+(defun org-ilm--attachment-log-cloze ()
+  (org-ilm--attachment-priority-update
+   (cl-incf (plist-get org-ilm--data :cards))))
+
+
 
 ;;;; Transclusion
 
@@ -3041,7 +3175,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
      ))))
 
 
-;;;; Stats
+;;;; Math and stats
 
 ;; Functions to work with e.g. the beta distribution.
 ;; TODO Out of laziness this code was mostly generated by Claude. Seems ok from
@@ -3155,6 +3289,12 @@ If SEED is provided, sets the random seed first for reproducible results."
       (let ((beta (* alpha (/ (- 1 mean) mean))))
         (list alpha beta)))))
 
+(defun org-ilm--beta-mode (beta)
+  (let ((alpha (car beta))
+        (beta (cdr beta)))
+    (/ (- alpha 1) (+ alpha beta -2))))
+
+
 ;;;; Priority
 
 (defun org-ilm--get-priority (&optional headline)
@@ -3234,23 +3374,47 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
         (subjects (org-ilm-get-subjects headline)))
     (org-ilm--priority-beta-compile priority subjects logbook)))
 
-(defun org-ilm--sample-priority (beta-params &optional seed)
+(defun org-ilm--priority-sample (beta &optional seed)
   "Sample a priority value given the beta params and a seed."
-  (org-ilm--random-beta (car beta-params)
-                        (cdr beta-params)
-                        seed))
+  (org-ilm--random-beta (car beta) (cdr beta) seed))
 
-(defun org-ilm--sample-priority-at-point (headline &optional seed)
-  "Sample a priority from headline at point.
-Used in `org-ilm-element-at-point'."
-  (when-let* ((beta (org-ilm--priority-get-params headline))
-              (seed (if seed
-                        (format "%s" seed)
-                      (format "%s%s"
-                              (org-ilm--current-date-utc)
-                              (org-element-property :ID headline))))
-              (sample (org-ilm--sample-priority beta seed)))
-    sample))
+(defun org-ilm--priority-sample (beta id &optional date)
+  "Sample the priority from BETA, with ID and the date as seed."
+  (let ((seed (format "%s%s"
+                      (or date (org-ilm--current-date-utc))
+                      id)))
+    (org-ilm--random-beta (car beta) (cdr beta) seed)))
+
+(cl-defun org-ilm--priority-update (&key a b beta)
+  "Update org priority based on bayesian updating."
+  (unless (or a b) (error "Either A or B or both must be provided"))
+  (let* ((beta (if beta
+                   (cons (car beta) (cdr beta)) ;; copy
+                 (org-ilm--priority-to-beta (cdr (org-ilm--get-priority))))))
+    (when a (setf (car beta) (+ a (car beta))))
+    (when b (setf (cdr beta) (+ b (cdr beta))))
+
+    (let* ((mode (org-ilm--beta-mode beta))
+           (min org-priority-highest)
+           (max org-priority-lowest)
+           (priority (round (+ min (* mode (- max min))))))
+      (org-priority priority))))
+
+(defun org-ilm--priority-a-from-duration (duration)
+  "S-curve map duration to a."
+  (let ((a-min 0)
+        (a-max 3)
+        (duration (float duration))
+        (duration-max 30)
+        (kappa 10))
+    (+ a-min
+       (/ (- a-max a-min)
+          (1+ (exp (* kappa (- (/ duration duration-max) 0.5))))))))
+
+(defun org-ilm--priority-b-from-actions (count)
+  "Map number of actions to b."
+  (cl-assert (>= count 0 ))
+  (min count 5))
 
 ;;;;; Subject priorities
 
@@ -3343,68 +3507,6 @@ Headline can be a subject or not."
 ;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
 ;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
 ;; org-srs-table-lines
-
-(defun org-ilm-cloze ()
-  "Create a cloze card.
-
-A cloze is made automatically of the element at point or active
-region. If instead a grouped set of clozes must be made, you can first
-call `org-ilm-cloze-toggle-this' a couple times before calling this
-command."
-  (interactive)
-
-  (let* ((file-buf (current-buffer))
-         (card-org-id (org-id-new))
-         (file-org-id (file-name-sans-extension
-                       (file-name-nondirectory
-                        buffer-file-name)))
-         (clozes (org-srs-item-cloze-collect))
-         buffer-text snippet auto-clozed)
-
-    ;; When no clozes have been made, make cloze of element at point or active
-    ;; region. We set the flag auto-clozed to t, so that when capture is
-    ;; aborted, we can toggle it back.
-    (unless clozes
-      (org-srs-item-cloze-dwim)
-      (setq clozes (org-srs-item-cloze-collect))
-      (setq auto-clozed t))
-    (cl-assert clozes)
-
-    ;; The buffer text we export should be cleaned of targets but not of clozes.
-    ;; The text we use to make a snippet should not contain clozes as well.
-    ;; TODO Inefficient, snippet should be cleaned afterwards
-    (setq buffer-text (org-ilm--buffer-text-clean nil nil t)
-          snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text-clean)))
-
-    (org-ilm--capture
-     'card
-     file-org-id
-     (list :id card-org-id :content buffer-text :title snippet)
-     (lambda (&rest _)
-       ;; Success callback. Go through each cloze in the source file and replace
-       ;; it with our target tags. Render them by recreating overlays.
-       (with-current-buffer file-buf
-         (save-excursion
-           ;; TODO similar functionality `org-ilm--buffer-text-clean', extract
-           ;; to own function.
-           (while (let ((clz (org-srs-item-cloze-collect))) clz)
-             (let* ((cloze (car (org-srs-item-cloze-collect)))
-                    (region-begin (nth 1 cloze))
-                    (region-end   (nth 2 cloze))
-                    (inner (substring-no-properties (nth 3 cloze)))
-                    (target-template (format "<<card:%s:%s>>" "%s" card-org-id))
-                    (target-begin (format target-template "begin"))
-                    (target-end (format target-template "end")))
-               (goto-char region-begin)
-               (delete-region region-begin region-end)
-               (insert target-begin inner target-end))))
-         (save-buffer)
-         (org-ilm-recreate-overlays)))
-     (lambda ()
-       ;; Abort callback. Undo cloze if made automatically by this function.
-       (when auto-clozed
-         (with-current-buffer file-buf
-           (org-srs-item-uncloze-dwim)))))))
 
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
@@ -3788,6 +3890,11 @@ TODO Skip if self or descendant."
   "Return t when currently reviewing."
   org-ilm-review-mode)
 
+(defun org-ilm-reviewing-id-p (id)
+  "Return t when currently reviewing element with id ID."
+  (when (org-ilm-reviewing-p)
+    (equal id (plist-get org-ilm--review-current-element-info :id))))
+
 (defun org-ilm--review-confirm-quit ()
   "Confirmation before killing the active attachment buffer or queue buffer
 during review."
@@ -3887,7 +3994,12 @@ during review."
 
 (defun org-ilm--review-next ()
   (when org-ilm--review-current-element-info
+    ;; Update priority and schedule
+    (with-current-buffer (plist-get org-ilm--review-current-element-info :buffer)
+      (org-ilm--attachment-priority-update))
+    
     (let ((element (org-ilm-queue-pop)))
+      
       ;; Card might already be due, eg when rating again. So need to check the
       ;; new review time and add it back to the queue. Set a minimum position in
       ;; the queue so that the card is not reviewed too quickly again.
@@ -3948,7 +4060,9 @@ a whole other problem, since we can only deal with one card (type?) now."
     (with-current-buffer attachment-buffer
       (add-hook 'kill-buffer-hook
                 #'org-ilm--review-confirm-quit
-                nil t))
+                nil t)
+
+      (setf (plist-get org-ilm--data :start) (current-time)))
 
     (setq org-ilm--review-current-element-info
           (list :element element
