@@ -295,19 +295,20 @@ If empty return nil, and if only one, return it."
   "Current date in UTC as string."
   (format-time-string "%Y-%m-%d" (current-time) t))
 
-(defun org-ilm--buffer-text-clean (&optional region-begin region-end keep-clozes)
-  "Extract buffer text without clozes and extract and card targets."
-  (let* ((text (s-replace-regexp
-                org-ilm-target-regexp ""
-                (buffer-substring-no-properties (or region-begin (point-min))
-                                                (or region-end (point-max)))))
-         ;; Remove org links
-         (text (org-link-display-format text)))
-    ;; Remove clozes by looping until none left
-    (if keep-clozes
-        text
-      (with-temp-buffer
-        (insert text)
+(defun org-ilm--buffer-text-process (&optional region-begin region-end keep-clozes remove-footnotes)
+  "Prepare buffer text for new extract or card element."
+  (let* ((text (buffer-substring-no-properties (or region-begin (point-min))
+                                               (or region-end (point-max))))
+         ;; Remove ilm targets
+         (text (s-replace-regexp org-ilm-target-regexp "" text))
+         (buffer (current-buffer)))
+    (when remove-footnotes
+      (setq text (s-replace-regexp org-footnote-re "" text)))
+    (with-temp-buffer
+      (insert text)
+      
+      ;; Remove clozes by looping until none left
+      (unless keep-clozes
         (while (let ((clz (org-srs-item-cloze-collect))) clz)
           (let* ((cloze (car (org-srs-item-cloze-collect)))
                  (region-begin (nth 1 cloze))
@@ -315,14 +316,30 @@ If empty return nil, and if only one, return it."
                  (inner (substring-no-properties (nth 3 cloze))))
             (goto-char region-begin)
             (delete-region region-begin region-end)
-            (insert inner)))
-        (buffer-string)))))
+            (insert inner))))
+
+      ;; Copy over footnotes 
+      (unless remove-footnotes
+        (let ((footnotes '()))
+          (goto-char (point-min))
+          (while (re-search-forward org-footnote-re nil t)
+            (when-let* ((fn (match-string 0))
+                        (label (match-string 1))
+                        (def (with-current-buffer buffer
+                               (org-footnote-get-definition label))))
+              (push (concat fn " " (nth 3 def)) footnotes)))
+          (goto-char (point-max))
+          (insert "\n\n")
+          (dolist (fn (delete-dups (nreverse footnotes)))
+            (insert fn "\n"))))
+      
+      (buffer-string))))
 
 (defun org-ilm--generate-text-snippet (text)
   ""
-  (let* ((text-clean (replace-regexp-in-string "\n" " " text))
-         (snippet (substring text-clean 0 (min 50 (length text-clean)))))
-    snippet))
+  (let* ((text (replace-regexp-in-string "\n" " " text))
+         (text (org-link-display-format text))) ;; Remove org links
+    (substring text 0 (min 50 (length text)))))
 
 (defun org-ilm--org-narrow-to-header ()
   "Narrow to headline and content up to next heading or end of buffer."
@@ -865,7 +882,7 @@ Will become an attachment Org file that is the child heading of current entry."
     
     (let* ((region-begin (region-beginning))
            (region-end (region-end))
-           (region-text (org-ilm--buffer-text-clean region-begin region-end))
+           (region-text (org-ilm--buffer-text-process region-begin region-end))
            (extract-org-id (org-id-new)))
 
       ;; Save region content into tmp file and move it as attachment to main
