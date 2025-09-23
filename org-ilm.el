@@ -273,7 +273,11 @@ If empty return nil, and if only one, return it."
                                   (symbol-name (car thing))
                                 (car thing))
                               'face '(:weight bold))
-                             (propertize second 'face '(:slant italic))))
+                             (propertize
+                              (if (symbolp second)
+                                  (symbol-name second)
+                                second)
+                              'face '(:slant italic))))
                    thing)))
               alist))
             (choice (completing-read (or prompt "Select: ") choices nil t))
@@ -374,22 +378,42 @@ If empty return nil, and if only one, return it."
 
 (defun org-ilm--org-headline-at-point ()
   "Return headline at point."
-  (let ((element (org-element-at-point)))
+  (let ((element (org-element-at-point))
+        (headline-text (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position))))
     (when (eq (car element) 'headline)
+      
       ;; TODO Seems that when buffer local priority ranges differ from global
       ;; ones, org-element returns nil as priority. Also sometimes priority
       ;; returned as their numerical value, sometimes as char number. Solution
       ;; is to parse the header manually.
-      (save-excursion
-        (beginning-of-line)
-        ;; Previously used org-entry-get but it fails sometimes and I forgot why :)
-        ;; (let ((priority (string-trim (org-entry-get nil "PRIORITY"))))
-        (looking-at org-priority-regexp)
-        (let ((priority (match-string-no-properties 2)))
+
+      ;; (with-temp-buffer
+      ;;   (insert headline-text)
+      ;;   (goto-char 0)
+      ;;   (looking-at org-priority-regexp)
+      ;;   (let ((priority (match-string-no-properties 2)))
+      ;;     (when priority
+      ;;       (setq priority (string-to-number priority)))
+      ;;     (setq element (org-element-put-property element :priority priority))))
+
+      (when (string-match org-priority-regexp headline-text)
+        (let ((priority (match-string-no-properties 2 headline-text)))
           (when priority
             (setq priority (string-to-number priority)))
-        (setq element (org-element-put-property element :priority priority))))
-      element)))
+          (setq element (org-element-put-property element :priority priority))))
+        
+      ;; (save-excursion
+      ;;   (beginning-of-line)
+      ;;   ;; Previously used org-entry-get but it just gives weird numbers
+      ;;   (looking-at org-priority-regexp)
+      ;;   (let ((priority (match-string-no-properties 2)))
+      ;;     (when priority
+      ;;       (setq priority (string-to-number priority)))
+      ;;     (setq element (org-element-put-property element :priority priority))))
+
+      element
+      )))
 
 (defun org-ilm--org-goto-id (org-id)
   ;; (let ((loc (org-id-find org-id 'marker)))
@@ -586,7 +610,17 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
   (let* ((headline (org-ilm--org-headline-at-point))
+         ;; `headline' looses the priority property which is set manually in
+         ;; `org-ilm--org-headline-at-point', after I access the :todo-keyword
+         ;; property below. I think it is because it is a deferred value, which
+         ;; might cause org to overwrite the custom set :priority value. In any
+         ;; case, it is essentialy to use the priority before accessing the other
+         ;; properties. Alternatively we can just resolve the deferred properties
+         ;; by accessing them all in `org-ilm--org-headline-at-point'.
+         (priority (org-ilm--get-priority headline))
+         (beta (org-ilm--priority-get-params headline))
          (id (org-element-property :ID headline))
+         (psample (org-ilm--priority-sample beta id))
          (todo-keyword (org-element-property :todo-keyword headline))
          (type (org-ilm-type todo-keyword))
          (is-card (eq type 'card))
@@ -595,11 +629,8 @@ wasteful if headline does not match query."
                         (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
                       ;; TODO ts-parse-org-element returns non-nil even if no scheduled
                       (ts-parse-org-element (org-element-property :scheduled headline))))
-         (now (ts-now))
-         (priority (org-ilm--get-priority headline))
-         (beta (org-ilm--priority-get-params headline))
-         (psample (org-ilm--priority-sample beta id)))
-
+         (now (ts-now)))
+       
     (when type ; non-nil only when org-ilm type
       (make-org-ilm-element
        ;; Headline element properties
@@ -2258,7 +2289,8 @@ See `org-ilm-attachment-transclude'."
 ;;;; Query
 
 (defcustom org-ilm-queries
-  `((Outstanding . org-ilm-query-outstanding))
+  `((Outstanding . org-ilm-query-outstanding)
+    (All . org-ilm-query-all))
   "Alist mapping query name to a function that returns an org-ql query."
   :type '(alist :key-type symbol :value-type function)
   :group 'org-ilm)
@@ -2288,19 +2320,18 @@ See `org-ilm-attachment-transclude'."
 
 (defun org-ilm-query-collection (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
-  (let* ((files (org-ilm--collection-files collection))
-         (entries (org-ql-select files
-                   (funcall (cdr (assoc query org-ilm-queries)))
-                   :action #'org-ilm-element-at-point)))
-    entries))
+  (let ((files (org-ilm--collection-files collection)))
+    (org-ql-select files
+      (funcall (cdr (assoc query org-ilm-queries)))
+      ;; TODO Pass as sexp so that org-ql can byte compile it
+      :action #'org-ilm-element-at-point)))
 
 (defun org-ilm-query-buffer (buffer query &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
-  (let ((entries (org-ql-select buffer
-                   (funcall (cdr (assoc query org-ilm-queries)))
-                   :action #'org-ilm-element-at-point
-                   :narrow narrow)))
-    entries))
+  (org-ql-select buffer
+    (funcall (cdr (assoc query org-ilm-queries)))
+    :action #'org-ilm-element-at-point
+    :narrow narrow))
 
 (defun org-ilm--query-subjects (&optional collection)
   "Return list of subjects from COLLECTION.
@@ -2311,6 +2342,10 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     (org-ql-select (org-ilm--collection-files collection)
       (cons 'todo org-ilm-subject-states)
       :action #'org-ilm-element-at-point)))
+
+(defun org-ilm-query-all ()
+  "Query for org-ql to retrieve all elements."
+  `(or ,(cons 'todo org-ilm-incr-states) ,(cons 'todo org-ilm-card-states)))
 
 (defun org-ilm-query-outstanding ()
   "Query for org-ql to retrieve the outstanding elements."
@@ -2778,7 +2813,7 @@ A lot of formatting code from org-ql."
              marked)))))
      (:name
       "Type"
-      :width 5
+      :width 4
       :formatter
       (lambda (data)
         (pcase-let ((`(,marked ,type) data))
@@ -3456,7 +3491,6 @@ Headline can be a subject or not."
                                (org-ilm--org-headline-element-from-id parent-id)))))
                  parent-ids)))
 
-          (org-ilm--debug nil ancestor-data)
           ;; Recursively call this function on all direct parent subjects to get
           ;; their priority data.
           (dolist (parent-id parent-ids)
@@ -3636,8 +3670,6 @@ parents, which is defined differently for subjects and extracts/cards:
          (property-subjects-str "")
          outline-parent-subject subject-ids)
 
-    (org-ilm--debug "Ancestory of:" headline-id)
-
     ;; Check for ancestor subject headline in outline hierarchy. As we explore
     ;; up the hierarchy, store linked subjects of extracts.
     (org-element-lineage-map
@@ -3721,8 +3753,6 @@ parents, which is defined differently for subjects and extracts/cards:
             (unless (member subject-id ancestries)
               (cl-pushnew subject-id subject-ids :test #'equal))))))
 
-    (org-ilm--debug "-- All ancestors:" subject-ids)
-    
     (cons headline subject-ids)))
 
 (defun org-ilm--subjects-get-with-descendant-subjects (subject)
