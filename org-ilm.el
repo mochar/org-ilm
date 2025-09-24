@@ -122,6 +122,7 @@
 
 ;;;; Minor mode
 
+;; TODO This hook is called not just after file save but on a timer as well. Do we want the timer to reset cache?
 (defun org-ilm--org-mem-hook (&rest _)
   (org-ilm-priority-subject-cache-reset))
 
@@ -580,12 +581,11 @@ The collections are stored in `org-ilm-collections'."
   "Return ilm type from an org headline or its todo state.
 
 See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
-  (let ((state (cond
-                ((org-element-type-p headline-or-state 'headline)
-                 (org-element-property :todo-keyword headline-or-state))
-                ((stringp headline-or-state)
-                 headline-or-state)
-                (t (error "Input must be org headline element or string")))))
+  (when-let ((state (cond
+                     ((org-element-type-p headline-or-state 'headline)
+                      (org-element-property :todo-keyword headline-or-state))
+                     ((stringp headline-or-state)
+                      headline-or-state))))
     (cond
      ((member state org-ilm-card-states) 'card)
      ((member state org-ilm-incr-states) 'incr)
@@ -2673,7 +2673,8 @@ If point on subject, add all headlines of subject."
 ;; objects directly.
 (defun org-ilm--vtable-get-object (&optional index)
   "Return queue object at point or by index."
-  (let ((index (or index (vtable-current-object))))
+  ;; when-let because index can be nil when out of table bounds
+  (when-let ((index (or index (vtable-current-object))))
     (org-ilm-queue-select index)))
 
 (defun org-ilm-queue-open-attachment (object)
@@ -3321,19 +3322,28 @@ If SEED is provided, sets the random seed first for reproducible results."
 
 ;;;; Priority
 
-(defun org-ilm--get-priority (&optional headline)
+(defun org-ilm--get-priority (&optional headline-or-entry)
   "Return priority data of HEADLINE, or if nil, the one at point.
 
 The return value is a cons with car the numerical value as set in the
 cookie, and cdr a relative value between 0 and 1 based on the minimum
 and maximum priority value."
-  (unless headline
-    (setq headline (org-ilm--org-headline-at-point)))
-  (cl-assert (org-element-type-p headline 'headline))
+  (unless headline-or-entry
+    (setq headline-or-entry (org-ilm--org-headline-at-point)))
+  
+  (cl-assert (or (org-element-type-p headline-or-entry 'headline)
+                 (org-mem-entry-p headline-or-entry)))
+  
   (let ((min org-priority-highest)
         (max org-priority-lowest)
-        (pcookie (org-element-property :priority headline))
-        prelative)
+        pcookie prelative)
+
+    (setq pcookie
+          (if (org-mem-entry-p headline-or-entry)
+              (when-let ((p (org-mem-entry-priority headline-or-entry)))
+                (org-priority-to-value p))
+            (org-element-property :priority headline-or-entry)))
+    
     ;; If nothing set, set it to be the average value. In captures i found that
     ;; the returned value can be 0... so deal with that too.
     (when (or (null pcookie) (= pcookie 0))
@@ -3377,7 +3387,6 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 (defun org-ilm--priority-adjusted-from-subjects (params subjects)
   "Average the priority out over the subject priorities."
   (let ((ancestors (nth 1 subjects)))
-    (org-ilm--debug nil ancestors)
     (if (= 0 (length ancestors))
         params
       (apply #'org-ilm--priority-combine-betas params
@@ -3462,22 +3471,24 @@ Headline can be a subject or not."
                 headline-or-id
               (org-element-property :ID headline-or-id))))
     (org-ilm--debug "Gathering subjects for:" id)
+    
     (or (gethash id org-ilm-priority-subject-cache)
         (let* ((parents-data
                 ;; Non-recursively, just direct parents in DAG
                 (org-ilm--subjects-get-parent-subjects headline-or-id))
                (headline (car parents-data))
-               (is-subject (member
-                            (org-element-property :todo-keyword headline)
-                            org-ilm-subject-states))
+               (type (org-ilm-type headline))
+               (is-subject (eq type 'subj))
                (parent-ids (cdr parents-data))
-               (priority (cdr (org-ilm--get-priority headline)))
+               (entry (org-mem-entry-by-id id))
+               ;; Using entry is much faster, there is no need to parse the headline
+               (priority (cdr (org-ilm--get-priority entry)))
                (ancestor-data
                 (mapcar
                  (lambda (parent-id)
                    (cons parent-id
                          (cdr (org-ilm--get-priority
-                               (org-ilm--org-headline-element-from-id parent-id)))))
+                               (org-mem-entry-by-id parent-id)))))
                  parent-ids)))
 
           ;; Recursively call this function on all direct parent subjects to get
@@ -3661,36 +3672,28 @@ parents, which is defined differently for subjects and extracts/cards:
 
     ;; Check for ancestor subject headline in outline hierarchy. As we explore
     ;; up the hierarchy, store linked subjects of extracts.
-    (org-element-lineage-map
-        headline
-        (lambda (element)
-          (let ((is-self (string= (org-element-property :ID element) headline-id))
-                (state (org-element-property :todo-keyword element)))
-            (cond
-             ;; Headline is self or incremental ancestor, store linked subjects
-             ((or is-self
-                  (and (not headline-is-subj) ; Subject never inherit!
-                       (member state org-ilm-incr-states)))
-              (when-let ((prop (org-entry-get element "SUBJECTS")))
-                (setq property-subjects-str
-                      (concat property-subjects-str " " prop))
-                ;; Return nil so we don't terminate map
-                nil))
-             
-             ;; Headline is subject, store as outline parent subject
-             ((member state org-ilm-subject-states)
-              ;; We could create id with second arg of org-id-get, but this
-              ;; might mess up with parsing and cache and whatever as we're
-              ;; updating the buffer during parsing
-              (let ((org-id (org-id-get element)))
-                (cl-pushnew org-id subject-ids :test #'equal)
-                (unless outline-parent-subject
-                  (setq outline-parent-subject org-id))
-                ;; Return non-nil in case we dont want all ancestors. This
-                ;; means we only gather linked subjects of extracts up to
-                ;; first subject.
-                org-id)))))
-      '(headline) 'with-self (not all-ancestors))
+    (cl-block nil
+      (dolist (ancestor (org-mem-entry-crumbs headline-entry))
+        (let* ((id (nth 4 ancestor))
+               (is-self (string= id headline-id))
+               (entry (org-mem-entry-by-id id))
+               (state (when entry (org-mem-entry-todo-state entry)))
+               (type (when state (org-ilm-type state))))
+          (cond
+           ;; Headline is self or incremental ancestor, store linked subjects
+           ((or is-self
+                (and (not headline-is-subj) ; Subject never inherit!
+                     (eq type 'incr)))
+            (when-let ((prop (org-mem-entry-property "SUBJECTS+" entry)))
+              (setq property-subjects-str
+                    (concat property-subjects-str " " prop))))
+           
+           ;; Headline is subject, store as outline parent subject
+           ((eq type 'subj)
+            (cl-pushnew id subject-ids :test #'equal)
+            (unless outline-parent-subject
+              (setq outline-parent-subject id))
+            (unless all-ancestors (cl-return)))))))
 
     ;; Process inherited SUBJECTS property.
 
