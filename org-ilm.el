@@ -686,15 +686,17 @@ wasteful if headline does not match query."
      ;; See: Timestamp, Clock
      (lambda (clock)
        (let ((timestamp (org-element-property :value clock)))
-         `(:duration-minutes
-           ,(org-duration-to-minutes (org-element-property :duration clock))
-           :status ,(org-element-property :status clock)
-           :day-end ,(org-element-property :day-end timestamp)
-           :day-start ,(org-element-property :day-start timestamp)
-           :month-end ,(org-element-property :month-end timestamp)
-           :month-start ,(org-element-property :month-start timestamp)
-           :year-end ,(org-element-property :year-end timestamp)
-           :year-start ,(org-element-property :year-start timestamp))))
+         (list
+          :duration-minutes
+          (when-let ((duration (org-element-property :duration clock)))
+            (org-duration-to-minutes duration))
+          :status (org-element-property :status clock)
+          :day-end (org-element-property :day-end timestamp)
+          :day-start (org-element-property :day-start timestamp)
+          :month-end (org-element-property :month-end timestamp)
+          :month-start (org-element-property :month-start timestamp)
+          :year-end (org-element-property :year-end timestamp)
+          :year-start (org-element-property :year-start timestamp))))
      contents)))
     
 (defun org-ilm--logbook-read (&optional headline)
@@ -2009,12 +2011,22 @@ This is used to keep track of changes in priority and scheduling.")
                  (- (point-max) (point-min)))))
         ))))
 
+(defun org-ilm--attachment-ensure-data-object ()
+  "Ensure `org-ilm--object' is initialized properly.
+
+Sometimes org-mode fails to load, which will lead to
+`org-ilm--attachment-prepare-buffer' not initializing correctly. To deal
+with that we use this function to make sure the object exists, and if
+not, create it by calling the function again. If the object is still
+missing, something else is wrong, so throw an error."
+  (unless (bound-and-true-p org-ilm--data)
+    (org-ilm--attachment-prepare-buffer)
+    (unless (bound-and-true-p org-ilm--data)
+      (error "Could not create attachment data `org-ilm--data'"))))
+
 (defmacro org-ilm--attachment-priority-update (&rest body)
-  `(if (not (bound-and-true-p org-ilm--data))
-       (progn
-         (org-ilm--attachment-prepare-buffer)
-         (unless (bound-and-true-p org-ilm--data)
-           (error "Could not create attachment data `org-ilm--data'")))
+  `(progn
+     (org-ilm--attachment-ensure-data-object)
      (cl-destructuring-bind
          (&key id beta start a b cards extracts &allow-other-keys) org-ilm--data
        ,@body
@@ -4084,6 +4096,9 @@ a whole other problem, since we can only deal with one card (type?) now."
                 #'org-ilm--review-confirm-quit
                 nil t)
 
+      ;; We update the buffer-local `org-ilm--data' (see
+      ;; `org-ilm--attachment-prepare-buffer') with a start time.
+      (org-ilm--attachment-ensure-data-object)
       (setf (plist-get org-ilm--data :start) (current-time)))
 
     (setq org-ilm--review-current-element-info
