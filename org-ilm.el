@@ -284,12 +284,6 @@ If empty return nil, and if only one, return it."
             (item (cdr (assoc choice choices))))
        item))))
 
-(defun org-ilm-get-subjects (&optional headline)
-  "Returns subjects of headline or parses "
-  (if (and headline (plist-member headline :subjects))
-      (plist-get headline :subjects)
-    (org-ilm--priority-subject-gather headline)))
-
 (defun org-ilm--current-date-utc ()
   "Current date in UTC as string."
   (format-time-string "%Y-%m-%d" (current-time) t))
@@ -613,17 +607,21 @@ wasteful if headline does not match query."
          ;; `headline' looses the priority property which is set manually in
          ;; `org-ilm--org-headline-at-point', after I access the :todo-keyword
          ;; property below. I think it is because it is a deferred value, which
-         ;; might cause org to overwrite the custom set :priority value. In any
-         ;; case, it is essentialy to use the priority before accessing the other
-         ;; properties. Alternatively we can just resolve the deferred properties
-         ;; by accessing them all in `org-ilm--org-headline-at-point'.
+         ;; might cause org to overwrite the custom set :priority value after
+         ;; resolving it when it is accessed. In any case, it is essentialy to
+         ;; use the priority before accessing the other
+         ;; properties. Alternatively we can just resolve the deferred
+         ;; properties by accessing them all in
+         ;; `org-ilm--org-headline-at-point'.
          (priority (org-ilm--get-priority headline))
-         (beta (org-ilm--priority-get-params headline))
          (id (org-element-property :ID headline))
-         (psample (org-ilm--priority-sample beta id))
          (todo-keyword (org-element-property :todo-keyword headline))
          (type (org-ilm-type todo-keyword))
          (is-card (eq type 'card))
+         (logbook (unless is-card (org-ilm--logbook-read headline)))
+         (subjects (org-ilm--priority-subject-gather headline))
+         (beta (org-ilm--priority-beta-compile (cdr priority) subjects logbook))
+         (psample (org-ilm--priority-sample beta id))
          (scheduled (if is-card
                         ;; TODO Move this out to srs section
                         (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
@@ -648,9 +646,8 @@ wasteful if headline does not match query."
        :schedrel (when scheduled ; convert from sec to days
                    (/ (ts-diff now scheduled) 86400))
        :type type
-       ;; :logbook (unless is-card (org-ilm--logbook-read headline))
        ;; cdr to get rid of headline priority in the car - redundant
-       :subjects (cdr (org-ilm--priority-subject-gather headline))
+       :subjects (cdr subjects)
        :prelative (cdr priority)
        :pbeta beta
        :psample psample))))
@@ -723,14 +720,6 @@ If `HEADLINE' is passed, read it as org-property."
                                    (org-element-property :drawer-name drawer) "LOGBOOK"))
                                 drawers)))
             (org-ilm--logbook-parse logbook)))))))
-
-(defun org-ilm-logbook-get (&optional headline)
-  "Returns logbook or parses it if not available."
-  ;; Might be nil, but if its a member, it has been parsed before, so don't
-  ;; parse again.
-  (if (and headline (plist-member headline :logbook))
-      (plist-get headline :logbook)
-    (org-ilm--logbook-read headline)))
 
 ;;;; Capture
 
@@ -3405,8 +3394,8 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 (defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
   (let ((priority (cdr (org-ilm--get-priority headline)))
-        (logbook (org-ilm-logbook-get headline))
-        (subjects (org-ilm-get-subjects headline)))
+        (logbook (org-ilm--logbook-read headline))
+        (subjects (org-ilm--priority-subject-gather headline)))
     (org-ilm--priority-beta-compile priority subjects logbook)))
 
 (defun org-ilm--priority-sample (beta &optional seed)
