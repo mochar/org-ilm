@@ -759,6 +759,7 @@ The callback ON-ABORT is called when capture is cancelled."
          (content (plist-get data :content))
          (props (plist-get data :props))
          (file (plist-get data :file))
+         (method (or (plist-get data :method) 'cp)) ;; org-attach-method
          (priority (plist-get data :priority))
          (template (plist-get data :template))
          attach-dir ; Will be set in :hook, and passed to on-success
@@ -774,11 +775,17 @@ The callback ON-ABORT is called when capture is cancelled."
                nil "DIR"
                (abbreviate-file-name (org-attach-dir-get-create))))
             
-            ;; Attach the file. We always use 'mv because we are
-            ;; importing the file from the tmp dir.
             (when file
+              ;; Attach the file. Turn of auto tagging if not import source.
               (let ((org-attach-auto-tag (if (eq type 'source) org-attach-auto-tag nil)))
-                (org-attach-attach file nil 'mv)))))
+                (org-attach-attach file nil method)
+
+                ;; Make sure the file name is the org-id
+                (rename-file
+                 (expand-file-name (file-name-nondirectory file) attach-dir)
+                 (expand-file-name (concat id "." (file-name-extension file)) attach-dir))))
+            
+                ))
          (after-finalize
           (lambda ()
             ;; Deal with success and aborted capture. This can be detected in
@@ -795,6 +802,9 @@ The callback ON-ABORT is called when capture is cancelled."
               (when on-success
                 (funcall on-success attach-dir))))))
 
+    ;; See `org-attach-method'
+    (cl-assert (member method '(mv cp ln lns)))
+
     ;; Generate title from content if no title provided
     (when (and (not title) content)
       (setq title (org-ilm--generate-text-snippet content)))
@@ -806,22 +816,21 @@ The callback ON-ABORT is called when capture is cancelled."
         (error "Cannot infer extension when no file provided (:ext=t)")))
 
     ;; Save content in a temporary file if no file provided
-    ;; (unless (or content file)
-    ;; (error "Cannot capture without content or file."))
     (when (and (not file) content)
       (setq file (expand-file-name
                   (format "%s.%s" id (or attachment-ext "org"))
-                  temporary-file-directory))
+                  temporary-file-directory)
+            method 'cp)
 
       ;; TODO set MUSTBENEW to t?
       (write-region content nil file))
 
     (unless template
       (setq template
-            (format "* %s%s %s %s"
+            (format "* %s%s%s %s"
                     state
                     (if priority (format " [#%s]" priority) "")
-                    (or title "")
+                    (if title (concat " " title) "")
                     "%?")))
 
     ;; (let ((org-capture-templates
@@ -911,8 +920,6 @@ Will become an attachment Org file that is the child heading of current entry."
            (region-text (org-ilm--buffer-text-process region-begin region-end))
            (extract-org-id (org-id-new)))
 
-      ;; Save region content into tmp file and move it as attachment to main
-      ;; heading.
       (org-ilm--capture
        'extract
        file-org-id
@@ -1622,6 +1629,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
             (list :file img-path
                   :title (format "Page %s" current-page-real)
                   :id extract-org-id
+                  :method 'mv
                   :ext t))))
         ('org
          (org-ilm--capture
@@ -1696,6 +1704,7 @@ set only (not let)."
         ('image
          (setq capture-data
                (list :file (org-ilm--pdf-image-export extract-org-id :region region)
+                     :method 'mv
                      :title title
                      :id extract-org-id
                      :ext t)))
@@ -2942,12 +2951,15 @@ A lot of formatting code from org-ql."
     (car (org-ilm--select-collection))))
 
 (transient-define-prefix org-ilm--import-transient ()
+  :refresh-suffixes t
   ["Ilm import"
    ("c" "Collection" org-ilm--import-transient-collection)
    ]
   ["Type"
-   ("o" "Org file" org-ilm--import-org-transient)
-   ("w" "Website" org-ilm--import-website-transient)
+   ("f" "File" org-ilm--import-file-transient
+    :inapt-if-nil org-ilm--active-collection)
+   ("w" "Website" org-ilm--import-website-transient
+    :inapt-if-nil org-ilm--active-collection)
    ]
   )
 
@@ -2956,9 +2968,9 @@ A lot of formatting code from org-ql."
   (interactive)
   (org-ilm--import-transient))
 
-;;;;; Org file
+;;;;; File
 
-(defun org-ilm--import-org-transient-args ()
+(defun org-ilm--import-file-transient-args ()
   (when transient-current-command
     (let* ((args (transient-args transient-current-command))
            (file (transient-arg-value "--file=" args))
@@ -2966,35 +2978,35 @@ A lot of formatting code from org-ql."
            (collection org-ilm--active-collection))
       (list :file file :method method :collection collection))))
 
-(transient-define-infix org-ilm--import-org-transient-file ()
+(transient-define-infix org-ilm--import-file-transient-file ()
   :class 'transient-option
   :transient t
   :argument "--file="
   :allow-empty nil
-  :prompt "Org file: "
+  :prompt "File: "
   :reader
   (lambda (prompt initial-input history)
     (read-file-name prompt nil initial-input t)))
 
-(transient-define-prefix org-ilm--import-org-transient ()
+(transient-define-prefix org-ilm--import-file-transient ()
   :value '("--method=cp")
   :refresh-suffixes t
-  ["Org file import"
-   ("f" "Org file" org-ilm--import-org-transient-file)
+  ["File import"
+   ("f" "File" org-ilm--import-file-transient-file)
    ("m" "Method of attachment" "--method="
     :allow-empty nil
-    :choices (mv cp) :prompt "Method of attachment: ")
+    :choices (mv cp ln lns) :prompt "Method of attachment: ")
    ("RET" "Import"
     (lambda ()
       (interactive)
-      (let ((args (org-ilm--import-org-transient-args)))
-        (org-ilm-import-org-file
+      (let ((args (org-ilm--import-file-transient-args)))
+        (org-ilm-import-file
          (plist-get args :file)
          (assoc org-ilm--active-collection org-ilm-collections)
          (intern (plist-get args :method)))))
     :inapt-if-not
     (lambda ()
-      (let ((args (org-ilm--import-org-transient-args)))
+      (let ((args (org-ilm--import-file-transient-args)))
         (not
          (and (plist-get args :file)
               (plist-get args :method)
@@ -3012,30 +3024,13 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            (method (cdr (assoc choice choices))))
       method)))
 
-(defun org-ilm-import-org-file (file collection method)
-  "Import an Org file."
-  (interactive
-   (list
-    (read-file-name "Import Org file: ")
-    (org-ilm--select-collection)
-    (org-ilm--import-select-method)))
-
-  (let* ((org-id (org-id-new))
-         (file-tmp-path (expand-file-name
-                         (format "%s.org" org-id)
-                         temporary-file-directory)))
-    
-    ;; Move or copy the file to tmp directory so we can rename the file with the
-    ;; org ID before attaching it.
-    (pcase method
-      ('mv (rename-file file file-tmp-path))
-      ('cp (copy-file file file-tmp-path))
-      (t (error "Parameter METHOD must be one of 'mv or 'cp.")))
-
-    (org-ilm--capture
-     'source
-     `(file ,(cdr collection))
-     (list :id org-id :file file-tmp-path))))
+(defun org-ilm-import-file (file collection method)
+  "Import a file."
+  (cl-assert (member method '(mv cp ln lns)))  
+  (org-ilm--capture
+   'source
+   `(file ,(cdr collection))
+   (list :file file :method method)))
 
 ;;;;; Website
 
