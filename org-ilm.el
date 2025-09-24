@@ -416,6 +416,7 @@ If empty return nil, and if only one, return it."
   ;;   (goto-char loc)))
   (org-node-goto-id org-id))
 
+;; TODO Export jump logic in own function
 (defmacro org-ilm--org-with-point-at (thing &rest body)
   "THING for now should be an org-id.
 
@@ -436,10 +437,13 @@ save-excursion."
        (org-with-wide-buffer
         ;; Jump to correct position
         (goto-char (org-find-property "ID" org-id))
+        
         ;; Reveal entry contents, otherwise run into problems parsing the
         ;; metadata, such as with org-srs drawer. Need to save outline
         ;; visiblity, otherwise will unfold headers.
-        (org-save-outline-visibility nil
+        ;; Furthermore, need to set USE-MARKERS to non-nil, otherwise it causes
+        ;; weird folding problems.
+        (org-save-outline-visibility 'use-markers
           ;; Just folding line region also seems to work from limited testing,
           ;; but play it safe
           ;; (org-fold-region (line-end-position 0) (line-end-position) nil)
@@ -651,6 +655,10 @@ wasteful if headline does not match query."
        :prelative (cdr priority)
        :pbeta beta
        :psample psample))))
+
+(defun org-ilm-element-is-card (element)
+  (cl-assert (org-ilm-element-p element))
+  (eq 'card (org-ilm-element-type element)))
 
 (cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
   "Return an element by their org id."
@@ -1922,7 +1930,7 @@ This is used to keep track of changes in priority and scheduling.")
       (setq attachment (org-ilm--attachment-find type (nth 4 (pop crumbs)))))
     attachment))
 
-(cl-defun org-ilm--attachment-open (&key pdf-no-region)
+(cl-defun org-ilm--attachment-open (&key pdf-no-region no-error)
   "Open the attachment of collection element at point, returns its buffer."
   (cond
    ;; Check if there is an attachment org-id.ext where org-id is current
@@ -1970,7 +1978,7 @@ This is used to keep track of changes in priority and scheduling.")
       (save-window-excursion
         (eww-browse-url web-ref))
       (switch-to-buffer "*eww*")))
-   (t (user-error "Attachment not found"))))
+   (t (unless no-error (user-error "Attachment not found")))))
   
 (defun org-ilm--attachment-open-by-id (id)
   (org-ilm--org-with-point-at id
@@ -2594,26 +2602,6 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
       (error "Can't pop an empty queue"))
     (let ((top (org-ilm-queue-head)))
       (org-ilm-queue-remove (org-ilm-element-id top)))))
-
-(cl-defun org-ilm--queue-add-by-id (org-id &key if-matches-query position minimum-position)
-  (when-let* ((element (org-ilm--element-by-id org-id :if-matches-query if-matches-query))
-              (queue (org-ilm-queue-elements))
-              (priority (org-ilm-element-psample element))
-              (position (or position
-                            (max
-                             (or minimum-position 0)
-                             (cl-position-if
-                              (lambda (el)
-                                (> (org-ilm-element-psample el) priority))
-                              queue))
-                            (length queue))))
-    (setq queue
-          (if (= position (length queue))
-              (append queue (list element))
-            (append (cl-subseq queue 0 position)
-                    (list element)
-                    (cl-subseq queue position))))
-    (setf (plist-get org-ilm-queue :elements) queue)))
 
 ;; TODO With prefix arg: transient with additional settings
 ;; - Mainly queue-specific priorities.
@@ -3482,7 +3470,7 @@ Headline can be a subject or not."
   (let ((id (if (stringp headline-or-id)
                 headline-or-id
               (org-element-property :ID headline-or-id))))
-    (org-ilm--debug "Gathering subjects for:" id)
+    ;; (org-ilm--debug "Gathering subjects for:" id)
     
     (or (gethash id org-ilm-priority-subject-cache)
         (let* ((parents-data
@@ -3940,8 +3928,10 @@ during review."
   (interactive)
 
   (when (org-ilm-reviewing-p)
-    (when (yes-or-no-p "Already reviewing! Jump to element being reviewed? ")
-      (org-ilm-review-open-current))
+    (pcase (read-char-choice "Already reviewing! (j)ump to element or (q)uit review? "
+                             '("j" "q"))
+      (?j (org-ilm-review-open-current))
+      (?q (org-ilm-review-quit)))
     (cl-return-from org-ilm-review-start))
 
   (when queue-buffer
@@ -4034,26 +4024,23 @@ during review."
     
     (let ((element (org-ilm-queue-pop)))
       
-      ;; Card might already be due, eg when rating again. So need to check the
+      ;; TODO Card might already be due, eg when rating again. So need to check the
       ;; new review time and add it back to the queue. Set a minimum position in
       ;; the queue so that the card is not reviewed too quickly again.
-      ;; TODO Resample priority
-      ;; (when (plist-get org-ilm--review-current-element-info :card-type)
-      ;;   (org-ilm--queue-add-by-id
-      ;;    (org-ilm-element-id element)
-      ;;    :if-matches-query t
-      ;;    :minimum-position 5))
       )
     (org-ilm--review-cleanup-current-element))
+  
   (if (org-ilm-queue-empty-p)
       (progn
         (message "Finished reviewing queue!")
-        (org-ilm-review-quit))
+        (org-ilm-review-quit)
+        (switch-to-buffer org-ilm-queue-active-buffer))
     (org-ilm--review-setup-current-element)
     (run-hooks 'org-ilm-review-next-hook)
     (org-ilm--review-open-current-element)))
 
 (defun org-ilm-review-open-current ()
+  "Open the attachment of the element currently being reviewed."
   (interactive)
   (let ((buf (plist-get org-ilm--review-current-element-info :buffer)))
     (if (and org-ilm--review-current-element-info (buffer-live-p buf))
@@ -4077,29 +4064,36 @@ a whole other problem, since we can only deal with one card (type?) now."
 
   (let* ((element (org-ilm-queue-head))
          (id (org-ilm-element-id element))
-         (is-card (eq 'card (org-ilm-element-type element)))
          card-type attachment-buffer)
 
     (org-ilm--org-with-point-at id
-      (when is-card
+      (when (org-ilm-element-is-card element)
         (setq card-type
               (org-ilm--srs-headline-item-type)))
+      
       (setq attachment-buffer
             ;; dont yet switch to the buffer, just return it so we can do some
             ;; processing first.
             (save-window-excursion
-              (org-ilm--attachment-open)))
+              (org-ilm--attachment-open :no-error t)))
+
+      ;; TODO Causes weird folding problems in collection file
       (org-clock-in))
 
-    (with-current-buffer attachment-buffer
-      (add-hook 'kill-buffer-hook
-                #'org-ilm--review-confirm-quit
-                nil t)
+    ;; Prepare the attachment buffer if exists
+    (when attachment-buffer
+      (with-current-buffer attachment-buffer
 
-      ;; We update the buffer-local `org-ilm--data' (see
-      ;; `org-ilm--attachment-prepare-buffer') with a start time.
-      (org-ilm--attachment-ensure-data-object)
-      (setf (plist-get org-ilm--data :start) (current-time)))
+        ;; Ask to end the review when killing the buffer
+        (add-hook 'kill-buffer-hook
+                  #'org-ilm--review-confirm-quit
+                  nil t)
+
+        ;; We update the buffer-local `org-ilm--data' (see
+        ;; `org-ilm--attachment-prepare-buffer') with a start time. This is used
+        ;; to calculate the new priority.
+        (org-ilm--attachment-ensure-data-object)
+        (setf (plist-get org-ilm--data :start) (current-time))))
 
     (setq org-ilm--review-current-element-info
           (list :element element
@@ -4108,40 +4102,48 @@ a whole other problem, since we can only deal with one card (type?) now."
                 :card-type card-type))))
 
 (defun org-ilm--review-open-current-element ()
-  ;; TODO Allow for elements with no buffer. Maybe just switch to element in collection.
-  (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
-        (card-type (plist-get org-ilm--review-current-element-info :card-type)))
-    (with-current-buffer (switch-to-buffer buffer)
-      (setq header-line-format
+  "Open and prepare the attachment buffer of the element being reviewed."
+  (if-let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
+           (card-type (plist-get org-ilm--review-current-element-info :card-type)))
+      (with-current-buffer (switch-to-buffer buffer)
+        (setq header-line-format
               (org-ilm--review-header-build))
 
-      ;; Prepare org-srs card overlays. First tried doing it before poping to
-      ;; buffer, but `org-srs-item-review' immediately prompts user to type any
-      ;; key to reveal the answer, so no time to switch to buffer.
-      (when card-type
-        (add-hook
-         'org-srs-item-after-confirm-hook
-         (lambda ()
-           (setq org-ilm--review-current-element-info
-                 (plist-put org-ilm--review-current-element-info
-                            :card-revealed t))
-           (setq header-line-format
-              (org-ilm--review-header-build)))
-         nil t)
-        (org-srs-item-review card-type)))))
+        ;; Prepare org-srs card overlays. First tried doing it before poping to
+        ;; buffer, but `org-srs-item-review' immediately prompts user to type any
+        ;; key to reveal the answer, so no time to switch to buffer.
+        (when card-type
+          (add-hook
+           'org-srs-item-after-confirm-hook
+           (lambda ()
+             (setq org-ilm--review-current-element-info
+                   (plist-put org-ilm--review-current-element-info
+                              :card-revealed t))
+             (setq header-line-format
+                   (org-ilm--review-header-build)))
+           nil t)
+          (org-srs-item-review card-type)))
+    ;; No attachment, simply go to the element in the collection
+    (org-ilm--org-goto-id (plist-get org-ilm--review-current-element-info :id))
+    (message "No attachment found for element")))
 
 (defun org-ilm--review-cleanup-current-element ()
+  "Clean up the element being reviewed, in preparation for the next element."
   (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
     (with-current-buffer buffer
-      (org-srs-item-cloze-remove-overlays (point-min) (point-max))
+      (when (plist-get org-ilm--review-current-element-info :card-type)
+        (org-srs-item-cloze-remove-overlays (point-min) (point-max)))
       (setq header-line-format nil)
-      (remove-hook 'kill-buffer-hook
-                   #'org-ilm--review-confirm-quit
-                   t))
+      (remove-hook 'kill-buffer-hook #'org-ilm--review-confirm-quit t))
+    ;; I know it doesn't make sense to clean the buffer then kill it, but better
+    ;; have the cleaning up code ready in case i want an option later to not
+    ;; kill the buffer
     (kill-buffer buffer))
-  ;; Strictly speaking not necessary: clocking into next task will clock out
-  ;; this one. 
+  
+  ;; Clock out. Strictly speaking not necessary: clocking into next task will
+  ;; clock out this one. But good to be explicit.
   (org-clock-out nil 'fail-quietly)
+  
   (setq org-ilm--review-current-element-info nil))
 
 (defun org-ilm--review-header-make-button (title func)
