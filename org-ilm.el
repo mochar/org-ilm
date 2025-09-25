@@ -1292,6 +1292,7 @@ When not specified, REGION is active region."
 
 (defun org-ilm--pdf-add-square-annotation (page region &optional label dont-save-buffer)
   "Add a square highlight annotation that is stored within the PDF file."
+  ;; Can only make annotations from within main file.
   (with-current-buffer (find-file-noselect (org-ilm--pdf-path))
     ;; Need active region for it to be square instead of text highlight
     (setq pdf-view--have-rectangle-region t)
@@ -1775,17 +1776,27 @@ set only (not let)."
                   extract-org-id))))
         (t (error "Unrecognized output type")))
 
-      (org-ilm--capture
-       'extract
-       org-id
-       capture-data
-       (lambda (&rest _)
-         (when capture-on-success
-           (funcall capture-on-success))
-         (org-ilm--pdf-add-square-annotation
-          current-page-real region extract-org-id)
-         (when (eq major-mode 'pdf-virtual-view-mode)
-           (org-ilm-pdf-virtual-refresh)))))))
+      ;; Temporary disable `org-link-parameters' which is an overkill way to
+      ;; deal with the following problem. When org-pdftools is used,
+      ;; `org-pdftools-setup-link' is called, which adds a custom link in
+      ;; `org-link-parameters' that detects an org capture in a pdf buffer, and
+      ;; then creates a text underline highlight automatically. This is
+      ;; undesired, so this turns it off. The backtrace is:
+      ;;   org-pdftools-store-link()
+      ;;   org-link--try-link-store-functions(nil)
+      ;;   org-store-link(nil)
+      (let ((org-link-parameters nil))
+        (org-ilm--capture
+         'extract
+         org-id
+         capture-data
+         (lambda (&rest _)
+           (when capture-on-success
+             (funcall capture-on-success))
+           (org-ilm--pdf-add-square-annotation
+            current-page-real region extract-org-id)
+           (when (eq major-mode 'pdf-virtual-view-mode)
+             (org-ilm-pdf-virtual-refresh))))))))
 
 (defun org-ilm-pdf-outline-extract ()
   "Turn PDF outline items into a extracts.
