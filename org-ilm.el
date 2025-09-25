@@ -739,6 +739,7 @@ If `HEADLINE' is passed, read it as org-property."
 The callback ON-SUCCESS is called when capture is saved.
 The callback ON-ABORT is called when capture is cancelled."
   (cl-assert (member type '(extract card source)))
+  
   (let* ((state (car (if (eq type 'card) org-ilm-card-states org-ilm-incr-states)))
          (target (if (stringp target-or-id)
                      ;; Originally used the built-in 'id target, however for
@@ -755,7 +756,7 @@ The callback ON-ABORT is called when capture is cancelled."
                    target-or-id))
          (title (plist-get data :title))
          (id (or (plist-get data :id) (org-id-new)))
-         (attachment-ext (plist-get data :ext))
+         (ext (plist-get data :ext))
          (content (plist-get data :content))
          (props (plist-get data :props))
          (file (plist-get data :file))
@@ -811,15 +812,15 @@ The callback ON-ABORT is called when capture is cancelled."
       (setq title (org-ilm--generate-text-snippet content)))
 
     ;; Set extension from file when set to t
-    (when (eq attachment-ext t)
+    (when (eq ext t)
       (if file
-          (setq attachment-ext (file-name-extension file))
+          (setq ext (file-name-extension file))
         (error "Cannot infer extension when no file provided (:ext=t)")))
 
     ;; Save content in a temporary file if no file provided
     (when (and (not file) content)
       (setq file (expand-file-name
-                  (format "%s.%s" id (or attachment-ext "org"))
+                  (format "%s.%s" id (or ext "org"))
                   temporary-file-directory)
             method 'cp)
 
@@ -845,7 +846,12 @@ The callback ON-ABORT is called when capture is cancelled."
                    ;; callback. Has to be done in the hook so that point is on
                    ;; the headline, and respects file-local or .dir-locals
                    ;; `org-attach-id-dir'.
-                   (setq attach-dir (expand-file-name (org-attach-dir)))
+                   (setq attach-dir
+                         ;; If extract/card need to use inherited attach dir. If
+                         ;; new source, make new one from id.
+                         (if-let ((d (org-attach-dir)))
+                             (expand-file-name d)
+                           (org-attach-dir-from-id id)))
                    
                    ;; Regardless of type, every headline will have an id.
                    (org-entry-put nil "ID" id)
@@ -853,8 +859,8 @@ The callback ON-ABORT is called when capture is cancelled."
                    (org-node-nodeify-entry)
 
                    ;; Attachment extension if specified
-                   (when attachment-ext
-                     (org-entry-put nil "ILM_EXT" attachment-ext))
+                   (when ext
+                     (org-entry-put nil "ILM_EXT" ext))
 
                    ;; Additional properties
                    (when props
@@ -2990,7 +2996,12 @@ A lot of formatting code from org-ql."
     (read-file-name prompt nil initial-input t)))
 
 (transient-define-prefix org-ilm--import-file-transient ()
-  :value '("--method=cp")
+  :value
+  (lambda ()
+    (append
+     '("--method=cp")
+     (when buffer-file-name
+       (list (concat "--file=" buffer-file-name)))))
   :refresh-suffixes t
   ["File import"
    ("f" "File" org-ilm--import-file-transient-file)
@@ -3031,7 +3042,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (org-ilm--capture
    'source
    `(file ,(cdr collection))
-   (list :file file :method method)))
+   (list :file file :method method :ext t)))
 
 ;;;;; Website
 
