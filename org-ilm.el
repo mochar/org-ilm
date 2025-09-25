@@ -1182,6 +1182,37 @@ When DIRECTORY-P, return directory of the file."
         (file-name-directory path)
       path)))
 
+(defun org-ilm-pdf-virtual-refresh ()
+  "Refresh the virtual document."
+  (interactive)
+  (unless (eq major-mode 'pdf-virtual-view-mode)
+    (error "This command can only be run in a pdf-view-mode buffer"))
+
+  ;; The `pdf-view-have-image-mode-pixel-vscroll' constant checks
+  ;; if the Emacs version supports pixel-based vertical scrolling,
+  ;; which is necessary for `window-vscroll' to return the correct value.
+  (let* ((pixel-scroll-p (bound-and-true-p pdf-view-have-image-mode-pixel-vscroll))
+         (page (pdf-view-current-page))
+         (size pdf-view-display-size)
+         (hscroll (window-hscroll))
+         (vscroll (window-vscroll nil pixel-scroll-p)))
+    (pdf-virtual-edit-mode)
+    (pdf-virtual-view-mode)
+    
+    ;; Set the display size (zoom level).
+    ;; This needs to be done *before* going to the page so the
+    ;; image is rendered at the correct size.
+    (setq-local pdf-view-display-size size)
+
+    ;; Go to the specified page. This will also redisplay the buffer.
+    (pdf-view-goto-page page)
+
+    ;; After redisplaying, set the scroll positions.
+    ;; It's important to do this last, as the scrollable area
+    ;; depends on the rendered image size.
+    (set-window-hscroll (selected-window) hscroll)
+    (set-window-vscroll (selected-window) vscroll pixel-scroll-p)))
+
 ;;;;; Data
 ;; Like outline and stuff
 
@@ -1241,35 +1272,43 @@ When not specified, REGION is active region."
      ((eq major-mode 'pdf-virtual-view-mode)
       (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
              (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
-        (pcase-let* ((`(,LE ,TO ,RI, BO) page-region)
-                     (`(,le ,to ,ri ,bo) region)
-                     (w (- RI LE))
-                     (h (- BO TO)))
-          (list (+ LE (* le w))
-                (+ TO (* to h))
-                (+ LE (* ri w))
-                (+ TO (* bo h))))))
+        (if page-region
+            (pcase-let* ((`(,LE ,TO ,RI, BO) page-region)
+                         (`(,le ,to ,ri ,bo) region)
+                         (w (- RI LE))
+                         (h (- BO TO)))
+              (list (+ LE (* le w))
+                    (+ TO (* to h))
+                    (+ LE (* ri w))
+                    (+ TO (* bo h))))
+          ;; When page-region is nil, that means we are in a virtual page that
+          ;; is not zoomed into a particular region, just shows the whole
+          ;; page. In the case the virtual region is the same as the normal
+          ;; document region.
+          region)))
      (t (error "Not in a PDF buffer")))))
 
 ;;;;; Annotation highlight
 
-(defun org-ilm--pdf-add-square-annotation (region &optional label dont-save-buffer)
+(defun org-ilm--pdf-add-square-annotation (page region &optional label dont-save-buffer)
   "Add a square highlight annotation that is stored within the PDF file."
-  ;; Need active region for it to be square instead of text highlight
-  (setq pdf-view--have-rectangle-region t)
-  (setq pdf-view-active-region region)
-  (pdf-view--push-mark)
-  (pdf-annot-add-markup-annotation
-   (list region)
-   'highlight
-   (face-background 'org-ilm-face-extract)
-   `(
-     (opacity . 1.0)
-     (label . ,label)
-     ;; (contents . "")
-     ))
-  (unless dont-save-buffer
-    (save-buffer)))
+  (with-current-buffer (find-file-noselect (org-ilm--pdf-path))
+    ;; Need active region for it to be square instead of text highlight
+    (setq pdf-view--have-rectangle-region t)
+    (setq pdf-view-active-region region)
+    (pdf-view--push-mark)
+    (pdf-annot-add-annotation
+     'highlight
+     (list region)
+     (list
+      (cons 'opacity 1.0)
+      (cons 'label label)
+      (cons 'color (face-background 'org-ilm-face-extract))
+      ;; (cons 'contents "")
+      )
+     page)
+    (unless dont-save-buffer
+      (save-buffer))))
 
 (defun org-ilm--pdf-annot-create-context-menu-advice (func &rest args)
   "Advice the function to add an additional menu item to open the
@@ -1741,11 +1780,12 @@ set only (not let)."
        org-id
        capture-data
        (lambda (&rest _)
-         (with-current-buffer pdf-buffer
-           (org-ilm--pdf-add-square-annotation
-            region extract-org-id))
          (when capture-on-success
-           (funcall capture-on-success)))))))
+           (funcall capture-on-success))
+         (org-ilm--pdf-add-square-annotation
+          current-page-real region extract-org-id)
+         (when (eq major-mode 'pdf-virtual-view-mode)
+           (org-ilm-pdf-virtual-refresh)))))))
 
 (defun org-ilm-pdf-outline-extract ()
   "Turn PDF outline items into a extracts.
