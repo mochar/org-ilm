@@ -783,7 +783,8 @@ The callback ON-ABORT is called when capture is cancelled."
                 ;; Make sure the file name is the org-id
                 (rename-file
                  (expand-file-name (file-name-nondirectory file) attach-dir)
-                 (expand-file-name (concat id "." (file-name-extension file)) attach-dir))))
+                 (expand-file-name (concat id "." (file-name-extension file)) attach-dir)
+                 'ok-if-already-exists)))
             
                 ))
          (after-finalize
@@ -844,7 +845,7 @@ The callback ON-ABORT is called when capture is cancelled."
                    ;; callback. Has to be done in the hook so that point is on
                    ;; the headline, and respects file-local or .dir-locals
                    ;; `org-attach-id-dir'.
-                   (setq attach-dir (org-attach-dir-from-id id))
+                   (setq attach-dir (expand-file-name (org-attach-dir)))
                    
                    ;; Regardless of type, every headline will have an id.
                    (org-entry-put nil "ID" id)
@@ -1122,7 +1123,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (org-ilm--pdf-insert-range-as-extract range title (+ level depth) data)))
 
 (defun org-ilm--pdf-insert-range-as-extract (range title level &optional data)
-  (let* ((priority (or (plist-get data :priority) 5))
+  (let* ((priority (or (plist-get data :priority) .5))
          (interval (or (plist-get data :interval)
                        (org-ilm--schedule-interval-from-priority priority)))
          (org-id (or (plist-get data :id) (org-id-new)))
