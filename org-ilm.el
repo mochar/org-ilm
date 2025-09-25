@@ -3229,11 +3229,17 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
             :collection org-ilm--active-collection))))
 
 (defun org-ilm--import-registry-transient-attachments (&optional entry-id)
+  "Returns the file paths either in the attachment directory or in the PATH property."
   (unless entry-id
     (setq entry-id (plist-get (org-ilm--import-registry-transient-args) :entry)))
-  (when-let* ((attach-dir (org-ilm--org-with-point-at entry-id (org-attach-dir)))
+  (if-let* ((attach-dir (org-ilm--org-with-point-at entry-id (org-attach-dir)))
               (files (org-attach-file-list attach-dir)))
-    (mapcar (lambda (f) (expand-file-name f attach-dir)) files)))
+      (mapcar (lambda (f) (expand-file-name f attach-dir)) files)
+
+    ;; No attachment directory. Check PATH property.
+    (when-let* ((entry (org-mem-entry-by-id entry-id))
+                (file (org-mem-entry-property "PATH" entry)))
+      (list file))))
 
 (transient-define-infix org-ilm--import-registry-transient-entry ()
   :class 'transient-option
@@ -3283,7 +3289,6 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                 (plist-get (org-ilm--import-registry-transient-args) :entry)))]
 
   ["Attachment"
-   ;; :inapt-if-not org-ilm--import-registry-transient-attachments
    :hide (lambda () (not (org-ilm--import-registry-transient-attachments)))
    ("a" "Attachment" org-ilm--import-registry-transient-attachment)
    ("m" "Method of attachment" "--method="
