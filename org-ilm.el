@@ -576,6 +576,15 @@ The collections are stored in `org-ilm-collections'."
       (f-glob "*.org" file-or-dir))
      (t (error "No files in collection %s" collection)))))
 
+(defun org-ilm--select-collection-file (collection)
+  "Propmt user to select a file from COLLECTION."
+  (cl-assert (assoc collection org-ilm-collections))
+  (let ((files (org-ilm--collection-files collection)))
+    (cond
+     ((= 1 (length files))
+      (car files))
+     ((> (length files) 1)
+      (completing-read "Collection file: " files nil 'require-match)))))
 
 ;;;; Types
 
@@ -2967,6 +2976,8 @@ A lot of formatting code from org-ql."
     :inapt-if-nil org-ilm--active-collection)
    ("w" "Website" org-ilm--import-website-transient
     :inapt-if-nil org-ilm--active-collection)
+   ("r" "Registry" org-ilm--import-registry-transient
+    :inapt-if-nil org-ilm--active-collection)
    ]
   )
 
@@ -3204,7 +3215,108 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
               #'convtools--convert-with-monolith
               :process-id org-id
               monolith-args))))
-     ))))
+       ))))
+
+
+;;;;; Registry
+
+(defun org-ilm--import-registry-transient-args (&optional args)
+  (when transient-current-command
+    (let ((args (or args (transient-args transient-current-command))))
+      (list :entry (transient-arg-value "--entry=" args)
+            :attachment (transient-arg-value "--attachment=" args)
+            :method (transient-arg-value "--method=" args)
+            :collection org-ilm--active-collection))))
+
+(defun org-ilm--import-registry-transient-attachments (&optional entry-id)
+  (unless entry-id
+    (setq entry-id (plist-get (org-ilm--import-registry-transient-args) :entry)))
+  (when-let* ((attach-dir (org-ilm--org-with-point-at entry-id (org-attach-dir)))
+              (files (org-attach-file-list attach-dir)))
+    (mapcar (lambda (f) (expand-file-name f attach-dir)) files)))
+
+(transient-define-infix org-ilm--import-registry-transient-entry ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--entry="
+  :allow-empty nil
+  :always-read t
+  :reader
+  (lambda (prompt initial-input history)
+    (when-let* ((entry (org-registry--select-entry))
+                (id (org-mem-entry-id entry)))
+      
+      (when-let ((attachments (org-ilm--import-registry-transient-attachments id))
+                 (attachment-object (transient-suffix-object 'org-ilm--import-registry-transient-attachment)))
+        (oset attachment-object value
+              (completing-read "Attachment: " attachments)))
+      
+      id)))
+
+(transient-define-infix org-ilm--import-registry-transient-attachment ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--attachment="
+  :allow-empty nil
+  :always-read t
+  :reader
+  (lambda (prompt initial-input history)
+    (let* ((files (org-ilm--import-registry-transient-attachments)))
+      (completing-read "Attachment: " files))))
+
+(transient-define-prefix org-ilm--import-registry-transient ()
+  :value (lambda ()
+           '("--method=cp"))
+  :refresh-suffixes t
+
+  ["Registry import"
+   ("e" "Entry" org-ilm--import-registry-transient-entry)
+   (:info (lambda ()
+            (let* ((args (org-ilm--import-registry-transient-args))
+                   (entry (org-mem-entry-by-id (plist-get args :entry)))
+                   (type (org-mem-entry-property "TYPE" entry))
+                   (title (org-mem-entry-title entry)))
+              (propertize
+               (format "%s (%s)" title type)
+               'face 'transient-inapt-suffix)))
+          :if (lambda ()
+                (plist-get (org-ilm--import-registry-transient-args) :entry)))]
+
+  ["Attachment"
+   ;; :inapt-if-not org-ilm--import-registry-transient-attachments
+   :hide (lambda () (not (org-ilm--import-registry-transient-attachments)))
+   ("a" "Attachment" org-ilm--import-registry-transient-attachment)
+   ("m" "Method of attachment" "--method="
+    :allow-empty nil :transient transient--do-call
+    :choices (mv cp ln lns) :prompt "Method of attachment: ")]
+  
+  [
+   [("RET" "Import"
+     (lambda ()
+       (interactive)
+       (cl-destructuring-bind (&key collection entry attachment method)
+           (org-ilm--import-registry-transient-args)
+         (org-ilm-import-registry collection entry attachment (when method (intern method)))))
+     :inapt-if
+     (lambda ()
+       (let ((args (org-ilm--import-registry-transient-args)))
+         (not 
+          (and (plist-get args :entry)
+               (plist-get args :collection))))))
+    ]])
+
+(defun org-ilm-import-registry (collection entry-id &optional attachment method)
+  "Import a registry entry."
+  (cl-assert (or (null method) (member method '(mv cp ln lns))))
+
+  (let ((entry (org-mem-entry-by-id entry-id))
+        (collection-file (org-ilm--select-collection-file collection)))
+    (org-ilm--capture
+     'source
+     (list 'file collection-file)
+     (list :file attachment :method (or method 'cp) :ext (when attachment t)
+           :title (org-mem-entry-title entry)
+           :props (list :ROAM_REFS (format "[[registry:%s]]" entry-id))))))
 
 
 ;;;; Math and stats
