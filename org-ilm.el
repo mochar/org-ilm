@@ -530,6 +530,22 @@ The returned function can be used to call `remove-hook' if needed."
     (add-hook hook hook-function depth local)
     hook-function))
 
+(defun org-ilm--clock-in-continue-last ()
+  "Edit out the clock-out time of the last entry and continue as if never clocked out."
+  (when (org-clocking-p)
+    (org-clock-out))
+  (save-excursion
+    (org-back-to-heading 'invisble-ok)
+    (save-restriction
+      (org-ilm--org-narrow-to-header)
+      (when (and
+             (re-search-forward org-clock-line-re nil 'noerror)
+             (re-search-forward (org-re-timestamp 'inactive) (line-end-position) 'noerror))
+        (delete-region (point) (line-end-position))
+        (let ((org-clock-in-resume t)
+              (org-clock-idle-time nil))
+          (org-clock-in))))))
+
 ;;;; Collection
 
 (defcustom org-ilm-collections '((ilm . "~/ilm/"))
