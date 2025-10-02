@@ -4154,6 +4154,17 @@ TODO Skip if self or descendant."
 
 ;;;; Review
 
+(defcustom org-ilm-review-clock-back-in t
+  "What to do with active clock after review.
+Nil to do nothing (stay clocked out), t to clock back in, or 'continue
+to clock back in and continue the previous clock as if never clocked
+out."
+  :type '(choice
+          (const :tag "No (stay clocked out)" nil)
+          (const :tag "Yes (clock back in)" t)
+          (const :tag "Yes and continue last" continue))
+  :group 'org-ilm)
+
 ;; Thought about making review stuff buffer local to queue buffer (as
 ;; `org-ilm-queue' itself is) but it might get messy. For example org only
 ;; allows for having one headline clocked in. In reality there should be only
@@ -4273,14 +4284,19 @@ during review."
   (interactive)
   (org-ilm--review-cleanup-current-element)
   (org-ilm-review-mode -1)
+
+  ;; Clock back in the active clock before review
   (when org-ilm--review-interrupted-clock-marker
-    (when (markerp org-ilm--review-interrupted-clock-marker)
+    (when (and org-ilm-review-clock-back-in
+               (markerp org-ilm--review-interrupted-clock-marker))
       (with-current-buffer (marker-buffer org-ilm--review-interrupted-clock-marker)
         (save-excursion
           (goto-char org-ilm--review-interrupted-clock-marker)
-          ;; '(64) means to set start-time to be last clock out time
-          (org-clock-in '(64)))))
+          (pcase org-ilm-review-clock-back-in
+            ('continue (org-ilm--clock-in-continue-last))
+            (t (org-clock-in))))))
     (setq org-ilm--review-interrupted-clock-marker nil))
+  
   (run-hooks 'org-ilm-review-quit-hook))
 
 (defun org-ilm-review-next (&optional rating)
