@@ -99,6 +99,7 @@
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-minor-mode'."
   "i" #'org-ilm-import
+  "e" #'org-ilm-element-actions
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract-dwim
   "z" #'org-ilm-cloze
@@ -415,9 +416,19 @@ If empty return nil, and if only one, return it."
   ;;   (goto-char loc)))
   (org-node-goto-id org-id))
 
+(defmacro org-ilm--org-with-headline-contents-visible (&rest body)
+  "Necessary when parsing hidden/collapsed data within headline."
+  (declare (debug (body)) (indent 1))
+  ;; Need to save outline visiblity, otherwise will unfold headers.
+  ;; Furthermore, need to set USE-MARKERS to non-nil, otherwise it causes weird
+  ;; folding problems.
+  `(org-save-outline-visibility 'use-markers
+     (org-fold-show-entry)
+     ,@body))
+
 ;; TODO Export jump logic in own function
 (defmacro org-ilm--org-with-point-at (thing &rest body)
-  "THING for now should be an org-id.
+  "THING should be an org-id or nil.
 
 Note: Previously used org-id-find but it put point above
 headline. org-mem takes me there directly.
@@ -425,29 +436,28 @@ headline. org-mem takes me there directly.
 Alternatively org-id-goto could be used, but does not seem to respect
 save-excursion."
   (declare (debug (body)) (indent 1))
-  `(when-let* ((org-id ,thing)
-               (entry (org-mem-entry-by-id org-id))
-               (file (org-mem-entry-file-truename entry))
-               (buf (or (find-buffer-visiting file)
-                        (find-file-noselect file))))
-     (with-current-buffer buf
-       ;; We need to widen the buffer because `find-buffer-visiting' might
-       ;; return an active, narrowed buffer.
-       (org-with-wide-buffer
-        ;; Jump to correct position
-        (goto-char (org-find-property "ID" org-id))
-        
-        ;; Reveal entry contents, otherwise run into problems parsing the
-        ;; metadata, such as with org-srs drawer. Need to save outline
-        ;; visiblity, otherwise will unfold headers.
-        ;; Furthermore, need to set USE-MARKERS to non-nil, otherwise it causes
-        ;; weird folding problems.
-        (org-save-outline-visibility 'use-markers
-          ;; Just folding line region also seems to work from limited testing,
-          ;; but play it safe
-          ;; (org-fold-region (line-end-position 0) (line-end-position) nil)
-          (org-fold-show-entry)
-          ,@body)))))
+  `(cond
+    ((null ,thing)
+     ;; Reveal entry contents, otherwise run into problems parsing the metadata,
+     ;; such as with org-srs drawer.
+     (org-ilm--org-with-headline-contents-visible ,@body))
+    ((stringp ,thing)
+     (when-let* ((org-id ,thing)
+                 (entry (org-mem-entry-by-id org-id))
+                 (file (org-mem-entry-file-truename entry))
+                 (buf (or (find-buffer-visiting file)
+                          (find-file-noselect file))))
+       (with-current-buffer buf
+         ;; We need to widen the buffer because `find-buffer-visiting' might
+         ;; return an active, narrowed buffer.
+         (org-with-wide-buffer
+          ;; Jump to correct position
+          (goto-char (org-find-property "ID" org-id))
+          
+          ;; Reveal entry contents, otherwise run into problems parsing the
+          ;; metadata, such as with org-srs drawer.
+          (org-ilm--org-with-headline-contents-visible ,@body)))))
+    (t (error "THING should be org-id or nil"))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
@@ -547,7 +557,8 @@ the priority, or error if there is no priority."
 	  (goto-char (match-end 2))
 	  (insert " [#" value "]"))
       (goto-char (match-beginning 3))
-      (insert "[#" value "] "))))
+      (insert "[#" value "] "))
+    (message "Priority set to %s" value)))
 
 (defun org-ilm--clock-in-continue-last ()
   "Edit out the clock-out time of the last entry and continue as if never clocked out."
@@ -700,6 +711,17 @@ wasteful if headline does not match query."
        :pbeta beta
        :psample psample))))
 
+(defun org-ilm-element-from-context ()
+  (let ((location (org-ilm--where-am-i)))
+    (pcase (car location)
+      ('collection
+       (condition-case-unless-debug err
+           (org-ilm-element-at-point)
+         (error nil)))
+      ('attachment
+       (org-ilm--org-with-point-at (nth 1 location)
+         (org-ilm-element-at-point))))))
+
 (defun org-ilm-element-is-card (element)
   (cl-assert (org-ilm-element-p element))
   (eq 'card (org-ilm-element-type element)))
@@ -792,6 +814,85 @@ If `HEADLINE' is passed, read it as org-property."
                                    (org-element-property :drawer-name drawer) "LOGBOOK"))
                                 drawers)))
             (org-ilm--logbook-parse logbook)))))))
+
+;;;;; Actions
+
+(defun org-ilm-element-set-schedule (element)
+  "Set the schedule of an ilm element."
+  (interactive
+   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
+  (org-ilm--org-with-point-at (org-ilm-element-id element)
+    (call-interactively #'org-ilm-schedule)))
+
+(defun org-ilm-element-set-priority (element)
+  "Set the priority of an ilm element."
+  (interactive
+   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
+  (org-ilm--org-with-point-at (org-ilm-element-id element)
+    (let ((min org-priority-highest)
+          (max org-priority-lowest)
+          priority)
+      (while (null priority)
+        (let ((number (read-number (format "Priority (%s-%s): " min max) org-priority-default)))
+          (when (<= min number max)
+            (setq priority number))))
+      (org-ilm--org-priority-set priority))))
+
+;;;;; Transient
+
+(defvar org-ilm--element-transient-element nil)
+
+(transient-define-suffix org-ilm--element-transient-schedule ()
+  :key "s"
+  :description
+  (lambda ()
+    (concat
+     "Schedule "
+     (when-let* ((element org-ilm--element-transient-element)
+                 (sched (org-ilm-element-sched element)))
+       (propertize (ts-format "%Y-%m-%d" sched) 'face 'transient-value))))
+  :transient 'transient--do-call
+  (interactive)
+  (call-interactively #'org-ilm-element-set-schedule)
+  (setq org-ilm--element-transient-element (org-ilm-element-from-context)))
+
+(transient-define-suffix org-ilm--element-transient-priority ()
+  :key "p"
+  :description
+  (lambda ()
+    (concat
+     "Priority "
+     (when-let* ((element org-ilm--element-transient-element)
+                 (pcookie (org-ilm-element-pcookie element)))
+       (propertize (format "#%s" pcookie) 'face 'transient-value))))
+  :transient 'transient--do-call
+  (interactive)
+  (call-interactively #'org-ilm-element-set-priority)
+  (setq org-ilm--element-transient-element (org-ilm-element-from-context)))
+
+(transient-define-prefix org-ilm--element-transient ()
+  :refresh-suffixes t
+  [:description
+   (lambda () (org-ilm-element-title org-ilm--element-transient-element))
+   (org-ilm--element-transient-schedule)
+   (org-ilm--element-transient-priority)
+   ]
+  )
+
+(defun org-ilm-element-actions ()
+  "Open menu to apply an action on an element."
+  (interactive)
+  (let ((element (org-ilm-element-from-context)))
+    (if (null element)
+        (user-error "No ilm element!")
+      (setq org-ilm--element-transient-element element)
+      ;; Unset var after transient exited. Tried temporarily setting var within
+      ;; let, but gets lost somehow.
+      (org-ilm--add-hook-once
+       'transient-post-exit-hook
+       (lambda () (setq org-ilm--element-transient-element nil)))
+      (org-ilm--element-transient))))
+
 
 ;;;; Capture
 
@@ -4165,6 +4266,8 @@ out."
           (const :tag "Yes and continue last" continue))
   :group 'org-ilm)
 
+;;;;; Variables
+
 ;; Thought about making review stuff buffer local to queue buffer (as
 ;; `org-ilm-queue' itself is) but it might get messy. For example org only
 ;; allows for having one headline clocked in. In reality there should be only
@@ -4192,6 +4295,8 @@ out."
   "<f7>" #'org-ilm-review-rate-hard
   "<f8>" #'org-ilm-review-rate-again
   "<f9>" #'org-ilm-review-next)
+
+;;;;; Review logic
 
 ;;;###autoload
 (define-minor-mode org-ilm-review-mode
@@ -4480,6 +4585,8 @@ a whole other problem, since we can only deal with one card (type?) now."
   
   (setq org-ilm--review-current-element-info nil))
 
+;;;;; Buffer header 
+
 (defun org-ilm--review-header-make-button (title func)
   (propertize
    (substitute-command-keys
@@ -4522,7 +4629,7 @@ a whole other problem, since we can only deal with one card (type?) now."
           "Again" 'org-ilm-review-rate-again))
         ))
 
-       )))
+     )))
 
 ;;;; Footer
 
