@@ -209,11 +209,6 @@
         (org-ilm-open-collection)))
      (t (org-ilm-open-collection)))))
 
-(defun org-ilm-set-schedule-from-priority ()
-  "Set schedule date based on priority."
-  (interactive)
-  (org-ilm--set-schedule-from-priority))
-
 (defun org-ilm-cloze-toggle-this ()
   "Toggle cloze at point, without creating the card."
   (interactive)
@@ -251,6 +246,10 @@
 (defun org-ilm--debug-all (vals args-func &optional fmt)
   (dolist (val vals)
     (apply #'org-ilm--debug fmt (funcall args-func val))))
+
+(defun org-ilm--ts-today ()
+  (let ((now (ts-now)))
+    (make-ts :year (ts-year now) :month (ts-month now) :day (ts-day now))))
 
 (defun org-ilm--select-alist (alist &optional prompt formatter)
   "Prompt user for element in alist to select from.
@@ -530,6 +529,26 @@ The returned function can be used to call `remove-hook' if needed."
     (add-hook hook hook-function depth local)
     hook-function))
 
+(defun org-ilm--org-priority-set (value)
+  "Set the priority of element at point to VALUE.
+
+This function was made to deal with a bug in `org-priority' where a
+value of 32 is read as the character ?\s (32) which causes it to remove
+the priority, or error if there is no priority."
+  (when (numberp value) (setq value (number-to-string value)))
+  (save-excursion
+    (org-back-to-heading t)
+    (when (looking-at org-priority-regexp)
+      (org-priority 'remove))
+    (let ((case-fold-search nil))
+      (looking-at org-todo-line-regexp))
+    (if (match-end 2)
+        (progn
+	  (goto-char (match-end 2))
+	  (insert " [#" value "]"))
+      (goto-char (match-beginning 3))
+      (insert "[#" value "] "))))
+
 (defun org-ilm--clock-in-continue-last ()
   "Edit out the clock-out time of the last entry and continue as if never clocked out."
   (when (org-clocking-p)
@@ -654,10 +673,10 @@ wasteful if headline does not match query."
          (scheduled (if is-card
                         ;; TODO Move this out to srs section
                         (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
-                      ;; TODO ts-parse-org-element returns non-nil even if no scheduled
-                      (ts-parse-org-element (org-element-property :scheduled headline))))
+                      (when-let ((s (org-element-property :scheduled headline)))
+                        (ts-parse-org-element s))))
          (now (ts-now)))
-       
+    
     (when type ; non-nil only when org-ilm type
       (make-org-ilm-element
        ;; Headline element properties
@@ -685,6 +704,20 @@ wasteful if headline does not match query."
   (cl-assert (org-ilm-element-p element))
   (eq 'card (org-ilm-element-type element)))
 
+(defun org-ilm-element-last-review (element)
+  (cl-assert (org-ilm-element-p element))
+  (org-ilm--org-with-point-at (org-ilm-element-id element)
+    (pcase (org-ilm-element-type element)
+      ('incr (plist-get (car (org-ilm--logbook-read)) :timestamp-end))
+      ('card (org-ilm--srs-last-review-timestamp)))))
+
+(defun org-ilm-element-last-interval (element)
+  "Last interval in days."
+  (when-let ((last-review (org-ilm-element-last-review element))
+             (sched (org-ilm-element-sched element)))
+    ;; Seconds to days
+    (/ (ts-diff last-review sched) 86400)))
+    
 (cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
   "Return an element by their org id."
   (cond
@@ -718,12 +751,16 @@ wasteful if headline does not match query."
      ;; https://orgmode.org/worg/dev/org-element-api.html
      ;; See: Timestamp, Clock
      (lambda (clock)
-       (let ((timestamp (org-element-property :value clock)))
+       (let* ((timestamp (org-element-property :value clock))
+              (stamps (split-string (org-element-property :raw-value timestamp) "--")))
          (list
           :duration-minutes
           (when-let ((duration (org-element-property :duration clock)))
             (org-duration-to-minutes duration))
           :status (org-element-property :status clock)
+          :timestamp-start (ts-parse-org (nth 0 stamps))
+           ;; May be nil if active clock
+          :timestamp-end (when-let ((s (nth 1 stamps))) (ts-parse-org s))
           :day-end (org-element-property :day-end timestamp)
           :day-start (org-element-property :day-start timestamp)
           :month-end (org-element-property :month-end timestamp)
@@ -3622,7 +3659,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
            (min org-priority-highest)
            (max org-priority-lowest)
            (priority (round (+ min (* mode (- max min))))))
-      (org-priority priority))))
+      (org-ilm--org-priority-set priority))))
 
 (defun org-ilm--priority-a-from-duration (duration)
   "S-curve map duration to a."
@@ -3726,12 +3763,54 @@ Headline can be a subject or not."
     (let ((new-priority (org-ilm--get-priority)))
       (org-ilm--set-schedule-from-priority))))
 
+;; TODO Better scheduling algorithm:
+;; Early review, etc.
+(defun org-ilm--schedule-interval-calculate (priority scheduled last-interval)
+  "Calculate the new schedule interval assuming review was done today."
+  (if (null last-interval)
+      (org-ilm--schedule-interval-from-priority priority)
+    (* last-interval 1.5)))
+
+(defun org-ilm--element-schedule-interval-calculate (element)
+  (let ((last-interval (org-ilm-element-last-interval element))
+        (priority (org-ilm-element-prelative element))
+        (scheduled (org-ilm-element-sched element)))
+    (org-ilm--schedule-interval-calculate priority scheduled last-interval)))
+
+;; TODO Turn this to function
+;; (due (<= (/ (ts-diff scheduled (org-ilm--ts-today)) 86400) 0)))
+
+(defun org-ilm--schedule-update ()
+  "Update the scheduled date of an incr element at point after review.
+
+This will update the schedule date regardless of whether the element is
+due or not."
+  (let* ((element (org-ilm-element-at-point))
+         (scheduled (org-ilm-element-sched element)))
+    (cl-assert scheduled)
+    (cl-assert (eq (org-ilm-element-type element) 'incr))
+    (let* ((interval (org-ilm--element-schedule-interval-calculate element))
+           (timestamp (ts-adjust 'day interval (org-ilm--ts-today))))
+      (cl-assert (> interval 0))
+      (org-schedule nil (ts-format "%Y-%m-%d" timestamp)))))
+
+(defun org-ilm-schedule (element)
+  "Set or update the schedule of the element at point."
+  (interactive (list (org-ilm-element-at-point)))
+  (unless element (user-error "No ilm element at point"))
+
+  ;; Only read the date
+  (let ((date (org-read-date nil nil nil "Schedule: ")))
+    (pcase (org-ilm-element-type element)
+      ('incr (org-schedule nil date))
+      ;; Convert to ISO8601
+      ('card (org-ilm--srs-set-timestamp (concat date "T09:00:00Z"))))))
+    
+
+
 ;;;; SRS
 
 ;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
-;; TODO https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169
-;; TODO https://github.com/bohonghuang/org-srs/issues/22#issuecomment-2817035409
-;; org-srs-table-lines
 
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
@@ -3761,6 +3840,7 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
   ;; When buffer narrows, will only review items within narrowed region.
   (org-srs-review-start))
 
+;; TODO This returns the first item only.
 (defun org-ilm--srs-headline-item ()
   "Return item of the org-srs card of headline at point."
   (save-excursion
@@ -3769,18 +3849,58 @@ https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
     (forward-line)
     (org-srs-item-at-point)))
 
+;; TODO This returns the first item only.
 (defun org-ilm--srs-headline-item-type ()
   "Return the item type of the cards of this headline."
   ;; Returns (type-info id)
   ;; type-info can be: (cloze) (card front) (card back)
   (car (car (org-ilm--srs-headline-item))))
 
+;; TODO This returns the first item only.
 (defun org-ilm--srs-review-rate (rating)
   "Rate SRS item without being in review.
 
 https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169"
   (org-srs-property-let ((org-srs-review-cache-p nil))
-     (apply #'org-srs-review-rate rating (org-ilm--srs-headline-item))))
+    (apply #'org-srs-review-rate rating (org-ilm--srs-headline-item))))
+
+;; TODO This works on first item only (if item is nil)
+(defun org-ilm--srs-set-timestamp (time-or-duration &optional item)
+  "Set time, or add duration to org-srs ITEM. If nil, current heading item.
+
+Usage: (apply #'org-ilm--srs-set-timestamp (org-srs-timestamp-now) '(1 :day))
+
+Duration specification: (NUM :UNIT). For units see `org-srs-time-units'.
+
+From: `org-srs-review-postpone'"
+  (unless item (setq item (org-ilm--srs-headline-item)))
+  (save-excursion
+    (org-srs-item-with-current item
+      (setf (org-srs-item-due-timestamp) (cl-etypecase time-or-duration
+                                           (org-srs-timestamp time-or-duration)
+                                           (list (apply #'org-srs-timestamp+
+                                                        (org-srs-timestamp-max
+                                                         (org-srs-item-due-timestamp)
+                                                         (org-srs-timestamp-now))
+                                                        time-or-duration)))))))
+;; TODO Only works for first item
+(defun org-ilm--srs-table ()
+  "Return the table rows of the first srs item of the current heading."
+  (save-excursion
+    (save-restriction
+      (org-ilm--org-narrow-to-header)
+      (re-search-forward org-srs-item-regexp)
+      (forward-line)
+      (org-srs-table-lines))))
+
+(defun org-ilm--srs-last-review-timestamp ()
+  ;; TODO Only works for first item
+  (when-let* ((table (org-ilm--srs-table))
+              (last (pop table)))
+    (when (= 1 (length last))
+      (setq last (pop table)))
+    (when last
+      (ts-parse (alist-get 'timestamp last)))))
 
 ;;;;; Custom org-srs types
 
@@ -4168,28 +4288,22 @@ during review."
   (interactive)
   (unless (org-ilm-reviewing-p)
     (user-error "Not reviewing."))
+
+  ;; Make sure there is a rating when element is a card
+  (cl-assert (or (null rating) (member rating '(:good :easy :hard :again))))
   (when (and
          (plist-get org-ilm--review-current-element-info :card-type)
          (not (plist-get org-ilm--review-current-element-info :rating)))
-    (org-ilm-review--rate
-     (or rating
-         (let ((ratings '(("Good" . :good)
-                          ("Easy" . :easy)
-                          ("Hard" . :hard)
-                          ("Again" . :again))))
-           (alist-get (completing-read "Rate:" ratings nil t)
-                      ratings nil nil #'equal)))))
+    (setf (plist-get org-ilm--review-current-element-info :rating)
+          (or rating
+              (let ((ratings '(("Good" . :good)
+                               ("Easy" . :easy)
+                               ("Hard" . :hard)
+                               ("Again" . :again))))
+                (alist-get (completing-read "Rate:" ratings nil t)
+                           ratings nil nil #'equal)))))
+  
   (org-ilm--review-next))
-
-(defun org-ilm-review--rate (rating)
-  "Rate the card that is being reviewed."
-  (unless (plist-get org-ilm--review-current-element-info :card-type)
-    (user-error "Element is not a card. Try `org-ilm-review-next'."))
-  (org-ilm--org-with-point-at
-   (plist-get org-ilm--review-current-element-info :id)
-   (org-ilm--srs-review-rate rating))
-  (setq org-ilm--review-current-element-info
-        (plist-put org-ilm--review-current-element-info :rating rating)))
 
 (defun org-ilm-review-rate-good ()
   (interactive)
@@ -4210,8 +4324,19 @@ during review."
 (defun org-ilm--review-next ()
   (when org-ilm--review-current-element-info
     ;; Update priority and schedule
-    (with-current-buffer (plist-get org-ilm--review-current-element-info :buffer)
-      (org-ilm--attachment-priority-update))
+    (cl-destructuring-bind
+        (&key buffer id rating card-type &allow-other-keys)
+        org-ilm--review-current-element-info
+
+      ;; TODO Deal with element without attachment file/buffer
+      (when buffer
+        (with-current-buffer buffer
+          (org-ilm--attachment-priority-update)))
+      
+      (org-ilm--org-with-point-at id
+        (if card-type
+            (org-ilm--srs-review-rate rating)
+          (org-ilm--schedule-update))))
     
     (let ((element (org-ilm-queue-pop)))
       
@@ -4219,6 +4344,7 @@ during review."
       ;; new review time and add it back to the queue. Set a minimum position in
       ;; the queue so that the card is not reviewed too quickly again.
       )
+    
     (org-ilm--review-cleanup-current-element))
   
   (if (org-ilm-queue-empty-p)
@@ -4294,8 +4420,9 @@ a whole other problem, since we can only deal with one card (type?) now."
 
 (defun org-ilm--review-open-current-element ()
   "Open and prepare the attachment buffer of the element being reviewed."
-  (if-let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
-           (card-type (plist-get org-ilm--review-current-element-info :card-type)))
+  (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
+        (card-type (plist-get org-ilm--review-current-element-info :card-type)))
+    (if buffer
       (with-current-buffer (switch-to-buffer buffer)
         (setq header-line-format
               (org-ilm--review-header-build))
@@ -4314,9 +4441,9 @@ a whole other problem, since we can only deal with one card (type?) now."
                    (org-ilm--review-header-build)))
            nil t)
           (org-srs-item-review card-type)))
-    ;; No attachment, simply go to the element in the collection
-    (org-ilm--org-goto-id (plist-get org-ilm--review-current-element-info :id))
-    (message "No attachment found for element")))
+      ;; No attachment, simply go to the element in the collection
+      (org-ilm--org-goto-id (plist-get org-ilm--review-current-element-info :id))
+      (message "No attachment found for element"))))
 
 (defun org-ilm--review-cleanup-current-element ()
   "Clean up the element being reviewed, in preparation for the next element."
