@@ -105,7 +105,7 @@
   "z" #'org-ilm-cloze
   "c" #'org-ilm-cloze-toggle-this
   "t" #'org-ilm-attachment-transclude
-  "j" #'org-ilm-subject-add
+  "j" #'org-ilm-subject-dwim
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim)
@@ -118,9 +118,6 @@
 
 (defvar org-ilm--targets-editable nil
   "Whether or not to allow editing/removing of target text.")
-
-(defvar org-ilm--active-collection nil
-  "The current collection that is active.")
 
 ;;;; Minor mode
 
@@ -140,7 +137,7 @@
       ;; Enable
       (progn
         (add-hook 'after-change-major-mode-hook #'org-ilm--attachment-prepare-buffer)
-        (add-hook 'org-mode-hook #'org-ilm-prepare-buffer)
+        (add-hook 'org-mode-hook #'org-ilm--attachment-prepare-buffer)
         (add-hook 'org-mem-post-full-scan-functions
                   #'org-ilm--org-mem-hook)
         (add-hook 'org-mem-post-targeted-scan-functions
@@ -344,13 +341,22 @@ If empty return nil, and if only one, return it."
     (org-next-visible-heading 1)
     (narrow-to-region (point-min) (point))))
 
+(defun org-ilm--buffer-file-name ()
+  "Like `buffer-file-name' but support indirect buffers."
+  (or buffer-file-name (buffer-file-name (buffer-base-buffer))))
+
 (defun org-ilm--where-am-i ()
-  "Returns one of ('collection collection), ('attachment (org-id collection)), nil."
+  "Returns one of ('collection collection), ('attachment (org-id collection)),
+('queue collection org-id), nil."
   ;; For collection, we return file as well, useful in a directory based collection.
-  (if-let ((collection (org-ilm--collection-file buffer-file-name)))
+  (if-let ((collection (org-ilm--collection-file (org-ilm--buffer-file-name))))
       (cons 'collection collection)
-    (when-let ((attachment (org-ilm--attachment-data)))
-      (cons 'attachment attachment))))
+    (if-let ((attachment (org-ilm--attachment-data)))
+        (cons 'attachment attachment)
+      (when (bound-and-true-p org-ilm-queue)
+        (let* ((el (org-ilm--vtable-get-object))
+               (id (when el (org-ilm-element-id el))))
+          (list 'queue (plist-get org-ilm-queue :collection) id))))))
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
   "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
@@ -585,6 +591,21 @@ the priority, or error if there is no priority."
                 :value-type (choice (file :tag "File")
                                     (directory :tag "Directory")))
   :group 'org-ilm)
+
+(defvar org-ilm--active-collection nil
+  "The current collection that is active.")
+
+(defun org-ilm--active-collection ()
+  (or org-ilm--active-collection
+      (let ((collection (org-ilm--select-collection)))
+        (setq org-ilm--active-collection (car collection)))))
+
+(defun org-ilm--collection-from-context ()
+  (let ((location (org-ilm--where-am-i)))
+    (pcase (car location)
+      ('collection (cadr location))
+      ('attachment (caaddr location))
+      ('queue (cadr location)))))
 
 (defun org-ilm--collection-file (&optional file collection)
   "Return collection of which file belongs to.
@@ -1003,7 +1024,6 @@ The callback ON-ABORT is called when capture is cancelled."
                     (if title (concat " " title) "")
                     "%?")))
 
-    ;; (let ((org-capture-templates
     (cl-letf (((symbol-value 'org-capture-templates)
                (list
                 (list
@@ -2952,11 +2972,11 @@ If point on subject, add all headlines of subject."
     (next-line)
     (when (eobp) (previous-line))))
 
-(defun org-ilm-queue-mark-by-subject (subject)
-  "Mark all elements in queue that are part of SUBJECT."
+(defun org-ilm-queue-mark-by-subject (subject-id)
+  "Mark all elements in queue that are part of subject with id SUBJECT-ID."
   (interactive
    (list
-    (org-ilm--subject-select)))
+    (org-mem-entry-id (org-ilm--subject-select))))
 
   ;; Alternatively, we could have used
   ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
@@ -2964,7 +2984,7 @@ If point on subject, add all headlines of subject."
   ;; `seq-some' per object, instead of just an `assoc'.
   (dolist (object (org-ilm-queue-elements))
     (let ((ancestor-ids (mapcar #'car (car (org-ilm-element-subjects object)))))
-      (when (member (org-ilm-element-id subject) ancestor-ids)
+      (when (member subject-id ancestor-ids)
         (org-ilm-queue-object-mark object)))))
 
 (defun org-ilm-queue-mark-by-tag (tag)
@@ -4226,32 +4246,71 @@ and again by `org-ilm-queue-mark-by-subject'."
 
 ;;;;; Functions
 
-(defun org-ilm--subject-select ()
-  (car
-   (org-ilm--select-alist
-    (mapcar
-     (lambda (subject)
-       (cons
-        subject
-        (mapconcat
-         (lambda (crumb) (nth 3 crumb))
-         (cdr (reverse (org-mem-entry-crumbs
-                        (org-mem-entry-by-id
-                         (org-ilm-element-id subject)))))
-         " > ")))
-     (org-ilm--query-subjects))
-    "Subject: " ; Prompt
-    (lambda (subject) ; Formatter
-      (cdr subject)))))
+(defun org-ilm--subject-select-entry (&optional collection)
+  (setq collection
+        (or collection
+            (org-ilm--collection-from-context)
+            (org-ilm--active-collection)))
+  (let ((choice
+         (org-node-read-candidate
+          "Subject: " nil
+          (lambda (name entry)
+            (and
+             (eq 'subj (org-ilm-type (org-mem-todo-state entry)))
+             (org-ilm--collection-file (org-mem-entry-file entry) collection)))
+          'require-match)))
+    (gethash choice org-node--candidate<>entry)))
 
 ;;;;; Commands
+
+(defun org-ilm-subject-dwim ()
+  "Add subject if point in ilm element, otherwise create a new subject."
+  (interactive)
+  (if (eq major-mode 'org-mode)
+      (let* ((at-heading-p (org-at-heading-p))
+             (state (when at-heading-p (org-get-todo-state)))
+             (ilm-type (org-ilm-type state)))
+        (cond
+         ((and ilm-type (not (eq ilm-type 'subj)))
+          (call-interactively #'org-ilm-subject-add))
+         ((and at-heading-p (null state))
+          (call-interactively #'org-ilm-subject-into))
+         (t (call-interactively #'org-ilm-subject-new))))
+    (call-interactively #'org-ilm-subject-new)))
+
+(defun org-ilm-subject-new (&optional select-collection-p)
+  "Create a new subject."
+  (interactive "P")
+  (let* ((collection (org-ilm--collection-from-context))
+         (collection (if (or select-collection-p (null collection))
+                         (car (org-ilm--select-collection))
+                       collection))
+         (file (org-ilm--select-collection-file collection)))
+    (cl-letf (((symbol-value 'org-capture-templates)
+               (list
+                (list
+                 "s" "Subject" 'entry (list 'file file) "* SUBJ %?"
+                 :hook (lambda () (org-node-nodeify-entry))))))
+      (org-capture nil "s"))))
+
+(defun org-ilm-subject-into ()
+  "Convert headline at point to a subject."
+  (interactive)
+  (cond
+   ((not (and (eq major-mode 'org-mode) (org-at-heading-p)))
+    (user-error "Point not on a headline!"))
+   ((org-get-todo-state)
+    (user-error "Headline already has a TODO state!"))
+   (t
+    (org-todo (car org-ilm-subject-states))
+    (org-node-nodeify-entry))))
 
 (defun org-ilm-subject-add ()
   "Annotate headline at point with a subject.
 
 TODO Skip if self or descendant."
   (interactive)
-  (let* ((subject-entry (org-ilm--node-read-candidate-state-only org-ilm-subject-states))
+  (let* ((subject-entry (org-ilm--subject-select-entry))
          (subject-id (org-mem-entry-id subject-entry))
          (cur-subjects (org-entry-get nil "SUBJECTS" t)))
     (if (and cur-subjects
