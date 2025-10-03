@@ -3,41 +3,32 @@
 (require 'org-id)
 (require 'org-mem)
 
-(setq org-ilm-test-dir (expand-file-name "org-ilm-tests/" temporary-file-directory))
-(make-directory org-ilm-test-dir t)
-(setq org-mem-watch-dirs (list org-ilm-test-dir (expand-file-name ".")))
+(setq org-ilm-tmp-dir (expand-file-name "org-ilm-tests/" temporary-file-directory))
+(make-directory org-ilm-tmp-dir t)
+(setq org-mem-watch-dirs (list org-ilm-tmp-dir (expand-file-name ".")))
 (setq org-mem-do-sync-with-org-id t)
 (org-mem-updater-mode)
-(org-mem-reset 'takeover)
+(setq org-ilm-test-dir load-file-name)
 
 (describe
  "org-ilm"
 
- (it "dun"
-     
-     (with-current-buffer (find-file-noselect (file-name-concat org-ilm-test-dir "a.org"))
-       (org-mode)
-       (erase-buffer)
-       
-       (insert "
-* INCR a
-SCHEDULED: <2025-01-01 Wed>
-:PROPERTIES:
-:ID: a
-:END:
-")
-       (save-buffer)
+ (before-each
+  (delete-directory org-ilm-tmp-dir t)
+  (make-directory org-ilm-tmp-dir t)
+  (copy-file (expand-file-name "data.org" (file-name-directory org-ilm-test-dir))
+             (file-name-concat org-ilm-tmp-dir "data.org")))
 
+ (it "dunno"     
+     (with-current-buffer (find-file-noselect (file-name-concat org-ilm-tmp-dir "data.org"))
        (org-mem-reset 'takeover)
-       (message "%s" (org-mem-all-ids))
+       (org-mem-await "" 10)
        
        (goto-char (point-min))
        (org-next-visible-heading 1)
-       (message "%s" (org-node-at-point))
-       (expect (org-id-get) :to-equal "a")
        
-       ;; (let ((el (org-ilm-element-at-point)))
-         ;; (expect (org-ilm-element-id el) :to-equal "a"))
+       (let ((el (org-ilm-element-at-point)))
+         (expect (org-ilm-element-id el) :to-equal "a"))
 
        )
 

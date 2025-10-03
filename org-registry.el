@@ -17,7 +17,7 @@
 (require 'org)
 (require 'org-id)
 (require 'org-attach)
-(require 'org-latex-preview)
+;; (require 'org-latex-preview)
 (require 'org-ql)
 (require 'org-node)
 (require 'org-transclusion)
