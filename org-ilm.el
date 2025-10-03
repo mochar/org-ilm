@@ -2123,8 +2123,8 @@ This is used to keep track of changes in priority and scheduling.")
   (when-let* ((file-title (file-name-base
                            ;; Allow for non-file buffer: pdf virtual view
                            (or buffer-file-name (buffer-name))))
-              (_ (org-ilm--org-id-p file-title))
-              (src-file (car (org-id-find file-title))))
+              (entry (org-mem-entry-by-id file-title))
+              (src-file (org-mem-entry-file entry)))
     (when-let (collection (org-ilm--collection-file (expand-file-name src-file)))
       (list file-title collection))))
   
