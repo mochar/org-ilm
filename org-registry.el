@@ -760,7 +760,11 @@ See `parsebib-read-entry'."
              (url (transient-arg-value "--url=" args))
              (download-pdf-p (transient-arg-value "--download-pdf" args))
              (org-id (org-id-new))
-             (output-dir (org-attach-dir-from-id org-id))
+             (registry (org-registry--registry-select))
+             ;; Determine attach dir from within registry in case the dir is set
+             ;; buffer or dir local
+             (output-dir (with-current-buffer (find-file-noselect registry)
+                           (org-attach-dir-from-id org-id)))
              (bibtex org-registry--type-citation-bibtex)
              title pdf-tmp-path)
 
@@ -798,8 +802,8 @@ See `parsebib-read-entry'."
           (list title :KEY (alist-get "=key=" bibtex nil nil #'equal))
           (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
           (list :URL url :ID org-id))
-         :template
-         (list nil :hook #'org-attach-sync))
+         :registry registry
+         :template (list nil :hook #'org-attach-sync))
         
         (setq org-registry--type-citation-url nil
               org-registry--type-citation-bibtex nil)))

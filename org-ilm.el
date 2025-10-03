@@ -922,27 +922,25 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
-(defun org-ilm--capture (type target-or-id data &optional on-success on-abort)
+(defun org-ilm--capture (type target data &optional on-success on-abort)
   "Make an org capture to make a new source heading, extract, or card.
 
+TYPE should be one of 'extract 'card, or 'source.
+
+TARGET should be the org-capture target. If it is a string, it is
+interpreted as the org ID of a heading, which will be the
+target. Finally, if it is a symbol, it is interpreted as a collection
+name, and the user will be prompted to select a file from the collection
+to be used as the target.
+
+DATA is a plist that contains info about the capture entry.
+
 The callback ON-SUCCESS is called when capture is saved.
+
 The callback ON-ABORT is called when capture is cancelled."
   (cl-assert (member type '(extract card source)))
   
   (let* ((state (car (if (eq type 'card) org-ilm-card-states org-ilm-incr-states)))
-         (target (if (stringp target-or-id)
-                     ;; Originally used the built-in 'id target, however for
-                     ;; some reason it sometimes finds the wrong location which
-                     ;; messes everything up. I noticed this behavior also with
-                     ;; org-id-find and such. I should probably find the root
-                     ;; cause, but org-node finds location accurately so i rely
-                     ;; on it instead to find the location of a heading by id.
-                     ;; `(id ,target-or-id)
-                     (list 'function
-                           (lambda ()
-                             (org-node-goto-id target-or-id)
-                             (org-back-to-heading)))
-                   target-or-id))
          (title (plist-get data :title))
          (id (or (plist-get data :id) (org-id-new)))
          (ext (plist-get data :ext))
@@ -995,6 +993,25 @@ The callback ON-ABORT is called when capture is cancelled."
 
     ;; See `org-attach-method'
     (cl-assert (member method '(mv cp ln lns)))
+
+    ;; Set the target.
+    (setq target
+          (cond
+           ((stringp target)
+            ;; Originally used the built-in 'id target, however for some reason
+            ;; it sometimes finds the wrong location which messes everything
+            ;; up. I noticed this behavior also with org-id-find and such. I
+            ;; should probably find the root cause, but org-node finds location
+            ;; accurately so i rely on it instead to find the location of a
+            ;; heading by id.  `(id ,target)
+            (let ((target-id (copy-sequence target)))
+              (list 'function
+                    (lambda ()
+                      (org-node-goto-id target-id)
+                      (org-back-to-heading)))))
+           ((symbolp target)
+            (list 'file (org-ilm--select-collection-file target)))
+           (t target)))
 
     ;; Generate title from content if no title provided
     (when (and (not title) content)
@@ -2661,7 +2678,9 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 (defun org-ilm--queue-build (&optional collection query)
   "Build a queue and return it."
-  (let* ((collection (or collection (car (org-ilm--select-collection))))
+  (let* ((collection (or collection
+                         (org-ilm--collection-from-context)
+                         (car (org-ilm--select-collection))))
          (query (or query (car (org-ilm--query-select))))
          (elements (org-ilm-query-collection collection query))
          (element-map (make-hash-table :test #'equal))
@@ -3292,7 +3311,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (cl-assert (member method '(mv cp ln lns)))  
   (org-ilm--capture
    'source
-   `(file ,(cdr collection))
+   (car collection)
    (list :file file :method method :ext t)))
 
 ;;;;; Website
@@ -3418,7 +3437,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
     (org-ilm--capture
      'source
-     `(file ,(cdr collection))
+     (car collection)
      (list :id org-id :title title :props (list :ROAM_REFS url))
      (lambda (attach-dir)
        (let ((monolith-args
@@ -3554,11 +3573,10 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   "Import a registry entry."
   (cl-assert (or (null method) (member method '(mv cp ln lns))))
 
-  (let ((entry (org-mem-entry-by-id entry-id))
-        (collection-file (org-ilm--select-collection-file collection)))
+  (let ((entry (org-mem-entry-by-id entry-id)))
     (org-ilm--capture
      'source
-     (list 'file collection-file)
+     collection
      (list :file attachment :method (or method 'cp) :ext (when attachment t)
            :title (org-mem-entry-title entry)
            :props (list :ROAM_REFS (format "[[registry:%s]]" entry-id))))))
@@ -3807,6 +3825,11 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
     (+ a-min
        (/ (- a-max a-min)
           (1+ (exp (* kappa (- (/ duration duration-max) 0.5))))))))
+
+(defun org-ilm--priority-b-from-actions (count)
+  "Map number of actions to b."
+  (cl-assert (>= count 0 ))
+  (min count 5))
 
 ;;;;; Subject priorities
 
