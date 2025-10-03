@@ -106,7 +106,7 @@
   "c" #'org-ilm-cloze-toggle-this
   "t" #'org-ilm-attachment-transclude
   "j" #'org-ilm-subject-add
-  "r" #'org-ilm-review-actions ;; TODO Replace with dwim
+  "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim)
 
@@ -4642,6 +4642,12 @@ a whole other problem, since we can only deal with one card (type?) now."
 
 ;;;;; Actions
 
+(defun org-ilm-review ()
+  (interactive)
+  (if (org-ilm-reviewing-p)
+      (org-ilm-review-actions)
+    (org-ilm-review-start)))
+
 (defun org-ilm-review-postpone ()
   (interactive)
   (cl-assert (org-ilm-reviewing-p))
@@ -4655,15 +4661,40 @@ a whole other problem, since we can only deal with one card (type?) now."
       (let ((org-ilm--review-update-schedule nil))
         (org-ilm--review-next)))))
 
+(defun org-ilm-review-open-collection ()
+  (interactive)
+  (cl-assert (org-ilm-reviewing-p))
+  (org-ilm--org-goto-id (plist-get org-ilm--review-data :id)))
+
+(defun org-ilm-review-open-attachment ()
+  (interactive)
+  (cl-assert (org-ilm-reviewing-p))
+  (if-let ((buf (plist-get org-ilm--review-data :buffer)))
+      (switch-to-buffer buf)
+    (user-error "Element has no buffer!")))
+
 ;;;;; Transient
 
 (transient-define-prefix org-ilm--review-transient ()
   :refresh-suffixes t
-  [:description
+  ["Review"
+   (:info*
    (lambda ()
-     (org-ilm-element-title (plist-get org-ilm--review-data :element)))
-   ("p" "Postpone" org-ilm-review-postpone)
-   ])
+     (propertize
+      (org-ilm-element-title (plist-get org-ilm--review-data :element))
+      'face '(:slant italic))))]
+
+  [
+   ["Actions"
+    ("n" "Next" org-ilm-review-next)
+    ("p" "Postpone" org-ilm-review-postpone)
+    ("q" "Quit" org-ilm-review-quit)]
+   ["Element"
+    ("e" "Element..." org-ilm-element-actions)
+    ("c" "Open collection" org-ilm-review-open-collection)
+    ("a" "Open attachment" org-ilm-review-open-attachment)]
+   ]
+  )
 
 (defun org-ilm-review-actions ()
   (interactive)
