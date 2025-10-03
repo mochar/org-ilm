@@ -173,7 +173,7 @@
     (pcase (length ovs)
       (0 nil)
       (1 (org-ilm--open-from-ov (nth 0 ovs)))
-      (t
+      (_
        (let* ((choices (mapcar
                         (lambda (ov)
                           (cons
@@ -206,7 +206,7 @@
      ('attachment
       (unless (org-ilm-open-highlight)
         (org-ilm-open-collection)))
-     (t (org-ilm-open-collection)))))
+     (_ (org-ilm-open-collection)))))
 
 (defun org-ilm-cloze-toggle-this ()
   "Toggle cloze at point, without creating the card."
@@ -256,7 +256,7 @@ If empty return nil, and if only one, return it."
   (pcase (length alist)
     (0 nil)
     (1 (nth 0 alist))
-    (t
+    (_
      (let* ((choices
              (mapcar
               (lambda (thing)
@@ -1803,7 +1803,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (file-name-directory buffer-file-name))
               ('pdf-virtual-view-mode
                (org-ilm--org-attach-dir-from-id org-id))
-              (t (error "This attachment is not a PDF")))))
+              (_ (error "This attachment is not a PDF")))))
      ((eq (car location) 'collection)
       (setq org-id (org-id-get)
             collection (cdr location)
@@ -1953,7 +1953,7 @@ set only (not let)."
                   (org-ilm--pdf-image-export
                    extract-org-id :region region :dir attach-dir)
                   extract-org-id))))
-        (t (error "Unrecognized output type")))
+        (_ (error "Unrecognized output type")))
 
       ;; Temporary disable `org-link-parameters' which is an overkill way to
       ;; deal with the following problem. When org-pdftools is used,
@@ -2134,7 +2134,7 @@ This is used to keep track of changes in priority and scheduling.")
            (potential-id (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
                            ("abc" (car (last parts)))
                            ("ab/c" (mapconcat #'identity (last parts 2) ""))
-                           (t nil)))
+                           (_ nil)))
            (location (org-id-find potential-id)))
       (when location (cons potential-id location)))))
 
@@ -2220,7 +2220,7 @@ This is used to keep track of changes in priority and scheduling.")
                        ;; attachment.
                        ('success "Attachment finished conversion but not found.")
                        ('error "Attachment conversion failed.")
-                       (t "Attachment still being converted."))))
+                       (_ "Attachment still being converted."))))
         (when (yes-or-no-p (concat message " View conversion buffer?"))
           (pop-to-buffer (plist-get conversion :buffer))))))
    ;; Check if there is a web link in the ROAM_REFS property and open website in
@@ -4469,6 +4469,7 @@ during review."
           (goto-char org-ilm--review-interrupted-clock-marker)
           (pcase org-ilm-review-clock-back-in
             ('continue (org-ilm--clock-in-continue-last))
+            ;; Note: this actually matches on t. not a mistake (shouldnt be "_")
             (t (org-clock-in))))))
     (setq org-ilm--review-interrupted-clock-marker nil))
   
