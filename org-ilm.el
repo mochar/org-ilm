@@ -106,6 +106,7 @@
   "c" #'org-ilm-cloze-toggle-this
   "t" #'org-ilm-attachment-transclude
   "j" #'org-ilm-subject-add
+  "r" #'org-ilm-review-actions ;; TODO Replace with dwim
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim)
 
@@ -711,6 +712,10 @@ wasteful if headline does not match query."
        :pbeta beta
        :psample psample))))
 
+(defun org-ilm-element-from-id (id)
+  (org-ilm--org-with-point-at id
+    (org-ilm-element-at-point)))
+
 (defun org-ilm-element-from-context ()
   (let ((location (org-ilm--where-am-i)))
     (pcase (car location)
@@ -1118,7 +1123,7 @@ Will become an attachment Org file that is the child heading of current entry."
            (save-buffer)
            (org-ilm-recreate-overlays))
 
-         (org-ilm--attachment-log-extract))))))
+         (org-ilm--attachment-priority-update 'extract))))))
 
 (defun org-ilm-cloze ()
   "Create a cloze card.
@@ -1177,7 +1182,7 @@ command."
          (save-buffer)
          (org-ilm-recreate-overlays)
 
-         (org-ilm--attachment-log-cloze)))
+         (org-ilm--attachment-priority-update 'card)))
      (lambda ()
        ;; Abort callback. Undo cloze if made automatically by this function.
        (when auto-clozed
@@ -2227,6 +2232,8 @@ This is used to keep track of changes in priority and scheduling.")
        org-ilm--data
        (list :id id
              :collection collection
+             ;; TODO porbably remove and just use `org-ilm-element-from-id' to
+             ;; get most recent
              :element element
              :beta (org-ilm--priority-to-beta
                     (org-ilm-element-prelative element))
@@ -2262,29 +2269,37 @@ missing, something else is wrong, so throw an error."
     (unless (bound-and-true-p org-ilm--data)
       (error "Could not create attachment data `org-ilm--data'"))))
 
-(defmacro org-ilm--attachment-priority-update (&rest body)
-  `(progn
-     (org-ilm--attachment-ensure-data-object)
-     (cl-destructuring-bind
-         (&key id beta start a b cards extracts &allow-other-keys) org-ilm--data
-       ,@body
-       (let ((actions (+ cards extracts))
-             (duration (float-time (time-subtract (current-time) start))))
-         (cl-incf b (org-ilm--priority-b-from-actions actions))
-         (when (org-ilm-reviewing-id-p id)
-           (cl-incf a (org-ilm--priority-a-from-duration duration)))
-         (org-ilm--org-with-point-at id
-           (org-ilm--priority-update :beta beta :a a :b b))))))
+(defun org-ilm--attachment-priority-compile ()
+  (org-ilm--attachment-ensure-data-object)
+  (cl-destructuring-bind
+      (&key id beta start a b cards extracts &allow-other-keys) org-ilm--data
+    (let ((actions (+ cards extracts))
+          (duration (float-time (time-subtract (current-time) start))))
+      ;; Rewards extracts and cards
+      (cl-incf b (org-ilm--priority-b-from-actions actions))
+      
+      ;; Only add duration penalty when reviewing
+      ;; TODO Commented out because duration is not determinsitic. Any change to
+      ;; priority needs to happen immediately, not queued up then applied.
+      ;; (when (org-ilm-reviewing-id-p id)
+      ;;   (cl-incf a (org-ilm--priority-a-from-duration duration)))
+      
+      (cons a b))))
 
-(defun org-ilm--attachment-log-extract (&optional size)
-  (org-ilm--attachment-priority-update
-   (cl-incf (plist-get org-ilm--data :extracts))))
-
-(defun org-ilm--attachment-log-cloze ()
-  (org-ilm--attachment-priority-update
-   (cl-incf (plist-get org-ilm--data :cards))))
-
-
+(defun org-ilm--attachment-priority-update (action)
+  (org-ilm--attachment-ensure-data-object)
+  (pcase action
+    ('extract
+     (cl-incf (plist-get org-ilm--data :extracts)))
+    ('card
+     (cl-incf (plist-get org-ilm--data :cards)))
+    (_ (error "Wrong value for ACTION")))
+  (let ((update-params (org-ilm--attachment-priority-compile)))
+    (org-ilm--org-with-point-at (plist-get org-ilm--data :id)
+      (org-ilm--priority-update
+       :beta (plist-get org-ilm--data :beta)
+       :a (car update-params)
+       :b (cdr update-params)))))
 
 ;;;; Transclusion
 
@@ -3773,11 +3788,6 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
        (/ (- a-max a-min)
           (1+ (exp (* kappa (- (/ duration duration-max) 0.5))))))))
 
-(defun org-ilm--priority-b-from-actions (count)
-  "Map number of actions to b."
-  (cl-assert (>= count 0 ))
-  (min count 5))
-
 ;;;;; Subject priorities
 
 ;; I don't know if we want to add anything to this but we can always just extend
@@ -3895,17 +3905,18 @@ due or not."
       (cl-assert (> interval 0))
       (org-schedule nil (ts-format "%Y-%m-%d" timestamp)))))
 
-(defun org-ilm-schedule (element)
+(defun org-ilm-schedule (element date)
   "Set or update the schedule of the element at point."
-  (interactive (list (org-ilm-element-at-point)))
+  (interactive
+   (list (org-ilm-element-at-point)
+         (org-read-date nil nil nil "Schedule: ")))
   (unless element (user-error "No ilm element at point"))
 
   ;; Only read the date
-  (let ((date (org-read-date nil nil nil "Schedule: ")))
-    (pcase (org-ilm-element-type element)
-      ('incr (org-schedule nil date))
-      ;; Convert to ISO8601
-      ('card (org-ilm--srs-set-timestamp (concat date "T09:00:00Z"))))))
+  (pcase (org-ilm-element-type element)
+    ('incr (org-schedule nil date))
+    ;; Convert to ISO8601
+    ('card (org-ilm--srs-set-timestamp (concat date "T09:00:00Z")))))
     
 
 
@@ -4276,7 +4287,7 @@ out."
 ;; Besides storing the attachment buffer, this variable contains redundant data
 ;; as the current element should be the first element in org-ilm-queue. However
 ;; this redundancy is useful to make sure everything is still in sync.
-(defvar org-ilm--review-current-element-info nil
+(defvar org-ilm--review-data nil
   "Info of the current element being reviewed.")
 
 (defvar org-ilm--review-interrupted-clock-marker nil
@@ -4342,7 +4353,7 @@ out."
 (defun org-ilm-reviewing-id-p (id)
   "Return t when currently reviewing element with id ID."
   (when (org-ilm-reviewing-p)
-    (equal id (plist-get org-ilm--review-current-element-info :id))))
+    (equal id (plist-get org-ilm--review-data :id))))
 
 (defun org-ilm--review-confirm-quit ()
   "Confirmation before killing the active attachment buffer or queue buffer
@@ -4413,9 +4424,9 @@ during review."
   ;; Make sure there is a rating when element is a card
   (cl-assert (or (null rating) (member rating '(:good :easy :hard :again))))
   (when (and
-         (plist-get org-ilm--review-current-element-info :card-type)
-         (not (plist-get org-ilm--review-current-element-info :rating)))
-    (setf (plist-get org-ilm--review-current-element-info :rating)
+         (plist-get org-ilm--review-data :card-type)
+         (not (plist-get org-ilm--review-data :rating)))
+    (setf (plist-get org-ilm--review-data :rating)
           (or rating
               (let ((ratings '(("Good" . :good)
                                ("Easy" . :easy)
@@ -4442,22 +4453,20 @@ during review."
   (interactive)
   (org-ilm-review-next :again))
 
+(defvar org-ilm--review-update-schedule t)
+
 (defun org-ilm--review-next ()
-  (when org-ilm--review-current-element-info
+  (when org-ilm--review-data
     ;; Update priority and schedule
     (cl-destructuring-bind
-        (&key buffer id rating card-type &allow-other-keys)
-        org-ilm--review-current-element-info
-
-      ;; TODO Deal with element without attachment file/buffer
-      (when buffer
-        (with-current-buffer buffer
-          (org-ilm--attachment-priority-update)))
+        (&key buffer id element rating card-type &allow-other-keys)
+        org-ilm--review-data
       
-      (org-ilm--org-with-point-at id
-        (if card-type
-            (org-ilm--srs-review-rate rating)
-          (org-ilm--schedule-update))))
+      (when org-ilm--review-update-schedule
+        (org-ilm--org-with-point-at id
+          (if card-type
+              (org-ilm--srs-review-rate rating)
+            (org-ilm--schedule-update)))))
     
     (let ((element (org-ilm-queue-pop)))
       
@@ -4480,8 +4489,8 @@ during review."
 (defun org-ilm-review-open-current ()
   "Open the attachment of the element currently being reviewed."
   (interactive)
-  (let ((buf (plist-get org-ilm--review-current-element-info :buffer)))
-    (if (and org-ilm--review-current-element-info (buffer-live-p buf))
+  (let ((buf (plist-get org-ilm--review-data :buffer)))
+    (if (and org-ilm--review-data (buffer-live-p buf))
         (switch-to-buffer buf)
       ;; Setup current element again if that data somehow lost. Mainly for when the
       ;; buffer is killed, it needs to be setup again. The setup function doesn't
@@ -4493,7 +4502,7 @@ during review."
   "Setup the element about to be reviewed.
 
 The main job is to prepare the variable
-`org-ilm--review-current-element-info', which needs the card-type stored
+`org-ilm--review-data', which needs the card-type stored
 in the collection and the attachment buffer.
 TODO Store card type in org-ilm-element? Reason against it is for cards with
 back and front, which are different types, so depends on what is due. But that's
@@ -4533,7 +4542,7 @@ a whole other problem, since we can only deal with one card (type?) now."
         (org-ilm--attachment-ensure-data-object)
         (setf (plist-get org-ilm--data :start) (current-time))))
 
-    (setq org-ilm--review-current-element-info
+    (setq org-ilm--review-data
           (list :element element
                 :id (org-ilm-element-id element)
                 :buffer attachment-buffer
@@ -4541,8 +4550,8 @@ a whole other problem, since we can only deal with one card (type?) now."
 
 (defun org-ilm--review-open-current-element ()
   "Open and prepare the attachment buffer of the element being reviewed."
-  (let ((buffer (plist-get org-ilm--review-current-element-info :buffer))
-        (card-type (plist-get org-ilm--review-current-element-info :card-type)))
+  (let ((buffer (plist-get org-ilm--review-data :buffer))
+        (card-type (plist-get org-ilm--review-data :card-type)))
     (if buffer
       (with-current-buffer (switch-to-buffer buffer)
         (setq header-line-format
@@ -4555,22 +4564,22 @@ a whole other problem, since we can only deal with one card (type?) now."
           (add-hook
            'org-srs-item-after-confirm-hook
            (lambda ()
-             (setq org-ilm--review-current-element-info
-                   (plist-put org-ilm--review-current-element-info
+             (setq org-ilm--review-data
+                   (plist-put org-ilm--review-data
                               :card-revealed t))
              (setq header-line-format
                    (org-ilm--review-header-build)))
            nil t)
           (org-srs-item-review card-type)))
       ;; No attachment, simply go to the element in the collection
-      (org-ilm--org-goto-id (plist-get org-ilm--review-current-element-info :id))
+      (org-ilm--org-goto-id (plist-get org-ilm--review-data :id))
       (message "No attachment found for element"))))
 
 (defun org-ilm--review-cleanup-current-element ()
   "Clean up the element being reviewed, in preparation for the next element."
-  (when-let ((buffer (plist-get org-ilm--review-current-element-info :buffer)))
+  (when-let ((buffer (plist-get org-ilm--review-data :buffer)))
     (with-current-buffer buffer
-      (when (plist-get org-ilm--review-current-element-info :card-type)
+      (when (plist-get org-ilm--review-data :card-type)
         (org-srs-item-cloze-remove-overlays (point-min) (point-max)))
       (setq header-line-format nil)
       (remove-hook 'kill-buffer-hook #'org-ilm--review-confirm-quit t))
@@ -4583,7 +4592,7 @@ a whole other problem, since we can only deal with one card (type?) now."
   ;; clock out this one. But good to be explicit.
   (org-clock-out nil 'fail-quietly)
   
-  (setq org-ilm--review-current-element-info nil))
+  (setq org-ilm--review-data nil))
 
 ;;;;; Buffer header 
 
@@ -4600,9 +4609,9 @@ a whole other problem, since we can only deal with one card (type?) now."
 
 (defun org-ilm--review-header-build ()
   "Build the header string of the attachment currently being reviewed."
-  (let* ((element (plist-get org-ilm--review-current-element-info :element))
-         (card-type (plist-get org-ilm--review-current-element-info :card-type))
-         (card-revealed (plist-get org-ilm--review-current-element-info :card-revealed)))
+  (let* ((element (plist-get org-ilm--review-data :element))
+         (card-type (plist-get org-ilm--review-data :card-type))
+         (card-revealed (plist-get org-ilm--review-data :card-revealed)))
     (concat
      (propertize "Ilm Review" 'face '(:weight bold :height 1.0))
      "   "
@@ -4630,6 +4639,38 @@ a whole other problem, since we can only deal with one card (type?) now."
         ))
 
      )))
+
+;;;;; Actions
+
+(defun org-ilm-review-postpone ()
+  (interactive)
+  (cl-assert (org-ilm-reviewing-p))
+  (let (date)
+    (while (ts<= (ts-parse (setq date (org-read-date nil nil nil "Postpone: ")))
+                 (org-ilm--ts-today))
+      (message "Minimum postpone date should be tomorrow")
+      (sleep-for 1.))
+    (org-ilm--org-with-point-at (plist-get org-ilm--review-data :id)
+      (org-ilm-schedule (org-ilm-element-at-point) date)
+      (let ((org-ilm--review-update-schedule nil))
+        (org-ilm--review-next)))))
+
+;;;;; Transient
+
+(transient-define-prefix org-ilm--review-transient ()
+  :refresh-suffixes t
+  [:description
+   (lambda ()
+     (org-ilm-element-title (plist-get org-ilm--review-data :element)))
+   ("p" "Postpone" org-ilm-review-postpone)
+   ])
+
+(defun org-ilm-review-actions ()
+  (interactive)
+  (if (org-ilm-reviewing-p)
+      (org-ilm--review-transient)
+    (user-error "Not reviewing!")))
+
 
 ;;;; Footer
 
