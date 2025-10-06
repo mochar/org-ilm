@@ -160,11 +160,17 @@ This helps share functionality of a type while being able to filter on a more gr
 
 ;;;###autoload
 (defvar-keymap org-registry-prefix-map
+  "o" #'org-registry-open
   "f" #'org-registry-find
   "i" #'org-registry-insert
   "p" #'org-registry-paste
   "r" #'org-registry-register-dwim)
 
+;;;###autoload
+(defun org-registry-open ()
+  (interactive)
+  (find-file (org-registry--registry-select)))
+  
 ;;;###autoload
 (defun org-registry-find ()
   (interactive)
