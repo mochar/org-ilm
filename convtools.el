@@ -139,6 +139,7 @@ final converter succeeds."
     (apply converter converter-args)))
 
 ;;;; Pandoc
+
 (cl-defun convtools--convert-with-pandoc (&rest args &key process-id process-name input-path input-format output-dir &allow-other-keys)
   "Convert a file to Org mode format using Pandoc."
   (unless (and process-id input-path input-format)
@@ -496,6 +497,113 @@ does not have an option for this so it is done here.
               :input-format defuddle-output-format))))
      :on-error on-error
      :on-final-success on-success))))
+
+;;;; yt-dlp
+
+(defcustom convtools-ytdlp-path (executable-find "yt-dlp")
+  "Path to the yt-dlp executable."
+  :type 'file
+  :group 'convtools-ytdlp)
+
+(defun convtools--ytdlp-filename-from-url (url &optional template restrict-p)
+  "Get the filename that will be generated for URL and TEMPLATE.
+
+See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-examples"
+  (string-trim
+   (shell-command-to-string
+    (concat "yt-dlp --print filename "
+            (when template (format "-o \"%s\" " template))
+            url
+            (when restrict-p " --restrict-filenames ")
+            ))))
+
+(defun convtools--ytdlp-subtitles-from-url (url)
+  "Returns two alists of alist: 'subtitles and 'auto.
+
+Parse the OUTPUT string from:
+   yt-dlp --print subtitles_table --print automatic_captions_table."
+  (let* ((output (shell-command-to-string
+                  (concat "yt-dlp --print subtitles_table --print automatic_captions_table " url)))
+         (lines (split-string output "\n" t "[ \t]+"))
+         (result '())
+         (section nil))
+    (dolist (line lines)
+      ;; detect section headers
+      (cond
+       ((string-match-p "^Language[[:space:]]+Name[[:space:]]+Formats" line)
+        (setq section 'subtitles)
+        (push (cons section '()) result))
+       ((string-match-p "^Language[[:space:]]+Formats" line)
+        (setq section 'auto)
+        (push (cons section '()) result))
+       ((string-empty-p line) nil)
+       (t
+        ;; parse table row
+        (pcase section
+          ('subtitles
+           (when (string-match
+                  "^\\([^[:space:]]+\\)[[:space:]]+\\([^[:space:]]*\\)[[:space:]]+\\(.+\\)$" line)
+             (let ((lang (match-string 1 line))
+                   (name (match-string 2 line))
+                   (formats (split-string (match-string 3 line) "," t "[[:space:]]+")))
+               (push `((language . ,lang)
+                       (name . ,(if (string-empty-p name) nil name))
+                       (formats . ,formats))
+                     (cdr (assq section result))))))
+          ('auto
+           (when (string-match
+                  "^\\([^[:space:]]+\\)[[:space:]]+\\(.+\\)$" line)
+             (let ((lang (match-string 1 line))
+                   (formats (split-string (match-string 2 line) "," t "[[:space:]]+")))
+               (push `((language . ,lang)
+                       (formats . ,formats))
+                     (cdr (assq section result))))))))))
+    ;; reverse to preserve order
+    (dolist (r result)
+      (setcdr r (nreverse (cdr r))))
+    (nreverse result)))
+
+(cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs working-dir on-success &allow-other-keys)
+  "yt-dlp
+
+SUB-LANGS may also be 'all' to download all subtitles."
+  (unless (and process-id url (or (xor output-path output-dir) sub-langs))
+    (error "Required args: PROCESS-ID URL [OUTPUT-DIR|OUTPUT-PATH]"))
+  (unless (and convtools-ytdlp-path (file-executable-p convtools-ytdlp-path))
+    (user-error "The yt-dlp executable not available. See convtools-ytdlp-path."))
+
+  (when (and (not output-path) output-dir)
+    (setq output-path (expand-file-name
+                       (convtools--ytdlp-filename-from-url url filename-template 'restrict)
+                       output-dir)))
+
+  (when sub-langs
+    (cond
+     ((stringp sub-langs)
+      (setq sub-langs (list sub-langs)))
+     ((listp sub-langs))
+     (t (error "SUB-LANGS must be string or list of strings"))))
+  
+  (let ((default-directory (or working-dir default-directory)))
+    (apply
+     #'convtools--convert-make-process
+     (org-combine-plists
+      args
+      (list
+       :name (or process-name "ytdlp")
+       :id process-id
+       :command
+       (append
+        (list
+         convtools-ytdlp-path
+         url)
+        (cond
+         (output-path (list "-o" output-path))
+         (filename-template (list  "-o" filename-template "--no-download"))
+         (t (list "--no-download")))
+        (when sub-langs
+          (append '("--write-sub" "--sub-lang") (list (string-join sub-langs ","))))
+       ))))))
 
 
 ;;;; Conversions view
