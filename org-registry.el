@@ -108,7 +108,13 @@ this type. Note that they are mutually exclusive:
   '(("file" . ("video")))
   "Alist mapping `org-registry-types' types to aliases that can be used in their place.
 This helps share functionality of a type while being able to filter on a more granular level."
-  :type '(alist :key-type string :value-type (repeat string)))
+  :type '(alist :key-type string :value-type (repeat string))
+  :group 'org-registry)
+
+(defcustom org-registry-add-link-in-title t
+  "Add a link to where the entry was registered in the title."
+  :type 'string
+  :group 'org-registry)
 
 (defface org-registry-link-face
   '((t :inherit org-link))
@@ -333,9 +339,12 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 (defun org-registry--link-target ()
   (if (and (eq major-mode 'org-mode) (org-id-get))
       (concat "id:" (org-id-get))
-    (when-let ((file (or buffer-file-name (buffer-file-name (buffer-base-buffer)))))
-      (concat "file:" file))))
-
+    ;; Previously parsed with org-store-link but sometimes useless targets
+    ;; ;; With arg '(4) do not include within-file context in link
+    ;; (let ((link (org-store-link '(4))))
+    ;;   (string-match org-link-bracket-re link)
+    ;;   (match-string-no-properties 1 link))
+    (concat "file:" (buffer-file-name (buffer-base-buffer)))))
 
 ;;;; Content capture
 
@@ -395,21 +404,29 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 (cl-defun org-registry--register (type data &key registry template)
   "Add an entry of TYPE with DATA to the REGISTRY.
 
-DATA is a plist that can contain :title, :body, :props, :post.
+DATA is a plist that can contain :title, :body, :id, :type, :props, :post.
 
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
   (let* ((registry (or registry (org-registry--registry-select)))
          (title (plist-get data :title))
          (body (plist-get data :body))
-         (props (org-combine-plists (list :ID (org-id-new)) (plist-get data :props)))
+         (type (or (plist-get data :type) type))
+         (id (or (plist-get data :id) (org-id-new)))
+         (props (org-combine-plists (list :ID id) (plist-get data :props)))
          (post (plist-get data :post))
-         (template-string (or
-                           (car template)
-                           (format "* %s%s%s"
-                                   (or title "")
-                                   "%?"
-                                   (if body (concat "\n" body) "")))))
+         (template-string (car template)))
+    (when org-registry-add-link-in-title
+      (setq title
+            (concat
+             (format "[[%s][%s]]: " (org-registry--link-target) type)
+             title)))
+    (unless template-string
+      (setq template-string
+            (format "* %s%s%s"
+                    (or title "")
+                    "%?"
+                    (if body (concat "\n" body) ""))))
     (cl-letf* ((default-template-props
                 (list 
                  :hook
@@ -433,7 +450,7 @@ org-capture template properties."
                        nil
                      (org-mem-reset)
                      (org-mem-await nil 5)
-                     (when post (funcall post (plist-get props :ID)))))
+                     (when post (funcall post id))))
                  ))
                (template-props (org-combine-plists
                                 (cdr template) default-template-props))
@@ -536,11 +553,9 @@ environment (multiline), paste it in headline body."
   (when-let* ((org-element (when (eq major-mode 'org-mode)
                              (org-element-context)))
               (type (org-element-type org-element))
-              (latex (org-element-property :value org-element))
-              (title (format "[[%s][%s]]: " (org-registry--link-target) "Latex")))
+              (latex (org-element-property :value org-element)))
     (when (member type '(latex-fragment latex-environment))
-      (list :title title
-            :latex latex
+      (list :latex latex
             :fragment (eq type 'latex-fragment)
             :begin (org-element-property :begin org-element)
             :end (org-element-property :end org-element)))))
@@ -554,7 +569,7 @@ environment (multiline), paste it in headline body."
             :props (list :LATEX (when fragment latex))
             :post
             (lambda (id)
-              (when (and begin end)
+              (when (and begin end (yes-or-no-p "Replace with registry link? "))
                 (save-restriction
                   (delete-region begin end)
                   (org-registry-insert id))))))))
@@ -592,18 +607,32 @@ environment (multiline), paste it in headline body."
            (type (cond
                   ((member ext image-file-name-extensions) "image")
                   (t "file"))))
-      (list :ENTRY_TITLE name :PATH path :TYPE type))))
+      (list :title name :path path :type type))))
 
 (defun org-registry--type-file-parse ()
-  (when-let ((data (org-registry--type-file-from-path buffer-file-name)))
-    ;; We only dwim if its a non-generic file
-    (unless (string= (plist-get data :TYPE) "file")
-      data)))
+  (if-let* ((el (when (eq major-mode 'org-mode) (org-element-context)))
+            (_ (and (eq (org-element-type el) 'link)
+                    (string= (org-element-property :type el) "file"))))
+      (org-combine-plists
+       (org-registry--type-file-from-path
+        (expand-file-name (org-element-property :path (org-element-context))))
+       (list :begin (org-element-property :begin el)
+             :end (org-element-property :end el)))
+    (when-let ((data (org-registry--type-file-from-path
+                      (buffer-file-name (buffer-base-buffer)))))
+      ;; We only dwim if its a non-generic file
+      (unless (string= (plist-get data :type) "file") data))))
 
 (defun org-registry--type-file-create (&optional args)
-  (let ((path (read-file-name "File: ")))
-    (org-registry--type-file-from-path path)))
-           
+  (unless args
+    (setq (org-registry--type-file-from-path (read-file-name "File: "))))
+  (cl-destructuring-bind (&key title path type begin end) args
+    ;; TODO Debating on whether to batch query-replace this link in all org,
+    ;; org-mem files, current dir files or not. Alternative would be to view
+    ;; normal org links to this path same as registry link. Currently prefer
+    ;; latter.
+    (list :title title :type type :props (list :PATH path))))
+
 (org-registry-set-type
  "file"
  :aliases '("image" "video")
