@@ -741,7 +741,7 @@ environment (multiline), paste it in headline body."
 
         (if download-html-p
             (let ((attach-path (expand-file-name
-                                (concat title ".html")
+                                (concat (mochar-utils--slugify-title title) ".html")
                                 (org-attach-dir-from-id org-id))))
               (make-directory (file-name-directory attach-path))
               (convtools--convert-with-monolith

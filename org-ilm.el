@@ -164,7 +164,13 @@
   (interactive)
   (condition-case err
       (org-ilm--attachment-open)
-    (error (user-error "%s" (error-message-string err)))))
+    (error
+     (when (yes-or-no-p "No attachment found. Create new Org attachment? ")
+       (let* ((attach-dir (org-attach-dir-get-create))
+              (file-path (expand-file-name (concat (org-id-get) ".org") attach-dir)))
+         (find-file file-path)
+       )))))
+    ;; (error (user-error "%s" (error-message-string err)))))
 
 (defun org-ilm-open-highlight ()
   "Open element associated with highlight at point."
@@ -202,10 +208,10 @@
   (interactive)
   (let ((location (org-ilm--where-am-i)))
     (pcase (car location)
-     ('collection (org-ilm-open-attachment))
      ('attachment
       (unless (org-ilm-open-highlight)
         (org-ilm-open-collection)))
+     ('collection (org-ilm-open-attachment))
      (_ (org-ilm-open-collection)))))
 
 (defun org-ilm-cloze-toggle-this ()
@@ -615,7 +621,9 @@ A collection symbol COLLECTION can be passed to test if file belongs to
              (path (expand-file-name file))
              (test (lambda (f place)
                      (if (f-directory-p place)
-                         (file-in-directory-p f place)
+                         (and
+                          (file-in-directory-p f place)
+                          (not (file-in-directory-p f org-attach-id-dir)))
                        (file-equal-p f place)))))
     (if collection
         (when-let ((col (pcase (type-of collection)
@@ -2161,10 +2169,13 @@ This is used to keep track of changes in priority and scheduling.")
                            ;; Allow for non-file buffer: pdf virtual view
                            (or buffer-file-name (buffer-name))))
               (entry (org-mem-entry-by-id file-title))
-              (src-file (org-mem-entry-file entry)))
-    (when-let (collection (org-ilm--collection-file (expand-file-name src-file)))
+              (src-file (org-mem-entry-file entry))
+              (src-file (expand-file-name src-file)) ;; sep line, else err
+              (collection (org-ilm--collection-file src-file)))
+    ;; Exclude registries
+    (unless (seq-some (lambda (r) (string= (expand-file-name r) src-file)) org-registry-registries) 
       (list file-title collection))))
-  
+
 (defun org-ilm--attachment-extension ()
   "Return the extension of the attachment at point, assuming in collection."
   (or (org-entry-get nil "ILM_EXT" 'inherit) "org"))
@@ -3579,7 +3590,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
      collection
      (list :file attachment :method (or method 'cp) :ext (when attachment t)
            :title (org-mem-entry-title entry)
-           :props (list :ROAM_REFS (format "[[registry:%s]]" entry-id))))))
+           :props (list ;;:ROAM_REFS (format "[[registry:%s]]" entry-id)
+                        :REGISTRY entry-id)
+           ))))
 
 
 ;;;; Math and stats
