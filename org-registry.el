@@ -404,7 +404,8 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 (cl-defun org-registry--register (type data &key registry template)
   "Add an entry of TYPE with DATA to the REGISTRY.
 
-DATA is a plist that can contain :title, :body, :id, :type, :props, :post.
+DATA is a plist that can contain :title, :body, :id, :type, :props,
+:region, :post.
 
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
@@ -450,6 +451,13 @@ org-capture template properties."
                        nil
                      (org-mem-reset)
                      (org-mem-await nil 5)
+
+                     (pcase-let ((`(,begin ,end) (plist-get data :region)))
+                       (when (and begin end (yes-or-no-p "Replace with registry link? "))
+                         (save-restriction
+                           (delete-region begin end)
+                           (org-registry-insert id))))
+
                      (when post (funcall post id))))
                  ))
                (template-props (org-combine-plists
@@ -567,12 +575,7 @@ environment (multiline), paste it in headline body."
       (list :title title
             :body (unless fragment latex)
             :props (list :LATEX (when fragment latex))
-            :post
-            (lambda (id)
-              (when (and begin end (yes-or-no-p "Replace with registry link? "))
-                (save-restriction
-                  (delete-region begin end)
-                  (org-registry-insert id))))))))
+            :region (list begin end)))))
 
 (org-registry-set-type
  "latex"
@@ -680,12 +683,13 @@ environment (multiline), paste it in headline body."
 
 (defun org-registry--type-org-parse ()
   (when (and (eq major-mode 'org-mode) (region-active-p))
-    (list :body (buffer-substring-no-properties
-                 (region-beginning) (region-end)))))
+    (let ((begin (region-beginning))
+          (end (region-end)))
+      (list :body (buffer-substring-no-properties begin end)
+            :region (list begin end)))))
 
 (defun org-registry--type-org-create (&optional args)
-  (when-let ((body (plist-get args :body)))
-    (list (cons nil body))))
+  args)
 
 (org-registry-set-type
  "org"
