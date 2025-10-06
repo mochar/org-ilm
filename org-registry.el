@@ -165,12 +165,11 @@ This helps share functionality of a type while being able to filter on a more gr
   (org-node-goto (org-registry--select-entry)))
 
 ;;;###autoload
-(defun org-registry-insert ()
-  (interactive)
-  (let* ((entry (org-registry--select-entry))
-         (id (org-mem-entry-id entry)))
-    (insert (format "[[registry:%s]]" id))
-    (org-link-preview)))
+(defun org-registry-insert (entry-id)
+  (interactive
+   (list (org-mem-entry-id (org-registry--select-entry))))
+  (insert (format "[[registry:%s]]" entry-id))
+  (org-link-preview))
 
 ;;;###autoload
 (defun org-registry-paste ()
@@ -331,6 +330,13 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
       (setq plist (cddr plist)))
     (nreverse keys)))
 
+(defun org-registry--link-target ()
+  (if (and (eq major-mode 'org-mode) (org-id-get))
+      (concat "id:" (org-id-get))
+    (when-let ((file (or buffer-file-name (buffer-file-name (buffer-base-buffer)))))
+      (concat "file:" file))))
+
+
 ;;;; Content capture
 
 ;; TODO Finish. Idea is to ahve a capture buffer with more space where eg latex
@@ -389,39 +395,46 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 (cl-defun org-registry--register (type data &key registry template)
   "Add an entry of TYPE with DATA to the REGISTRY.
 
-DATA is a cons with optional car and cdr is plist of properties. The car
-can be a string which will be interpreted as the entry title, or a cons
-of (title . body) to be used as entry title and body.
+DATA is a plist that can contain :title, :body, :props, :post.
 
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
   (let* ((registry (or registry (org-registry--registry-select)))
-         (title-body (if (stringp (car data)) (list (car data)) (car data)))
-         (props (cdr data))
+         (title (plist-get data :title))
+         (body (plist-get data :body))
+         (props (org-combine-plists (list :ID (org-id-new)) (plist-get data :props)))
+         (post (plist-get data :post))
          (template-string (or
                            (car template)
                            (format "* %s%s%s"
-                                   (or (car title-body) "")
+                                   (or title "")
                                    "%?"
-                                   (if (cdr title-body)
-                                       (concat "\n" (cdr title-body))
-                                     "")))))
+                                   (if body (concat "\n" body) "")))))
     (cl-letf* ((default-template-props
                 (list 
                  :hook
                  (lambda ()
-                   (org-node-nodeify-entry)
-                   (org-entry-put nil "TYPE" type)
+                   ;; Insert properties first so that if ID is specified
                    (cl-loop
                     for (p v) on props by #'cddr
                     do (org-entry-put nil (if (stringp p) p (substring (symbol-name p) 1)) v))
+                   (org-entry-put nil "TYPE" type)
+                   (org-node-nodeify-entry)
                    ;; Toggle open the properties drawer
                    (save-excursion
                      (forward-line)
                      (org-fold-hide-drawer-toggle nil))
                    ;; Call template hook if given
                    (when-let ((hook2 (plist-get (cdr template) :hook)))
-                     (funcall hook2)))))
+                     (funcall hook2)))
+                 :after-finalize
+                 (lambda ()
+                   (if org-note-abort
+                       nil
+                     (org-mem-reset)
+                     (org-mem-await nil 5)
+                     (when post (funcall post (plist-get props :ID)))))
+                 ))
                (template-props (org-combine-plists
                                 (cdr template) default-template-props))
                ((symbol-value 'org-capture-templates)
@@ -521,23 +534,30 @@ The way this is implemented is by using `org-latex-preview-place' which
 If inline fragment, use it as entry property value. If
 environment (multiline), paste it in headline body."
   (when-let* ((org-element (when (eq major-mode 'org-mode)
-                             (org-element-context))))
-    (pcase (org-element-type org-element)
-      ('latex-fragment
-       (list :latex (org-element-property :value org-element) :fragment t))
-      ('latex-environment
-       (list :latex (org-element-property :value org-element))))))
+                             (org-element-context)))
+              (type (org-element-type org-element))
+              (latex (org-element-property :value org-element))
+              (title (format "[[%s][%s]]: " (org-registry--link-target) "Latex")))
+    (when (member type '(latex-fragment latex-environment))
+      (list :title title
+            :latex latex
+            :fragment (eq type 'latex-fragment)
+            :begin (org-element-property :begin org-element)
+            :end (org-element-property :end org-element)))))
 
 (defun org-registry--type-latex-create (&optional args)
-  (let ((latex (plist-get args :latex))
-        (fragment-p (plist-get args :fragment)))
-    (cond
-     ((null latex)
-      (list nil :LATEX ""))
-     (fragment-p
-      (list nil :LATEX latex))
-     (t
-      (list (cons nil latex))))))
+  (cl-destructuring-bind (&key latex title fragment begin end) args
+    (if (null latex)
+        (list :title title :props (list :LATEX ""))
+      (list :title title
+            :body (unless fragment latex)
+            :props (list :LATEX (when fragment latex))
+            :post
+            (lambda (id)
+              (when (and begin end)
+                (save-restriction
+                  (delete-region begin end)
+                  (org-registry-insert id))))))))
 
 (org-registry-set-type
  "latex"
@@ -647,7 +667,7 @@ environment (multiline), paste it in headline body."
  :create #'org-registry--type-org-create
  )
 
-;;;; Website type
+;;;;; Website type
 
 (defvar org-registry--type-website-url nil)
 
@@ -694,12 +714,12 @@ environment (multiline), paste it in headline body."
                  (message "[Registry] Website download completed: %s" url)
                  (org-registry--register
                   "website"
-                  (list title :URL url :ID org-id)
+                  (list :title title :props (list :URL url :ID org-id))
                   :template
                   (list nil :hook #'org-attach-sync)))))
           (org-registry--register
            "website"
-           (list title :URL url :ID org-id)))
+           (list :title title :props (list :URL url :ID org-id))))
         
         (setq org-registry--type-website-url nil)))
     :inapt-if-not
@@ -723,7 +743,7 @@ environment (multiline), paste it in headline body."
  :register #'org-registry--type-website-register
  )
 
-;;;; Citation type
+;;;;; Citation type
 
 ;; zotra-get-entry
 ;; zotra-get-json
@@ -798,10 +818,12 @@ See `parsebib-read-entry'."
         
         (org-registry--register
          "citation"
-         (append
-          (list title :KEY (alist-get "=key=" bibtex nil nil #'equal))
-          (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
-          (list :URL url :ID org-id))
+         (list :title title
+               :props
+               (append
+                (list :KEY (alist-get "=key=" bibtex nil nil #'equal))
+                (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
+                (list :URL url :ID org-id)))
          :registry registry
          :template (list nil :hook #'org-attach-sync))
         
