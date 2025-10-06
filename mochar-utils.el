@@ -104,7 +104,7 @@ Uses various utilities from `url.el'."
                 "utf-8"))
       ;; decode the string of title.
       (when web-title-str
-        (setq web-title-str (decode-coding-string web-title-str (intern coding-charset))))
+        (setq web-title-str (string-trim (decode-coding-string web-title-str (intern coding-charset)))))
       (kill-buffer))
     (if slugify
         (mochar-utils--slugify-title web-title-str)

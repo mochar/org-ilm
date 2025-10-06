@@ -410,7 +410,7 @@ DATA is a plist that can contain :title, :body, :id, :type, :props,
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
   (let* ((registry (or registry (org-registry--registry-select)))
-         (title (plist-get data :title))
+         (title (string-trim (plist-get data :title)))
          (body (plist-get data :body))
          (type (or (plist-get data :type) type))
          (id (or (plist-get data :id) (org-id-new)))
@@ -747,12 +747,12 @@ environment (multiline), paste it in headline body."
                  (message "[Registry] Website download completed: %s" url)
                  (org-registry--register
                   "website"
-                  (list :title title :props (list :URL url :ID org-id))
+                  (list :title title :id org-id :props (list :URL url :ROAM_REFS url))
                   :template
                   (list nil :hook #'org-attach-sync)))))
           (org-registry--register
            "website"
-           (list :title title :props (list :URL url :ID org-id))))
+           (list :title title :id org-id :props (list :URL url :ROAM_REFS url))))
         
         (setq org-registry--type-website-url nil)))
     :inapt-if-not
@@ -852,11 +852,12 @@ See `parsebib-read-entry'."
         (org-registry--register
          "citation"
          (list :title title
+               :id org-id
                :props
                (append
                 (list :KEY (alist-get "=key=" bibtex nil nil #'equal))
                 (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
-                (list :URL url :ID org-id)))
+                (list :URL url :ROAM_REFS url)))
          :registry registry
          :template (list nil :hook #'org-attach-sync))
         
