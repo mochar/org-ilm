@@ -211,7 +211,10 @@
      ('attachment
       (unless (org-ilm-open-highlight)
         (org-ilm-open-collection)))
-     ('collection (org-ilm-open-attachment))
+     ('collection
+      (if (org-ilm-element-at-point)
+          (org-ilm-open-attachment)
+        (user-error "No ilm element at point!")))
      (_ (org-ilm-open-collection)))))
 
 (defun org-ilm-cloze-toggle-this ()
@@ -685,61 +688,62 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
   id state level pcookie rawval title tags sched schedrel
-  type subjects prelative psample pbeta)
+  type subjects prelative psample pbeta registry)
 
 (defun org-ilm-element-at-point ()
   "Parse org-ilm data of headline at point.
 
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
-  (let* ((headline (org-ilm--org-headline-at-point))
-         ;; `headline' looses the priority property which is set manually in
-         ;; `org-ilm--org-headline-at-point', after I access the :todo-keyword
-         ;; property below. I think it is because it is a deferred value, which
-         ;; might cause org to overwrite the custom set :priority value after
-         ;; resolving it when it is accessed. In any case, it is essentialy to
-         ;; use the priority before accessing the other
-         ;; properties. Alternatively we can just resolve the deferred
-         ;; properties by accessing them all in
-         ;; `org-ilm--org-headline-at-point'.
-         (priority (org-ilm--get-priority headline))
-         (id (org-element-property :ID headline))
-         (todo-keyword (org-element-property :todo-keyword headline))
-         (type (org-ilm-type todo-keyword))
-         (is-card (eq type 'card))
-         (logbook (unless is-card (org-ilm--logbook-read headline)))
-         (subjects (org-ilm--priority-subject-gather headline))
-         (beta (org-ilm--priority-beta-compile (cdr priority) subjects logbook))
-         (psample (org-ilm--priority-sample beta id))
-         (scheduled (if is-card
-                        ;; TODO Move this out to srs section
-                        (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
-                      (when-let ((s (org-element-property :scheduled headline)))
-                        (ts-parse-org-element s))))
-         (now (ts-now)))
-    
-    (when type ; non-nil only when org-ilm type
-      (make-org-ilm-element
-       ;; Headline element properties
-       :id id
-       :state todo-keyword
-       :level (org-element-property :level headline)
-       :pcookie (car priority)
-       :rawval (org-element-property :raw-value headline)
-       :tags (org-element-property :tags headline)
-       :title (org-no-properties ; Remove text properties from title
-               (org-element-interpret-data (org-element-property :title headline)))
+  (when-let ((headline (org-ilm--org-headline-at-point)))
+    (let* (;; `headline' looses the priority property which is set manually in
+           ;; `org-ilm--org-headline-at-point', after I access the :todo-keyword
+           ;; property below. I think it is because it is a deferred value, which
+           ;; might cause org to overwrite the custom set :priority value after
+           ;; resolving it when it is accessed. In any case, it is essentialy to
+           ;; use the priority before accessing the other
+           ;; properties. Alternatively we can just resolve the deferred
+           ;; properties by accessing them all in
+           ;; `org-ilm--org-headline-at-point'.
+           (priority (org-ilm--get-priority headline))
+           (id (org-element-property :ID headline))
+           (todo-keyword (org-element-property :todo-keyword headline))
+           (type (org-ilm-type todo-keyword))
+           (is-card (eq type 'card))
+           (logbook (unless is-card (org-ilm--logbook-read headline)))
+           (subjects (org-ilm--priority-subject-gather headline))
+           (beta (org-ilm--priority-beta-compile (cdr priority) subjects logbook))
+           (psample (org-ilm--priority-sample beta id))
+           (scheduled (if is-card
+                          ;; TODO Move this out to srs section
+                          (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
+                        (when-let ((s (org-element-property :scheduled headline)))
+                          (ts-parse-org-element s))))
+           (now (ts-now)))
+      
+      (when type ; non-nil only when org-ilm type
+        (make-org-ilm-element
+         ;; Headline element properties
+         :id id
+         :state todo-keyword
+         :level (org-element-property :level headline)
+         :pcookie (car priority)
+         :rawval (org-element-property :raw-value headline)
+         :tags (org-element-property :tags headline)
+         :title (org-no-properties ; Remove text properties from title
+                 (org-element-interpret-data (org-element-property :title headline)))
 
-       ;; Ilm stuff
-       :sched scheduled
-       :schedrel (when scheduled ; convert from sec to days
-                   (/ (ts-diff now scheduled) 86400))
-       :type type
-       ;; cdr to get rid of headline priority in the car - redundant
-       :subjects (cdr subjects)
-       :prelative (cdr priority)
-       :pbeta beta
-       :psample psample))))
+         ;; Ilm stuff
+         :sched scheduled
+         :schedrel (when scheduled ; convert from sec to days
+                     (/ (ts-diff now scheduled) 86400))
+         :type type
+         :registry (org-element-property :REGISTRY headline)
+         ;; cdr to get rid of headline priority in the car - redundant
+         :subjects (cdr subjects)
+         :prelative (cdr priority)
+         :pbeta beta
+         :psample psample)))))
 
 (defun org-ilm-element-from-id (id)
   (org-ilm--org-with-point-at id
@@ -910,6 +914,27 @@ If `HEADLINE' is passed, read it as org-property."
    (lambda () (org-ilm-element-title org-ilm--element-transient-element))
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
+   ]
+
+  ["Registry"
+   :if (lambda () (org-ilm-element-registry org-ilm--element-transient-element))
+   ("rj" "Jump"
+    (lambda ()
+      (interactive)
+      (org-node-goto-id (org-ilm-element-registry org-ilm--element-transient-element))))
+   ("ra" "Attach"
+    (lambda ()
+      (interactive)
+      (let (registry-attach-dir attachment method)
+        (org-ilm--org-with-point-at
+            (org-ilm-element-registry org-ilm--element-transient-element)
+          (setq registry-attach-dir (org-attach-dir))
+          (setq attachment (expand-file-name
+                            (completing-read "Attachment: " (org-attach-file-list registry-attach-dir) nil t)
+                            registry-attach-dir)))
+        (setq method (intern (completing-read "Method: " '(cp mv ln lns) nil t)))
+        (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
+          (org-attach-attach attachment nil method)))))
    ]
   )
 
