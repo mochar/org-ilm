@@ -505,26 +505,36 @@ does not have an option for this so it is done here.
   :type 'file
   :group 'convtools-ytdlp)
 
+;; https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
+(defcustom convtools-ytdlp-args '("--cookies-from-browser" "firefox")
+  "Arguments to always pass to yt-dlp."
+  :type '(repeat string)
+  :group 'convtools-ytdlp)
+
 (defun convtools--ytdlp-filename-from-url (url &optional template restrict-p)
   "Get the filename that will be generated for URL and TEMPLATE.
 
 See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-examples"
   (string-trim
-   (shell-command-to-string
-    (concat "yt-dlp --print filename "
-            (when template (format "-o \"%s\" " template))
-            url
-            (when restrict-p " --restrict-filenames ")
-            ))))
+   (car
+    (apply #'process-lines
+     (append
+      '("yt-dlp" "--print" "filename")
+      (when template (list "-o" template))
+      (list url)
+      (when restrict-p '("--restrict-filenames"))
+      convtools-ytdlp-args)))))
 
 (defun convtools--ytdlp-subtitles-from-url (url)
   "Returns two alists of alist: 'subtitles and 'auto.
 
 Parse the OUTPUT string from:
    yt-dlp --print subtitles_table --print automatic_captions_table."
-  (let* ((output (shell-command-to-string
-                  (concat "yt-dlp --print subtitles_table --print automatic_captions_table " url)))
-         (lines (split-string output "\n" t "[ \t]+"))
+  (let* ((lines (apply #'process-lines
+                       (append
+                        '("yt-dlp" "--print" "subtitles_table" "--print" "automatic_captions_table")
+                        (list url)
+                        convtools-ytdlp-args)))
          (result '())
          (section nil))
     (dolist (line lines)
@@ -563,7 +573,7 @@ Parse the OUTPUT string from:
       (setcdr r (nreverse (cdr r))))
     (nreverse result)))
 
-(cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs working-dir on-success &allow-other-keys)
+(cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs audio-only-p working-dir on-success &allow-other-keys)
   "yt-dlp
 
 SUB-LANGS may also be 'all' to download all subtitles."
@@ -596,11 +606,15 @@ SUB-LANGS may also be 'all' to download all subtitles."
        (append
         (list
          convtools-ytdlp-path
-         url)
+         url
+         "--embed-chapters")
+        convtools-ytdlp-args
         (cond
          (output-path (list "-o" output-path))
          (filename-template (list  "-o" filename-template "--no-download"))
          (t (list "--no-download")))
+        (when audio-only-p
+          (list "-x"))
         (when sub-langs
           (append '("--write-sub" "--sub-lang") (list (string-join sub-langs ","))))
        ))))))

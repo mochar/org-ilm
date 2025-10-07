@@ -33,6 +33,21 @@ Direct copy from mm-decode.el"
       (setq alist (cdr alist)))
     (nreverse plist)))
 
+;;;; Emacs
+
+(cl-defun mochar-utils--add-hook-once (hook function &optional depth (local t))
+  "Add FUNCTION to HOOK and remove it after its first execution.
+
+HOOK is the hook to which FUNCTION will be added.
+FUNCTION is the function to run once in the hook.
+DEPTH controls where FUNCTION is placed in HOOK and defaults to 0.
+LOCAL controls whether to add HOOK buffer-locally and defaults to t.
+
+The returned function can be used to call `remove-hook' if needed."
+  (letrec ((hook-function (lambda () (remove-hook hook hook-function local) (funcall function))))
+    (add-hook hook hook-function depth local)
+    hook-function))
+
 ;;;; String
 (defun mochar-utils--slugify-title (title)
   "From TITLE, make a filename slug meant to look nice as URL component.
@@ -56,23 +71,47 @@ This is a literal copy-paste from the function
 
 ;;;; Org
 
+(defmacro mochar-utils--org-with-headline-contents-visible (&rest body)
+  "Necessary when parsing hidden/collapsed data within headline."
+  (declare (debug (body)) (indent 1))
+  ;; Need to save outline visiblity, otherwise will unfold headers.
+  ;; Furthermore, need to set USE-MARKERS to non-nil, otherwise it causes weird
+  ;; folding problems.
+  `(org-save-outline-visibility 'use-markers
+     (org-fold-show-entry)
+     ,@body))
+
 (defmacro mochar-utils--org-with-point-at (thing &rest body)
-  "THING for now should be an org-id.
+  "THING should be an org-id or nil.
 
 Note: Previously used org-id-find but it put point above
 headline. org-mem takes me there directly.
 
 Alternatively org-id-goto could be used, but does not seem to respect
 save-excursion."
-  `(when-let* ((org-id ,thing)
-               (entry (org-mem-entry-by-id org-id))
-               (file (org-mem-entry-file-truename entry))
-               (buf (or (find-buffer-visiting file)
-                        (find-file-noselect file))))
-     (with-current-buffer buf
-       ;; Jump to correct position
-       (goto-char (org-find-property "ID" org-id))
-       ,@body)))
+  (declare (debug (body)) (indent 1))
+  `(cond
+    ((null ,thing)
+     ;; Reveal entry contents, otherwise run into problems parsing the metadata,
+     ;; such as with org-srs drawer.
+     (mochar-utils--org-with-headline-contents-visible ,@body))
+    ((stringp ,thing)
+     (when-let* ((org-id ,thing)
+                 (entry (org-mem-entry-by-id org-id))
+                 (file (org-mem-entry-file-truename entry))
+                 (buf (or (find-buffer-visiting file)
+                          (find-file-noselect file))))
+       (with-current-buffer buf
+         ;; We need to widen the buffer because `find-buffer-visiting' might
+         ;; return an active, narrowed buffer.
+         (org-with-wide-buffer
+          ;; Jump to correct position
+          (goto-char (org-find-property "ID" org-id))
+          
+          ;; Reveal entry contents, otherwise run into problems parsing the
+          ;; metadata, such as with org-srs drawer.
+          (mochar-utils--org-with-headline-contents-visible ,@body)))))
+    (t (error "THING should be org-id or nil"))))
 
 ;;;; org-mem / org-node
 

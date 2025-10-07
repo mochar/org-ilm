@@ -411,7 +411,7 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
   "Add an entry of TYPE with DATA to the REGISTRY.
 
 DATA is a plist that can contain :title, :body, :id, :type, :props,
-:region, :post.
+:region, :on-success.
 
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
@@ -421,7 +421,7 @@ org-capture template properties."
          (type (or (plist-get data :type) type))
          (id (or (plist-get data :id) (org-id-new)))
          (props (org-combine-plists (list :ID id) (plist-get data :props)))
-         (post (plist-get data :post))
+         (on-success (plist-get data :on-success))
          (template-string (car template)))
     (when org-registry-add-link-in-title
       (setq title
@@ -464,7 +464,7 @@ org-capture template properties."
                            (delete-region begin end)
                            (org-registry-insert id))))
 
-                     (when post (funcall post id))))
+                     (when on-success (funcall on-success id))))
                  ))
                (template-props (org-combine-plists
                                 (cdr template) default-template-props))
@@ -634,7 +634,7 @@ environment (multiline), paste it in headline body."
 
 (defun org-registry--type-file-create (&optional args)
   (unless args
-    (setq (org-registry--type-file-from-path (read-file-name "File: "))))
+    (setq args (org-registry--type-file-from-path (read-file-name "File: "))))
   (cl-destructuring-bind (&key title path type begin end) args
     ;; TODO Debating on whether to batch query-replace this link in all org,
     ;; org-mem files, current dir files or not. Alternative would be to view
@@ -644,7 +644,7 @@ environment (multiline), paste it in headline body."
 
 (org-registry-set-type
  "file"
- :aliases '("image" "video")
+ :aliases '("image" "video" "audio")
  :preview #'org-registry--type-file-preview
  :paste #'org-registry--type-file-paste
  :parse #'org-registry--type-file-parse
@@ -708,22 +708,55 @@ environment (multiline), paste it in headline body."
 
 ;;;;; Website type
 
-(defvar org-registry--type-website-url nil)
+(defvar org-registry--type-website-data nil)
+
+(transient-define-infix org-registry--type-website-transient-subs ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :key "ms"
+  :description "Subtitles download"
+  :argument "--media-subs="
+  :multi-value 'rest
+  :choices 
+  (lambda ()
+    (let* ((args (transient-args 'org-registry--type-website-transient))
+           (url (transient-arg-value "--url=" args))
+           (subs (plist-get org-registry--type-website-data :media-subs)))
+      (unless subs
+        (let ((subs-data (convtools--ytdlp-subtitles-from-url url)))
+          (setf (plist-get org-registry--type-website-data :media-subs) subs-data
+                subs subs-data)
+          ;; (edebug)
+          ))
+      (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
 
 (transient-define-prefix org-registry--type-website-transient ()
   "Website entry"
-
   :value
   (lambda ()
-    ;; Default values
-    (list (concat "--url=" org-registry--type-website-url)))
+    (cl-destructuring-bind (&key url media-subs &allow-other-keys)
+        org-registry--type-website-data
+      (list (concat "--url=" url))))
   :refresh-suffixes t
   
   ["Options"
-   ("u" "URL" "--url="  :always-read t :allow-empty nil :prompt "URL: ")
-   ("t" "Fetch title" "--fetch-title")
-   ("d" "Download HTML" "--download-html")
+   ("u" "URL" "--url="  :always-read t :allow-empty nil :prompt "URL: " :transient transient--do-call)
+   ("t" "Fetch title" "--fetch-title" :transient transient--do-call)
+   ("H" "HTML download" "--html-download" :transient transient--do-call)
+   ("M" "Media download" "--media-download" :transient transient--do-call)
    ]
+
+  ["Media download (yt-dlp)"
+   :if
+   (lambda ()
+     (let ((args (transient-get-value)))
+       (and (transient-arg-value "--url=" args)
+            (transient-arg-value "--media-download" args))))
+   ("mt" "Template" "--media-template=" :prompt "Template: " :transient transient--do-call)
+   ("ma" "Audio only" "--media-audio" :transient transient--do-call)
+   (org-registry--type-website-transient-subs)
+   ]
+  
   ["Actions"
    ("RET" "Register"
     (lambda ()
@@ -731,7 +764,8 @@ environment (multiline), paste it in headline body."
       (let* ((args (transient-args transient-current-command))
              (url (transient-arg-value "--url=" args))
              (fetch-title-p (transient-arg-value "--fetch-title" args))
-             (download-html-p (transient-arg-value "--download-html" args))
+             (download-html-p (transient-arg-value "--html-download" args))
+             (download-media-p (transient-arg-value "--media-download" args))
              (org-id (org-id-new))
              (output-dir (org-attach-dir-from-id org-id))
              (title org-id))
@@ -739,28 +773,53 @@ environment (multiline), paste it in headline body."
         (when fetch-title-p
           (setq title (mochar-utils--get-page-title url)))
 
-        (if download-html-p
-            (let ((attach-path (expand-file-name
-                                (concat (mochar-utils--slugify-title title) ".html")
-                                (org-attach-dir-from-id org-id))))
-              (make-directory (file-name-directory attach-path))
-              (convtools--convert-with-monolith
-               :process-id org-id
-               :input-path url
-               :output-path attach-path
-               :on-success
-               (lambda (proc buf id)
-                 (message "[Registry] Website download completed: %s" url)
-                 (org-registry--register
-                  "website"
-                  (list :title title :id org-id :props (list :URL url :ROAM_REFS url))
-                  :template
-                  (list nil :hook #'org-attach-sync)))))
-          (org-registry--register
-           "website"
-           (list :title title :id org-id :props (list :URL url :ROAM_REFS url))))
-        
-        (setq org-registry--type-website-url nil)))
+        (org-registry--register
+         "website"
+         (list
+          :title title
+          :id org-id
+          :type (when (member (url-domain (url-generic-parse-url url))
+                              '("youtube.com" "youtu.be"))
+                  "youtube")
+          :props (list :URL url :ROAM_REFS url)
+          :on-success
+          (lambda (id)
+            (when (or download-html-p download-media-p)
+              (let* ((attach-dir (org-attach-dir-from-id org-id))
+                     (attach-path (expand-file-name
+                                   (concat (mochar-utils--slugify-title title) ".html")
+                                   attach-dir)))
+                (make-directory attach-dir)
+                
+                (when download-html-p
+                  (convtools--convert-with-monolith
+                   :process-id org-id
+                   :input-path url
+                   :output-path attach-path
+                   :on-success
+                   (lambda (proc buf id)
+                     (message "[Registry] Website download completed: %s" url)
+                     (mochar-utils--org-with-point-at id
+                       (org-attach-sync)))))
+
+                (when download-media-p
+                  (convtools--convert-with-ytdlp
+                   :process-id org-id
+                   :url url
+                   :output-dir attach-dir
+                   :filename-template nil
+                   :audio-only-p (transient-arg-value "--audio-only-p" args)
+                   :sub-langs (cdr (assoc "--media-subs=" args))
+                   :on-success
+                   (lambda (proc buf id)
+                     (message "[Registry] Media download completed: %s" url)
+                     (mochar-utils--org-with-point-at id
+                       (org-attach-sync)))))
+                
+                ))
+            )))
+
+        (setq org-registry--type-website-data nil)))
     :inapt-if-not
     (lambda ()
       (transient-arg-value "--url=" (transient-get-value)))
@@ -773,11 +832,16 @@ environment (multiline), paste it in headline body."
     (list :url url)))
 
 (defun org-registry--type-website-register (&optional args)
-  (let ((org-registry--type-website-url (plist-get args :url)))
-    (org-registry--type-website-transient)))
+  (let ((org-registry--type-website-data (plist-get args :url)))
+    (org-registry--type-website-transient)
+    ;; I know let is within scope but i use the var more liberally
+    (mochar-utils--add-hook-once
+       'transient-post-exit-hook
+       (lambda () (setq org-registry--type-website-data nil)))))
 
 (org-registry-set-type
  "website"
+ :aliases '("youtube")
  :parse #'org-registry--type-website-parse
  :register #'org-registry--type-website-register
  )
