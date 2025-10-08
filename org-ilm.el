@@ -29,6 +29,7 @@
 (require 'vtable)
 (require 'eldoc)
 (require 'transient)
+(require 'cond-let)
 
 (require 'mochar-utils)
 (require 'convtools)
@@ -215,6 +216,17 @@
       (if (org-ilm-element-at-point)
           (org-ilm-open-attachment)
         (user-error "No ilm element at point!")))
+     ('registry
+      ;; TODO Allow for multiple ilm elements for same registry
+      ;; Eg: blog and accompanying video, manuscript and published paper, etc
+      (if-let ((entry (seq-find
+                       (lambda (entry)
+                         (and (org-ilm-type (org-mem-entry-todo-state entry))
+                              (string= (org-id-get)
+                                       (org-mem-entry-property "REGISTRY" entry))))
+                       (hash-table-values org-mem--id<>entry))))
+          (org-node-goto-id (org-mem-entry-id entry))
+        (user-error "No ilm element derived from this registry entry!")))
      (_ (org-ilm-open-collection)))))
 
 (defun org-ilm-cloze-toggle-this ()
@@ -357,15 +369,17 @@ If empty return nil, and if only one, return it."
 (defun org-ilm--where-am-i ()
   "Returns one of ('collection collection), ('attachment (org-id collection)),
 ('queue collection org-id), nil."
-  ;; For collection, we return file as well, useful in a directory based collection.
-  (if-let ((collection (org-ilm--collection-file (org-ilm--buffer-file-name))))
-      (cons 'collection collection)
-    (if-let ((attachment (org-ilm--attachment-data)))
-        (cons 'attachment attachment)
-      (when (bound-and-true-p org-ilm-queue)
-        (let* ((el (org-ilm--vtable-get-object))
-               (id (when el (org-ilm-element-id el))))
-          (list 'queue (plist-get org-ilm-queue :collection) id))))))
+  (cond-let*
+    ([collection (org-ilm--collection-file (org-ilm--buffer-file-name))]
+     (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
+         (cons 'registry collection)
+       (cons 'collection collection)))
+    ([attachment (org-ilm--attachment-data)]
+     (cons 'attachment attachment))
+    ((bound-and-true-p org-ilm-queue)
+     (let* ((el (org-ilm--vtable-get-object))
+            (id (when el (org-ilm-element-id el))))
+       (list 'queue (plist-get org-ilm-queue :collection) id)))))
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
   "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
@@ -2263,10 +2277,7 @@ This is used to keep track of changes in priority and scheduling.")
    ;; Check if attachment is in the process of being generated with a conversion
    ;; tool.
    ((when-let* ((org-id (org-id-get))
-                (conversion (seq-find
-                             (lambda (conversion)
-                               (string= (plist-get conversion :id) org-id))
-                             (convtools--conversions))))
+                (conversion (convtools--conversion-by-id org-id)))
       (let ((message (pcase (plist-get conversion :state)
                        ;; TODO for success and error, provide option to
                        ;; delete headline and extract highlight in parent

@@ -46,7 +46,7 @@
     (with-current-buffer process-buffer
       (setq-local convtools--convert-name name
                   convtools--convert-id id
-                  convtools--convert-state nil
+                  convtools--convert-state 'busy
                   convtools--convert-data buffer-data)
       (goto-char (point-max))
       (insert (format "\n====== START: %s ======\n" process-name)))
@@ -689,6 +689,18 @@ SUB-LANGS may also be 'all' to download all subtitles."
        (list :name name :id id :buffer buf :state state)))
    (convtools--conversions-buffers)))
 
+(defun convtools--conversion-by-id (id)
+  (seq-find
+   (lambda (conversion)
+     (string= (plist-get conversion :id) id))
+   (convtools--conversions)))
+
+(defun convtools--conversion-propertize-state (state)
+  (pcase state
+    ('error (propertize "Error" 'face 'error))
+    ('success (propertize "Success" 'face 'success))
+    ('busy (propertize "Busy" 'face 'italic))))
+
 (defun convtools--conversions-make-vtable ()
   "Build conversions view vtable."
   (make-vtable
@@ -707,10 +719,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
    (lambda (object column vtable)
      (pcase (vtable-column vtable column)
        ("ID" (plist-get object :id))
-       ("State" (pcase (plist-get object :state)
-                  ('error (propertize "Error" 'face 'error))
-                  ('success (propertize "Success" 'face 'success))
-                  (t "Busy")))
+       ("State" (convtools--conversion-propertize-state (plist-get object :state)))
        ("Converter" (plist-get object :name))))
    :keymap convtools-conversions-map))
 

@@ -164,7 +164,8 @@ This helps share functionality of a type while being able to filter on a more gr
   "f" #'org-registry-find
   "i" #'org-registry-insert
   "p" #'org-registry-paste
-  "r" #'org-registry-register-dwim)
+  "r" #'org-registry-register-dwim
+  "a" #'org-registry-attachments)
 
 ;;;###autoload
 (defun org-registry-open ()
@@ -230,6 +231,25 @@ This helps share functionality of a type while being able to filter on a more gr
       (funcall #'org-registry-register
                (car type) (cdr type))
     (call-interactively #'org-registry-register)))
+
+;;;###autoload
+(defun org-registry-attachments ()
+  "View the attachments of a registry entry."
+  (interactive)
+  (let* ((attachments (org-attach-file-list (org-attach-dir)))
+         (conversion (convtools--conversion-by-id (org-id-get)))
+         conversion-name)
+    (when (and conversion (not (eq (plist-get conversion :state) 'success)))
+      (setq conversion-name
+            (concat (propertize (plist-get conversion :name) 'face 'italic)
+                    " ("
+                    (convtools--conversion-propertize-state (plist-get conversion :state))
+                    ")"))
+      (push conversion-name attachments))
+    (let ((choice (completing-read "Attachment: " attachments nil t)))
+      (if (string= choice conversion-name)
+          (switch-to-buffer (plist-get conversion :buffer))
+        (find-file (expand-file-name choice (org-attach-dir)))))))
 
 ;;;; Functions
 
