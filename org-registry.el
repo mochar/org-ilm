@@ -201,15 +201,14 @@ This helps share functionality of a type while being able to filter on a more gr
    (list
     (completing-read "Type: " org-registry-types nil t)))
   (let ((type (assoc type-name org-registry-types)))
-    (cond
-     ((when-let* ((create-func (plist-get (cdr type) :create))
-                  (data (funcall create-func args)))
-        (org-registry--register (car type) data)
-        t))
-     ((when-let ((register-func (plist-get (cdr type) :register)))
-        (funcall register-func args)))
-     ;; When nothing assigned, create empty capture
-     (t (org-registry--register (car type) nil)))))
+    (cond-let*
+      ([create-func (plist-get (cdr type) :create)]
+       [data (funcall create-func args)]
+       (org-registry--register (car type) data))
+      ([register-func (plist-get (cdr type) :register)]
+       (funcall register-func args))
+      ;; When nothing assigned, create empty capture
+      (t (org-registry--register (car type) nil)))))
 
 ;;;###autoload
 (defun org-registry-register-dwim ()
@@ -726,11 +725,125 @@ environment (multiline), paste it in headline body."
  :create #'org-registry--type-org-create
  )
 
-;;;;; Website type
+;;;;; Resource type
 
-(defvar org-registry--type-website-data nil)
+;; Generic object that contains zero or more attachments. Think of:
+;; - Website article / blog post
+;; - Youtube video (media)
+;; - Paper from arxiv link or doi (paper)
+;; - Paper from local pdf file
 
-(transient-define-infix org-registry--type-website-transient-subs ()
+(defcustom org-registry--type-resource-fields nil
+  "List of field names to include in the entry.
+See `parsebib-read-entry'."
+  :type '(repeat string)
+  :group 'org-registry)
+
+(defvar org-registry--type-resource-data nil)
+
+(defun org-registry--type-resource-url-is-media-p (url)
+  ;; Determine if media type by attempting to extract filename from url
+  ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
+  ;; not media type.
+  ;; NOTE Quite slow (~3 sec)
+  ;; (condition-case err
+  ;;     (or (convtools--ytdlp-filename-from-url url) t)
+  ;;   (error nil))
+
+  ;; Instead just check if its a youtube link for now
+  (member (url-domain (url-generic-parse-url url))
+          '("youtube.com" "youtu.be")))
+
+(defun org-registry--type-resource-transient-args (&optional args)
+  (setq args (or args (transient-args 'org-registry--type-resource-transient)))
+  (list :source (transient-arg-value "--source=" args)
+        :source-type (plist-get org-registry--type-resource-data :source-type)
+        :type (transient-arg-value "--type=" args)
+        :bibtex (plist-get org-registry--type-resource-data :bibtex)
+
+        :paper-download (transient-arg-value "--paper-download" args)
+
+        ;; HTML Download
+        :html-download (transient-arg-value "--html-download" args)
+        :html-simplify
+        (cond
+         ((transient-arg-value "--html-simplify-to-html" args)
+          "html")
+         ((transient-arg-value "--html-simplify-to-markdown" args)
+          "markdown"))
+        :html-orgify (transient-arg-value "--html-orgify" args)
+
+        ;; Media download
+        :media-download (transient-arg-value "--media-download" args)
+        :media-template (transient-arg-value "--media-template=" args)
+        :media-audio-only (transient-arg-value "--media-audio" args)
+        :media-sub-langs (cdr (assoc "--media-subs=" args))
+
+        ))
+
+(defun org-registry--type-resource-process-source (&optional source bibtex)
+  (let ((source (or source (ffap-read-file-or-url "URL/path/DOI: " nil)))
+        (type "resource")
+        source-type title)
+    
+    (cond
+     ((or (null source) (string-empty-p source)))
+
+     ;; Source is a url (assuming web)
+     ((org-url-p source)
+      (setq source-type 'url)
+
+      ;; Figure out what type 
+      (cond
+       ((org-registry--type-resource-url-is-media-p source)
+        (setq type "media"))
+       (t (setq type "website"))))
+
+     ;; Source is a file
+     ((file-exists-p source)
+      (setq source-type 'url
+            title (file-name-base source)))
+     
+     (t
+      (setq source-type 'id
+            title source)))
+
+    ;; Bibtex
+    (when (and (null bibtex) (member source-type '(url id)))
+      (when-let ((bibtex-string (zotra-get-entry source "bibtex")))
+        (with-temp-buffer
+          (insert (s-trim bibtex-string))
+          (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
+                                      :fields org-registry--type-resource-fields
+                                      :expand-strings t
+                                      :inheritance t
+                                      :replace-TeX t)))
+                      (key (car (hash-table-keys bibtexes))))
+            (setq bibtex (gethash key bibtexes)
+                  title (or (alist-get "title" bibtex nil nil #'equal) title))))))
+
+    (when (and (null title) (eq source-type 'url))
+      (setq title (mochar-get-page-title source)))
+
+    (list :source source :source-type source-type :title title
+          :bibtex bibtex :type type)))
+
+(transient-define-infix org-registry--type-resource-transient-source ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :key "s"
+  :description "Source"
+  :argument "--source="
+  :allow-empty nil
+  :prompt "URL/path/DOI: "
+  :reader
+  (lambda (prompt initial-input history)
+    (let ((source-data (org-registry--type-resource-process-source)))
+      (setq org-registry--type-resource-data source-data)
+      (mochar-utils--transiet-set-target-value "t" (plist-get source-data :type))
+      (plist-get source-data :source))))
+
+(transient-define-infix org-registry--type-resource-transient-subs ()
   :class 'transient-option
   :transient 'transient--do-call
   :key "ms"
@@ -739,258 +852,225 @@ environment (multiline), paste it in headline body."
   :multi-value 'rest
   :choices 
   (lambda ()
-    (let* ((args (transient-args 'org-registry--type-website-transient))
-           (url (transient-arg-value "--url=" args))
-           (subs (plist-get org-registry--type-website-data :media-subs)))
+    (let* ((args (org-registry--type-resource-transient-args))
+           (url (plist-get args :source))
+           (subs (plist-get org-registry--type-resource-data :media-subs)))
       (unless subs
         (let ((subs-data (convtools--ytdlp-subtitles-from-url url)))
-          (setf (plist-get org-registry--type-website-data :media-subs) subs-data
-                subs subs-data)
-          ;; (edebug)
-          ))
+          (setf (plist-get org-registry--type-resource-data :media-subs) subs-data
+                subs subs-data)))
       (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
 
-(transient-define-prefix org-registry--type-website-transient ()
-  "Website entry"
+(transient-define-argument org-registry--type-resource-transient-simplify ()
+  :class 'transient-switches
+  :transient 'transient--do-call
+  :key "hs"
+  :description "Simplify"
+  :argument-format "--html-simplify-to-%s"
+  :argument-regexp "\\(--html-simplify-to-\\(html\\|markdown\\)\\)"
+  :choices '("html" "markdown"))
+
+(transient-define-prefix org-registry--type-resource-transient ()
+  :refresh-suffixes t
   :value
   (lambda ()
-    (cl-destructuring-bind (&key url media-subs &allow-other-keys)
-        org-registry--type-website-data
-      (list (concat "--url=" url))))
-  :refresh-suffixes t
-  
-  ["Options"
-   ("u" "URL" "--url="  :always-read t :allow-empty nil :prompt "URL: " :transient transient--do-call)
-   ("t" "Fetch title" "--fetch-title" :transient transient--do-call)
-   ("H" "HTML download" "--html-download" :transient transient--do-call)
-   ("M" "Media download" "--media-download" :transient transient--do-call)
+    (append
+     '("--html-simplify-to-markdown" "--html-orgify")
+     (let ((source (plist-get org-registry--type-resource-data :source)))
+       (unless source
+         (setq org-registry--type-resource-data
+               (org-registry--type-resource-process-source))
+         (setq source (plist-get org-registry--type-resource-data :source)))
+       (list (concat "--source=" source)
+             (concat "--type=" (plist-get org-registry--type-resource-data :type))))))
+
+  ["Resource"
+   (org-registry--type-resource-transient-source)
+   (:info
+    (lambda ()
+      (let ((title (plist-get org-registry--type-resource-data :title)))
+          (propertize title 'face 'italic)))
+    :if (lambda () (plist-get org-registry--type-resource-data :title)))
+   ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource"))
+   ("H" "HTML download" "--html-download" :transient transient--do-call
+    :if (lambda ()
+          (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+            (eq (plist-get args :source-type) 'url))))
+   ("M" "Media download" "--media-download" :transient transient--do-call
+    :if (lambda ()
+          (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+            (and (string= "media" (plist-get args :type))
+                 (eq (plist-get args :source-type) 'url)))))
+   ("P" "Paper PDF download" "--paper-download" :transient transient--do-call
+    :if (lambda ()
+          (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+            (and (string= "paper" (plist-get args :type))
+                 (member (plist-get args :source-type) '(url id))))))
    ]
+
+  ["HTML download (marker)"
+   :hide
+   (lambda ()
+     (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+       (not (and (member (plist-get args :source-type) '(url))
+                 (plist-get args :html-download)))))
+    [("hs" org-registry--type-resource-transient-simplify)
+     ("ho" "Org conversion" "--html-orgify"
+      :summary "Convert to Org mode with Pandoc"
+      :transient transient--do-call)]]
 
   ["Media download (yt-dlp)"
    :if
    (lambda ()
-     (let ((args (transient-get-value)))
-       (and (transient-arg-value "--url=" args)
-            (transient-arg-value "--media-download" args))))
+     (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+       (and (string= (plist-get args :type) "media")
+            (plist-get args :media-download))))
    ("mt" "Template" "--media-template=" :prompt "Template: " :transient transient--do-call)
    ("ma" "Audio only" "--media-audio" :transient transient--do-call)
-   (org-registry--type-website-transient-subs)
+   ("ms" org-registry--type-resource-transient-subs)
    ]
-  
+
   ["Actions"
    ("RET" "Register"
     (lambda ()
       (interactive)
-      (let* ((args (transient-args transient-current-command))
-             (url (transient-arg-value "--url=" args))
-             (fetch-title-p (transient-arg-value "--fetch-title" args))
-             (download-html-p (transient-arg-value "--html-download" args))
-             (download-media-p (transient-arg-value "--media-download" args))
-             (org-id (org-id-new))
-             (output-dir (org-attach-dir-from-id org-id))
-             (title org-id))
+      (cl-destructuring-bind
+          (&key source source-type type bibtex title
+                paper-download
+                html-download html-simplify html-orgify
+                media-download media-template media-audio-only media-sub-langs)
+          (org-registry--type-resource-transient-args)
 
-        (when fetch-title-p
-          (setq title (mochar-utils--get-page-title url)))
+        (when (and (null title) bibtex)
+          (setq title
+                (or
+                 (alist-get "title" bibtex nil nil #'equal)
+                 (alist-get "=key=" bibtex nil nil #'equal)
+                 (alist-get "url" bibtex nil nil #'equal)
+                 source)))
 
-        (org-registry--register
-         "website"
-         (list
-          :title title
-          :id org-id
-          :type (when (member (url-domain (url-generic-parse-url url))
-                              '("youtube.com" "youtu.be"))
-                  "youtube")
-          :props (list :URL url :ROAM_REFS url)
-          :on-success
-          (lambda (id)
-            (when (or download-html-p download-media-p)
-              (let* ((attach-dir (org-attach-dir-from-id org-id))
-                     (attach-path (expand-file-name
-                                   (concat (mochar-utils--slugify-title title) ".html")
-                                   attach-dir)))
+        (let* ((id (org-id-new))
+               (key (alist-get "=key=" bibtex nil nil #'equal))
+               (registry (org-registry--registry-select))
+               ;; Determine attach dir from within registry in case the dir is set
+               ;; buffer or dir local
+               (attach-dir (with-current-buffer (find-file-noselect registry)
+                             (org-attach-dir-from-id id))))
+
+          (org-registry--register
+           "resource"
+           (list
+            :title title
+            :id id
+            :type type
+            :props
+            (append
+             (when key
+               (list :KEY key))
+             (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
+             (list :ROAM_REFS (if key (concat source " @" key) source)))
+            :on-success
+            (lambda (_)
+              (when (or html-download media-download paper-download)
                 (make-directory attach-dir)
-                
-                (when download-html-p
-                  (convtools--convert-with-monolith
-                   :process-id org-id
-                   :input-path url
-                   :output-path attach-path
-                   :on-success
-                   (lambda (proc buf id)
-                     (message "[Registry] Website download completed: %s" url)
-                     (mochar-utils--org-with-point-at id
-                       (org-attach-sync)))))
 
-                (when download-media-p
+                (when paper-download
+                  (ignore-errors
+                    (zotra-download-attachment
+                     source nil
+                     (expand-file-name (concat (mochar-utils--slugify-title title) ".pdf")
+                                       attach-dir))
+                    (mochar-utils--org-with-point-at id
+                      (org-attach-sync))))
+                
+                (when html-download
+                  (let ((monolith-args
+                         (list :input-path source
+                               :output-path
+                               (expand-file-name
+                                (concat (mochar-utils--slugify-title title) ".html")
+                                attach-dir)))
+                        (on-success
+                         (lambda (proc buf id)
+                           (message "[Registry] Website download completed: %s" source)
+                           (mochar-utils--org-with-point-at id
+                             (org-attach-sync)))))
+
+                    (cond
+                     (html-orgify
+                      (apply
+                       (if html-simplify
+                           #'convtools--convert-to-org-with-monolith-defuddle-pandoc
+                         #'convtools--convert-to-org-with-monolith-pandoc)
+                       (list
+                        :process-id id
+                        :monolith-args monolith-args
+                        :defuddle-args (list :output-format html-simplify)
+                        :on-success on-success)))
+                     (html-simplify
+                      (apply
+                       #'convtools--convert-with-monolith-defuddle
+                       (list
+                        :process-id id
+                        :monolith-args monolith-args
+                        :defuddle-args (list :output-format html-simplify)
+                        :on-success on-success)))
+                     (t ; Download, dont simplify or orgify
+                      (apply
+                       #'convtools--convert-with-monolith
+                       :process-id org-id
+                       :on-success on-success
+                       monolith-args)))))
+
+                (when media-download
                   (convtools--convert-with-ytdlp
-                   :process-id org-id
-                   :url url
+                   :process-id id
+                   :url source
                    :output-dir attach-dir
-                   :filename-template nil
-                   :audio-only-p (transient-arg-value "--audio-only-p" args)
-                   :sub-langs (cdr (assoc "--media-subs=" args))
+                   :filename-template media-template
+                   :audio-only-p media-audio-only
+                   :sub-langs media-sub-langs
                    :on-success
                    (lambda (proc buf id)
-                     (message "[Registry] Media download completed: %s" url)
+                     (message "[Registry] Media download completed: %s" source)
                      (mochar-utils--org-with-point-at id
                        (org-attach-sync)))))
                 
                 ))
-            )))
-
-        (setq org-registry--type-website-data nil)))
-    :inapt-if-not
-    (lambda ()
-      (transient-arg-value "--url=" (transient-get-value)))
-    )]
+            ))))))
+   ]
   )
 
-(defun org-registry--type-website-parse ()
-  ;; https://www.gnu.org/software/emacs/manual/html_node/elisp/Plist-Access.html
-  (when-let* ((url (thing-at-point 'url)))
-    (list :url url)))
+(defun org-registry--type-resource-parse ()
+  (cond-let*
+    ([bibtex (ignore-errors
+               ;; TODO Only works if point at start of bibtex entry
+               (parsebib-read-entry
+                org-registry--type-resource-fields
+                (make-hash-table :test #'equal)
+                t))]
+     (let ((url (or
+                 (alist-get "url" bibtex nil nil #'equal)
+                 (alist-get "doi" bibtex nil nil #'equal))))
+       (list :source url :bibtex bibtex)))
+    ([url (thing-at-point 'url)]
+     (list :source url))))
 
-(defun org-registry--type-website-register (&optional args)
-  (let ((org-registry--type-website-data (plist-get args :url)))
-    (org-registry--type-website-transient)
-    ;; I know let is within scope but i use the var more liberally
-    (mochar-utils--add-hook-once
+(defun org-registry--type-resource-register (&optional args)
+  (setq org-registry--type-resource-data
+        (org-registry--type-resource-process-source
+         (plist-get args :source)
+         (plist-get args :bibtex)))
+  (mochar-utils--add-hook-once
        'transient-post-exit-hook
-       (lambda () (setq org-registry--type-website-data nil)))))
+       (lambda () (setq org-registry--type-resource-data nil)))
+  (org-registry--type-resource-transient))
 
 (org-registry-set-type
- "website"
- :aliases '("youtube")
- :parse #'org-registry--type-website-parse
- :register #'org-registry--type-website-register
+ "resource"
+ :parse #'org-registry--type-resource-parse
+ :register #'org-registry--type-resource-register
  )
-
-;;;;; Citation type
-
-;; zotra-get-entry
-;; zotra-get-json
-;; zotra-get-enntry-from-json
-;; zotra-query-url-or-search-string
-
-(defcustom org-registry--type-citation-fields nil
-  "List of field names to include in the entry.
-See `parsebib-read-entry'."
-  :type '(repeat string)
-  :group 'org-registry)
-
-(defvar org-registry--type-citation-url nil)
-(defvar org-registry--type-citation-bibtex nil)
-
-(transient-define-prefix org-registry--type-citation-transient ()
-  "Citation entry"
-
-  :value
-  (lambda ()
-    ;; Default values
-    (list (concat "--url=" org-registry--type-citation-url)))
-  :refresh-suffixes t
-  
-  ["Options"
-   ("u" "URL or ID" "--url="  :always-read t :allow-empty nil :prompt "URL or ID: ")
-   ("d" "Download PDF" "--download-pdf")
-   ]
-  ["Actions"
-   ("RET" "Register"
-    (lambda ()
-      (interactive)
-      (let* ((args (transient-args transient-current-command))
-             (url (transient-arg-value "--url=" args))
-             (download-pdf-p (transient-arg-value "--download-pdf" args))
-             (org-id (org-id-new))
-             (registry (org-registry--registry-select))
-             ;; Determine attach dir from within registry in case the dir is set
-             ;; buffer or dir local
-             (output-dir (with-current-buffer (find-file-noselect registry)
-                           (org-attach-dir-from-id org-id)))
-             (bibtex org-registry--type-citation-bibtex)
-             title pdf-tmp-path)
-
-        (unless bibtex
-          (if-let ((bibtex-string (zotra-get-entry url "bibtex")))
-              (with-temp-buffer
-                (insert (s-trim bibtex-string))
-                (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
-                                            :fields org-registry--type-citation-fields
-                                            :expand-strings t
-                                            :inheritance t
-                                            :replace-TeX t)))
-                            (key (car (hash-table-keys bibtexes))))
-                  (setq bibtex (gethash key bibtexes))
-                  (unless bibtex
-                    (message "%s" bibtex-string)
-                    (user-error "Bibtex could not be parsed. See Messages buffer for returned value."))))
-            (user-error "No bibtex found")
-            (transient-quit-one)))
-
-        (setq title
-              (or
-               (alist-get "title" bibtex nil nil #'equal)
-               (alist-get "=key=" bibtex nil nil #'equal)
-               (alist-get "url" bibtex nil nil #'equal)
-               url))
-        (setq pdf-tmp-path (expand-file-name (concat title ".pdf") output-dir))
-
-        (when download-pdf-p
-          (zotra-download-attachment url nil pdf-tmp-path))
-        
-        (org-registry--register
-         "citation"
-         (list :title title
-               :id org-id
-               :props
-               (append
-                (list :KEY (alist-get "=key=" bibtex nil nil #'equal))
-                (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
-                (list :URL url :ROAM_REFS url)))
-         :registry registry
-         :template (list nil :hook #'org-attach-sync))
-        
-        (setq org-registry--type-citation-url nil
-              org-registry--type-citation-bibtex nil)))
-    :inapt-if-not
-    (lambda ()
-      (transient-arg-value "--url=" (transient-get-value)))
-    )])
-
-(defun org-registry--type-citation-parse ()
-  (cond
-   ((when-let* ((bibtex (ignore-errors
-                          (parsebib-read-entry
-                           org-registry--type-citation-fields
-                           (make-hash-table :test #'equal)
-                           t)))
-                (url (or
-                      (alist-get "url" bibtex nil nil #'equal)
-                      (alist-get "doi" bibtex nil nil #'equal))))
-      (list :url url :bibtex bibtex)))
-   ((when-let ((url (thing-at-point 'url)))
-      (list :url url)))))
-
-(defun org-registry--type-citation-register (&optional args)
-  ;; With -url we could simply set it in a let without actaully changing the
-  ;; variable, as in the transient it is used in the setup to set the default
-  ;; value of the suffix. However -bibtex is an alist and not part of the
-  ;; transient so can't use that approach there. And would rather have a unified
-  ;; approach. That is, setting the global vars, and the transient sets them
-  ;; back to nil.
-  (setq org-registry--type-citation-url (plist-get args :url)
-        org-registry--type-citation-bibtex (plist-get args :bibtex))
-  (org-registry--type-citation-transient))
-
-;; https://arxiv.org/abs/2509.08834
-
-(org-registry-set-type
- "citation"
- :parse #'org-registry--type-citation-parse
- :register #'org-registry--type-citation-register
- )
-
 
 ;;;; Footer
 

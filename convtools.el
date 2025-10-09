@@ -530,11 +530,12 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
 
 Parse the OUTPUT string from:
    yt-dlp --print subtitles_table --print automatic_captions_table."
-  (let* ((lines (apply #'process-lines
-                       (append
-                        '("yt-dlp" "--print" "subtitles_table" "--print" "automatic_captions_table")
-                        (list url)
-                        convtools-ytdlp-args)))
+  (let* ((lines (ignore-errors
+                  (apply #'process-lines
+                         (append
+                          '("yt-dlp" "--print" "subtitles_table" "--print" "automatic_captions_table")
+                          (list url)
+                          convtools-ytdlp-args))))
          (result '())
          (section nil))
     (dolist (line lines)

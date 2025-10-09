@@ -149,6 +149,20 @@ Uses various utilities from `url.el'."
         (mochar-utils--slugify-title web-title-str)
       web-title-str)))
 
+;;;; Transient
+
+(defun mochar-utils--transiet-set-target-value (target-key new-value)
+  "Finds the target argument by its key and sets its internal value slot."
+  (let* (;; Get the list of currently displayed suffix objects (internal variable)
+         (all-suffixes transient--suffixes)
+         ;; Find the target object by its key
+         (target-obj (cl-find target-key all-suffixes
+                             :key (lambda (s) (oref s key))
+                             :test #'equal)))
+    ;; Check if it's a valid object and manually set the 'value' slot (internal slot)
+    (when (cl-typep target-obj 'transient-infix)
+      (oset target-obj value new-value))))
+
 
 ;;;; Footer
 
