@@ -37,6 +37,7 @@ Direct copy from mm-decode.el"
 
 (cl-defun mochar-utils--add-hook-once (hook function &optional depth (local t))
   "Add FUNCTION to HOOK and remove it after its first execution.
+If HOOK passes arguments, FUNCTION will receive them.
 
 HOOK is the hook to which FUNCTION will be added.
 FUNCTION is the function to run once in the hook.
@@ -44,9 +45,11 @@ DEPTH controls where FUNCTION is placed in HOOK and defaults to 0.
 LOCAL controls whether to add HOOK buffer-locally and defaults to t.
 
 The returned function can be used to call `remove-hook' if needed."
-  (letrec ((hook-function (lambda () (remove-hook hook hook-function local) (funcall function))))
-    (add-hook hook hook-function depth local)
-    hook-function))
+  (letrec ((wrapper (lambda (&rest args)
+                      (remove-hook hook wrapper local)
+                      (apply function args))))
+    (add-hook hook wrapper depth local)
+    wrapper))
 
 ;;;; String
 (defun mochar-utils--slugify-title (title)

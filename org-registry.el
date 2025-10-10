@@ -426,6 +426,9 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 
 ;;;; Register
 
+(defvar org-registry-register-hook nil
+  "Hook run after an entry has been registered.")
+
 (cl-defun org-registry--register (type data &key registry template)
   "Add an entry of TYPE with DATA to the REGISTRY.
 
@@ -483,7 +486,8 @@ org-capture template properties."
                            (delete-region begin end)
                            (org-registry-insert id))))
 
-                     (when on-success (funcall on-success id))))
+                     (when on-success (funcall on-success id))
+                     (run-hook-with-args 'org-registry-register-hook id)))
                  ))
                (template-props (org-combine-plists
                                 (cdr template) default-template-props))

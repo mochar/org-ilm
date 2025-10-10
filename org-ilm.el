@@ -166,11 +166,31 @@
   (condition-case err
       (org-ilm--attachment-open)
     (error
-     (when (yes-or-no-p "No attachment found. Create new Org attachment? ")
-       (let* ((attach-dir (org-attach-dir-get-create))
-              (file-path (expand-file-name (concat (org-id-get) ".org") attach-dir)))
-         (find-file file-path)
-       )))))
+     (pcase (read-char-choice "No attachments. (n)ew, (r)egistry, (s)elect: " '("n" "r" "s"))
+       (?n 
+        (let* ((attach-dir (org-attach-dir-get-create))
+               (file-path (expand-file-name (concat (org-id-get) ".org") attach-dir)))
+          (find-file file-path)))
+       (?s
+        (if-let* ((attach-dir (org-attach-dir))
+                  (attachments (org-attach-file-list attach-dir))
+                  (attachment (completing-read "Attachment to dedicate as element's: "
+                                               attachments nil t))
+                  (attachment (expand-file-name attachment attach-dir))
+                  (attachment-new (expand-file-name
+                                   (format "%s.%s" (org-id-get)
+                                           (file-name-extension attachment))
+                                   (file-name-directory attachment))))
+            (progn
+              (rename-file attachment attachment-new)
+              (find-file attachment-new))
+          (user-error "No attachment found")))
+       (?r
+        (if-let* ((registry-id (org-entry-get nil "REGISTRY")))
+            (user-error "Not implemented!") ;; TODO
+          (user-error "No registry entry")))
+            
+       ))))
     ;; (error (user-error "%s" (error-message-string err)))))
 
 (defun org-ilm-open-highlight ()
@@ -939,16 +959,23 @@ If `HEADLINE' is passed, read it as org-property."
    ("ra" "Attach"
     (lambda ()
       (interactive)
-      (let (registry-attach-dir attachment method)
-        (org-ilm--org-with-point-at
-            (org-ilm-element-registry org-ilm--element-transient-element)
-          (setq registry-attach-dir (org-attach-dir))
-          (setq attachment (expand-file-name
-                            (completing-read "Attachment: " (org-attach-file-list registry-attach-dir) nil t)
-                            registry-attach-dir)))
-        (setq method (intern (completing-read "Method: " '(cp mv ln lns) nil t)))
-        (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
-          (org-attach-attach attachment nil method)))))
+      (org-ilm--org-with-point-at
+          (org-ilm-element-registry org-ilm--element-transient-element)
+        (if-let* ((registry-attach-dir (org-attach-dir))
+                  (attachments (org-attach-file-list registry-attach-dir))
+                  (attachment (expand-file-name
+                               (completing-read "Attachment: " attachments nil t)
+                               registry-attach-dir))
+                  (method (intern (completing-read "Method: " '(cp mv ln lns) nil t))))
+            (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
+              (org-attach-attach attachment nil method))
+          (message "No attachments"))))
+    :inapt-if-not
+    (lambda ()
+      (org-ilm--org-with-point-at
+          (org-ilm-element-registry org-ilm--element-transient-element)
+        (org-attach-dir)))
+    :transient t)
    ]
   )
 
@@ -3261,6 +3288,7 @@ A lot of formatting code from org-ql."
       (switch-to-buffer buffer))))
 
 
+
 ;;;; Import
 
 (transient-define-infix org-ilm--import-transient-collection ()
@@ -3272,17 +3300,22 @@ A lot of formatting code from org-ql."
   (lambda (prompt initial-input history)
     (car (org-ilm--select-collection))))
 
+(transient-define-suffix org-ilm--import-transient-new ()
+  (interactive)
+  (mochar-utils--add-hook-once
+   'org-registry-register-hook
+   (lambda (entry-id)
+     (let ((org-ilm--import-registry-data (list :id entry-id)))
+       (org-ilm--import-registry-transient))))
+  (call-interactively #'org-registry-register-dwim))
+
 (transient-define-prefix org-ilm--import-transient ()
   :refresh-suffixes t
   ["Ilm import"
    ("c" "Collection" org-ilm--import-transient-collection)
-   ]
-  ["Type"
-   ("f" "File" org-ilm--import-file-transient
+   ("i" "Import new" org-ilm--import-transient-new
     :inapt-if-nil org-ilm--active-collection)
-   ("w" "Website" org-ilm--import-website-transient
-    :inapt-if-nil org-ilm--active-collection)
-   ("r" "Registry" org-ilm--import-registry-transient
+   ("r" "Registry import" org-ilm--import-registry-transient
     :inapt-if-nil org-ilm--active-collection)
    ]
   )
@@ -3361,190 +3394,27 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
    (car collection)
    (list :file file :method method :ext t)))
 
-;;;;; Website
-
-(defun org-ilm--import-website-transient-args (&optional args)
-  (when transient-current-command
-    (let ((args (or args (transient-args transient-current-command))))
-      (list :url (transient-arg-value "--url=" args)
-            :simplify (cond
-                       ((transient-arg-value "--simplify-to-html" args)
-                        "html")
-                       ((transient-arg-value "--simplify-to-markdown" args)
-                        "markdown"))
-            :title (transient-arg-value "--title=" args)
-            :download (transient-arg-value "--download" args)
-            :orgify (transient-arg-value "--orgify" args)
-            :collection org-ilm--active-collection))))
-
-(transient-define-infix org-ilm--import-website-transient-url ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :argument "--url="
-  :allow-empty nil
-  :always-read t
-  :prompt "URL: "
-  :reader
-  (lambda (prompt initial-input history)
-    (let ((url (read-string prompt initial-input history)))
-      (unless (string-empty-p url)
-        (let* ((args (org-ilm--import-website-transient-args))
-               (title (plist-get args :title))
-               (title-object (transient-suffix-object 'org-ilm--import-website-transient-title)))
-          (when (or (null title) (string-empty-p title))
-            (oset title-object value (mochar-utils--get-page-title url))
-            (transient-set)
-            )))
-      url)))
-
-(transient-define-infix org-ilm--import-website-transient-title ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :argument "--title="
-  :allow-empty nil
-  :always-read t
-  :prompt "Title (empty to auto-generate): "
-  :reader
-  (lambda (prompt initial-input history)
-    (let ((title (read-string prompt initial-input history)))
-      (if (string-empty-p title)
-          (mochar-utils--get-page-title
-           (plist-get (org-ilm--import-website-transient-args) :url))
-        title))))
-
-(transient-define-argument org-ilm--import-website-transient-simplify ()
-  :class 'transient-switches
-  :transient 'transient--do-call
-  :description "Simplify to HTML or Markdown"
-  :argument-format "--simplify-to-%s"
-  :argument-regexp "\\(--simplify-to-\\(html\\|markdown\\)\\)"
-  :choices '("html" "markdown"))
-
-(transient-define-prefix org-ilm--import-website-transient ()
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (let (url title)
-      (setq url (thing-at-point 'url))
-      (unless url
-        (when (eq major-mode 'eww-mode)
-          (setq url (eww-current-url))
-          (setq title (plist-get eww-data :title))))
-      (when (and (not title) url)
-        (setq title (mochar-utils--get-page-title url)))
-      (append
-       '("--simplify-to-markdown" "--orgify")
-       (when url
-         (list (concat "--url=" url)))
-       (when title
-         (list (concat "--title=" title))))))
-  
-  ["Website import"
-   [("u" "URL" org-ilm--import-website-transient-url)
-    ("t" "Title" org-ilm--import-website-transient-title)
-    ("d" "Download" "--download"
-     :summary "Download HTML file with Monolith"
-     :transient transient--do-call)]]
-  
-  ["Download options"
-    :hide
-    (lambda ()
-      (not (plist-get (org-ilm--import-website-transient-args) :download)))
-    [("s" "Simplify" org-ilm--import-website-transient-simplify)
-     ("o" "Org conversion" "--orgify"
-      :summary "Convert to Org mode with Pandoc"
-      :transient transient--do-call)]]
-   
-   [
-    [("RET" "Import"
-     (lambda ()
-       (interactive)
-       (let* ((args (org-ilm--import-website-transient-args
-                     (transient-args 'org-ilm--import-website-transient))))
-         (apply #'org-ilm-import-website
-                (assoc (plist-get args :collection) org-ilm-collections)
-                (plist-get args :url)
-                args)
-         ))
-     :inapt-if
-     (lambda ()
-       (let ((args (org-ilm--import-website-transient-args)))
-         (not
-          (and (plist-get args :url)
-               (plist-get args :title)
-               (plist-get args :collection))))))
-    ]])
-
-(cl-defun org-ilm-import-website (collection url &key title download simplify orgify &allow-other-keys)
-  "Import a website."
-  (cl-assert (or (null simplify) (member simplify '("html" "markdown"))))
-  
-  (let* ((org-id (org-id-new))
-         (output-dir (org-attach-dir-from-id org-id)))
-
-    (org-ilm--capture
-     'source
-     (car collection)
-     (list :id org-id :title title :props (list :ROAM_REFS url))
-     (lambda (attach-dir)
-       (let ((monolith-args
-              (list :input-path url
-                    :output-path (expand-file-name
-                                  (concat org-id ".html")
-                                  attach-dir))))
-         (cond
-          ((null download) nil)
-          (orgify
-           (apply
-            (if simplify
-                #'convtools--convert-to-org-with-monolith-defuddle-pandoc
-              #'convtools--convert-to-org-with-monolith-pandoc)
-            (list
-             :process-id org-id
-             :monolith-args monolith-args
-             :defuddle-args (list :output-format simplify)
-             :on-success
-             (lambda (&rest _)
-               (message "Finished import: %s" url)))))
-          (simplify
-           (apply
-            #'convtools--convert-with-monolith-defuddle
-            (list
-             :process-id org-id
-             :monolith-args monolith-args
-             :defuddle-args (list :output-format simplify)
-             :on-success
-             (lambda (&rest _)
-               (message "Finished import: %s" url)))))
-          (t ; Download, dont simplify or orgify
-             (apply
-              #'convtools--convert-with-monolith
-              :process-id org-id
-              monolith-args))))
-       ))))
-
-
 ;;;;; Registry
 
-(defun org-ilm--import-registry-transient-args (&optional args)
-  (when transient-current-command
-    (let ((args (or args (transient-args transient-current-command))))
-      (list :entry (transient-arg-value "--entry=" args)
-            :attachment (transient-arg-value "--attachment=" args)
-            :method (transient-arg-value "--method=" args)
-            :collection org-ilm--active-collection))))
+(defvar org-ilm--import-registry-data nil)
 
-(defun org-ilm--import-registry-transient-attachments (&optional entry-id)
+(defun org-ilm--import-registry-transient-args (&optional args)
+  (setq args (or args (transient-args 'org-ilm--import-registry-transient)))
+  (list :entry (org-mem-entry-by-id (transient-arg-value "--entry=" args))
+        :attachment (transient-arg-value "--attachment=" args)
+        :method (transient-arg-value "--method=" args)
+        :collection org-ilm--active-collection))
+
+(defun org-ilm--import-registry-transient-attachments (entry)
   "Returns the file paths either in the attachment directory or in the PATH property."
-  (unless entry-id
-    (setq entry-id (plist-get (org-ilm--import-registry-transient-args) :entry)))
-  (if-let* ((attach-dir (org-ilm--org-with-point-at entry-id (org-attach-dir)))
-              (files (org-attach-file-list attach-dir)))
+  (if-let* ((attach-dir (org-ilm--org-with-point-at
+                            (org-mem-entry-id entry)
+                          (org-attach-dir)))
+            (files (org-attach-file-list attach-dir)))
       (mapcar (lambda (f) (expand-file-name f attach-dir)) files)
 
     ;; No attachment directory. Check PATH property.
-    (when-let* ((entry (org-mem-entry-by-id entry-id))
-                (file (org-mem-entry-property "PATH" entry)))
+    (when-let* ((file (org-mem-entry-property "PATH" entry)))
       (list file))))
 
 (transient-define-infix org-ilm--import-registry-transient-entry ()
@@ -3557,12 +3427,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (lambda (prompt initial-input history)
     (when-let* ((entry (org-registry--select-entry))
                 (id (org-mem-entry-id entry)))
-      
-      (when-let ((attachments (org-ilm--import-registry-transient-attachments id))
-                 (attachment-object (transient-suffix-object 'org-ilm--import-registry-transient-attachment)))
-        (oset attachment-object value
-              (completing-read "Attachment: " attachments)))
-      
+      (when-let ((attachments (org-ilm--import-registry-transient-attachments entry)))
+        (mochar-utils--transiet-set-target-value
+         "a" (completing-read "Attachment: " attachments)))
       id)))
 
 (transient-define-infix org-ilm--import-registry-transient-attachment ()
@@ -3573,29 +3440,51 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   :always-read t
   :reader
   (lambda (prompt initial-input history)
-    (let* ((files (org-ilm--import-registry-transient-attachments)))
+    (let* ((entry (plist-get (org-ilm--import-registry-transient-args) :entry))
+           (files (org-ilm--import-registry-transient-attachments entry)))
       (completing-read "Attachment: " files))))
 
 (transient-define-prefix org-ilm--import-registry-transient ()
-  :value (lambda ()
-           '("--method=cp"))
   :refresh-suffixes t
+  :value
+  (lambda ()
+    (append
+     '("--method=cp")
+     (let* ((entry-id (plist-get org-ilm--import-registry-data :id))
+            (entry (or (org-mem-entry-by-id entry-id)
+                       (org-registry--select-entry))))
+       (list
+        (concat "--entry=" (org-mem-entry-id entry))
+        (when-let ((attachments (org-ilm--import-registry-transient-attachments entry)))
+          (concat "--attachment=" (completing-read "Attachment: " attachments)))
+         )
+       )))
 
   ["Registry import"
    ("e" "Entry" org-ilm--import-registry-transient-entry)
-   (:info (lambda ()
-            (let* ((args (org-ilm--import-registry-transient-args))
-                   (entry (org-mem-entry-by-id (plist-get args :entry)))
-                   (type (org-mem-entry-property "TYPE" entry))
-                   (title (org-mem-entry-title entry)))
-              (propertize
-               (format "%s (%s)" title type)
-               'face 'transient-inapt-suffix)))
-          :if (lambda ()
-                (plist-get (org-ilm--import-registry-transient-args) :entry)))]
+   (:info
+    (lambda ()
+      (when-let* ((args (org-ilm--import-registry-transient-args (transient-get-value)))
+                  (entry (plist-get args :entry))
+                  (type (org-mem-entry-property "TYPE" entry))
+                  (title (org-mem-entry-title entry)))
+        (propertize
+         (format "%s (%s)" title type)
+         'face 'transient-inapt-suffix)))
+    :if
+    (lambda ()
+      (when-let* ((args (transient-get-value))
+                  (args (org-ilm--import-registry-transient-args args)))
+        (plist-get args :entry)))
+    )
+   ]
 
   ["Attachment"
-   :hide (lambda () (not (org-ilm--import-registry-transient-attachments)))
+   :hide
+   (lambda ()
+     (let* ((args (org-ilm--import-registry-transient-args (transient-get-value)))
+            (entry (plist-get args :entry)))
+       (not (and entry (org-ilm--import-registry-transient-attachments entry)))))
    ("a" "Attachment" org-ilm--import-registry-transient-attachment)
    ("m" "Method of attachment" "--method="
     :allow-empty nil :transient transient--do-call
@@ -3610,25 +3499,22 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
          (org-ilm-import-registry collection entry attachment (when method (intern method)))))
      :inapt-if
      (lambda ()
-       (let ((args (org-ilm--import-registry-transient-args)))
+       (let ((args (org-ilm--import-registry-transient-args (transient-get-value))))
          (not 
           (and (plist-get args :entry)
                (plist-get args :collection))))))
     ]])
 
-(defun org-ilm-import-registry (collection entry-id &optional attachment method)
+(defun org-ilm-import-registry (collection entry &optional attachment method)
   "Import a registry entry."
   (cl-assert (or (null method) (member method '(mv cp ln lns))))
 
-  (let ((entry (org-mem-entry-by-id entry-id)))
-    (org-ilm--capture
-     'source
-     collection
-     (list :file attachment :method (or method 'cp) :ext (when attachment t)
-           :title (org-mem-entry-title entry)
-           :props (list ;;:ROAM_REFS (format "[[registry:%s]]" entry-id)
-                        :REGISTRY entry-id)
-           ))))
+  (org-ilm--capture
+   'source
+   collection
+   (list :file attachment :method (or method 'cp) :ext (when attachment t)
+         :title (org-mem-entry-title entry)
+         :props (list :REGISTRY (org-mem-entry-id entry)))))
 
 
 ;;;; Math and stats
