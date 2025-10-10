@@ -3300,22 +3300,28 @@ A lot of formatting code from org-ql."
   (lambda (prompt initial-input history)
     (car (org-ilm--select-collection))))
 
-(transient-define-suffix org-ilm--import-transient-new ()
+(transient-define-suffix org-ilm--import-transient-resource ()
   (interactive)
-  (mochar-utils--add-hook-once
-   'org-registry-register-hook
-   (lambda (entry-id)
-     (let ((org-ilm--import-registry-data (list :id entry-id)))
-       (org-ilm--import-registry-transient))))
-  (call-interactively #'org-registry-register-dwim))
+  (let ((hook (mochar-utils--add-hook-once
+               'org-registry-register-hook
+               (lambda (entry-id)
+                 (let ((org-ilm--import-registry-data (list :id entry-id)))
+                   (org-ilm--import-registry-transient))))))
+    (let ((org-registry-types (list (assoc "resource" org-registry-types))))
+      (call-interactively #'org-registry-register-dwim))
+    (mochar-utils--add-hook-once
+     'transient-post-exit-hook
+     (lambda () (remove-hook 'org-registry-register-hook hook)))))
 
 (transient-define-prefix org-ilm--import-transient ()
   :refresh-suffixes t
   ["Ilm import"
-   ("c" "Collection" org-ilm--import-transient-collection)
-   ("i" "Import new" org-ilm--import-transient-new
+   ("C" "Collection" org-ilm--import-transient-collection)
+   ("r" "Resource" org-ilm--import-transient-resource
     :inapt-if-nil org-ilm--active-collection)
-   ("r" "Registry import" org-ilm--import-registry-transient
+   ("f" "File" org-ilm--import-file-transient
+    :inapt-if-nil org-ilm--active-collection)
+   ("g" "Registry" org-ilm--import-registry-transient
     :inapt-if-nil org-ilm--active-collection)
    ]
   )

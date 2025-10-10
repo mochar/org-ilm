@@ -111,7 +111,7 @@ This helps share functionality of a type while being able to filter on a more gr
   :type '(alist :key-type string :value-type (repeat string))
   :group 'org-registry)
 
-(defcustom org-registry-add-link-in-title t
+(defcustom org-registry-add-link-in-title nil
   "Add a link to where the entry was registered in the title."
   :type 'string
   :group 'org-registry)
@@ -199,7 +199,10 @@ This helps share functionality of a type while being able to filter on a more gr
   "Add something to the registry."
   (interactive
    (list
-    (completing-read "Type: " org-registry-types nil t)))
+    (pcase (length org-registry-types)
+      (0 (user-error "No registry types"))
+      (1 (caar org-registry-types))
+      (_ (completing-read "Type: " org-registry-types nil t)))))
   (let ((type (assoc type-name org-registry-types)))
     (cond-let*
       ([create-func (plist-get (cdr type) :create)]
