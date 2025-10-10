@@ -390,12 +390,12 @@ If empty return nil, and if only one, return it."
   "Returns one of ('collection collection), ('attachment (org-id collection)),
 ('queue collection org-id), nil."
   (cond-let*
+    ([attachment (org-ilm--attachment-data)]
+     (cons 'attachment attachment))
     ([collection (org-ilm--collection-file (org-ilm--buffer-file-name))]
      (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
          (cons 'registry collection)
        (cons 'collection collection)))
-    ([attachment (org-ilm--attachment-data)]
-     (cons 'attachment attachment))
     ((bound-and-true-p org-ilm-queue)
      (let* ((el (org-ilm--vtable-get-object))
             (id (when el (org-ilm-element-id el))))
