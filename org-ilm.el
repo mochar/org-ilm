@@ -3411,17 +3411,24 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
         :method (transient-arg-value "--method=" args)
         :collection org-ilm--active-collection))
 
-(defun org-ilm--import-registry-transient-attachments (entry)
+(defun org-ilm--import-registry-attachments (entry)
   "Returns the file paths either in the attachment directory or in the PATH property."
   (if-let* ((attach-dir (org-ilm--org-with-point-at
                             (org-mem-entry-id entry)
                           (org-attach-dir)))
             (files (org-attach-file-list attach-dir)))
-      (mapcar (lambda (f) (expand-file-name f attach-dir)) files)
-
+      (cons attach-dir files)
     ;; No attachment directory. Check PATH property.
-    (when-let* ((file (org-mem-entry-property "PATH" entry)))
-      (list file))))
+    (org-mem-entry-property "PATH" entry)))
+
+(defun org-ilm--import-registry-read-attachment (entry)
+  (when-let* ((attachment-data (org-ilm--import-registry-attachments entry)))
+    (if (listp attachment-data)
+        (let* ((attach-dir (car attachment-data))
+               (attachments (cdr attachment-data))
+               (attachment (completing-read "Attachment: " attachments)))
+          (expand-file-name attachment attach-dir))
+      attachment-data)))
 
 (transient-define-infix org-ilm--import-registry-transient-entry ()
   :class 'transient-option
@@ -3433,9 +3440,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (lambda (prompt initial-input history)
     (when-let* ((entry (org-registry--select-entry))
                 (id (org-mem-entry-id entry)))
-      (when-let ((attachments (org-ilm--import-registry-transient-attachments entry)))
-        (mochar-utils--transiet-set-target-value
-         "a" (completing-read "Attachment: " attachments)))
+      (when-let ((attachment (org-ilm--import-registry-read-attachment entry)))
+        (mochar-utils--transiet-set-target-value "a" attachment))
       id)))
 
 (transient-define-infix org-ilm--import-registry-transient-attachment ()
@@ -3446,9 +3452,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   :always-read t
   :reader
   (lambda (prompt initial-input history)
-    (let* ((entry (plist-get (org-ilm--import-registry-transient-args) :entry))
-           (files (org-ilm--import-registry-transient-attachments entry)))
-      (completing-read "Attachment: " files))))
+    (let* ((entry (plist-get (org-ilm--import-registry-transient-args) :entry)))
+      (org-ilm--import-registry-read-attachment entry))))
 
 (transient-define-prefix org-ilm--import-registry-transient ()
   :refresh-suffixes t
@@ -3461,10 +3466,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                        (org-registry--select-entry))))
        (list
         (concat "--entry=" (org-mem-entry-id entry))
-        (when-let ((attachments (org-ilm--import-registry-transient-attachments entry)))
-          (concat "--attachment=" (completing-read "Attachment: " attachments)))
-         )
-       )))
+        (when-let ((attachment (org-ilm--import-registry-read-attachment entry)))
+          (concat "--attachment=" attachment))))))
 
   ["Registry import"
    ("e" "Entry" org-ilm--import-registry-transient-entry)
@@ -3490,7 +3493,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
    (lambda ()
      (let* ((args (org-ilm--import-registry-transient-args (transient-get-value)))
             (entry (plist-get args :entry)))
-       (not (and entry (org-ilm--import-registry-transient-attachments entry)))))
+       (not (and entry (org-ilm--import-registry-attachments entry)))))
    ("a" "Attachment" org-ilm--import-registry-transient-attachment)
    ("m" "Method of attachment" "--method="
     :allow-empty nil :transient transient--do-call
