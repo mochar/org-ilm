@@ -734,7 +734,7 @@ environment (multiline), paste it in headline body."
 
 ;;;;; Resource type
 
-;; Generic object that contains zero or more attachments. Think of:
+;; Generic object with citation that contains zero or more attachments. Think of:
 ;; - Website article / blog post
 ;; - Youtube video (media)
 ;; - Paper from arxiv link or doi (paper)
@@ -767,6 +767,7 @@ See `parsebib-read-entry'."
         :source-type (plist-get org-registry--type-resource-data :source-type)
         :type (transient-arg-value "--type=" args)
         :bibtex (plist-get org-registry--type-resource-data :bibtex)
+        :key (plist-get org-registry--type-resource-data :key)
 
         :paper-download (transient-arg-value "--paper-download" args)
 
@@ -789,9 +790,13 @@ See `parsebib-read-entry'."
         ))
 
 (defun org-registry--type-resource-process-source (&optional source bibtex)
-  (let ((source (or source (ffap-read-file-or-url "URL/path/DOI: " nil)))
-        (type "resource")
-        source-type title)
+  (unless source
+    ;; TODO Support for path to pdf -> recover bibtex data (zotero-like)
+    ;; (setq source (ffap-read-file-or-url "URL/path/DOI: " nil))
+    (setq source (read-string "URL or ID: ")))
+  
+  (let ((type "resource")
+        source-type title key)
     
     (cond
      ((or (null source) (string-empty-p source)))
@@ -808,7 +813,7 @@ See `parsebib-read-entry'."
 
      ;; Source is a file
      ((file-exists-p source)
-      (setq source-type 'url
+      (setq source-type 'file
             title (file-name-base source)))
      
      (t
@@ -826,14 +831,16 @@ See `parsebib-read-entry'."
                                       :inheritance t
                                       :replace-TeX t)))
                       (key (car (hash-table-keys bibtexes))))
-            (setq bibtex (gethash key bibtexes)
-                  title (or (alist-get "title" bibtex nil nil #'equal) title))))))
+            (setq bibtex (gethash key bibtexes))))))
+    (when bibtex
+      (setq title (or (cdr (assoc "title" bibtex)) title)
+            key (cdr (assoc "=key=" bibtex))))
 
     (when (and (null title) (eq source-type 'url))
       (setq title (mochar-get-page-title source)))
 
     (list :source source :source-type source-type :title title
-          :bibtex bibtex :type type)))
+          :bibtex bibtex :key key :type type)))
 
 (transient-define-infix org-registry--type-resource-transient-source ()
   :class 'transient-option
@@ -841,6 +848,7 @@ See `parsebib-read-entry'."
   :key "s"
   :description "Source"
   :argument "--source="
+  :always-read t
   :allow-empty nil
   :prompt "URL/path/DOI: "
   :reader
@@ -848,6 +856,7 @@ See `parsebib-read-entry'."
     (let ((source-data (org-registry--type-resource-process-source)))
       (setq org-registry--type-resource-data source-data)
       (mochar-utils--transiet-set-target-value "t" (plist-get source-data :type))
+      (mochar-utils--transiet-set-target-value "k" (plist-get source-data :key))
       (plist-get source-data :source))))
 
 (transient-define-infix org-registry--type-resource-transient-subs ()
@@ -877,6 +886,35 @@ See `parsebib-read-entry'."
   :argument-regexp "\\(--html-simplify-to-\\(html\\|markdown\\)\\)"
   :choices '("html" "markdown"))
 
+(transient-define-infix org-registry--type-resource-transient-key ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :key "k"
+  :description
+  (lambda ()
+    (concat
+     "Key"
+     (when-let* ((key (plist-get org-registry--type-resource-data :key))
+                 (entry (org-mem-entry-by-roam-ref (concat "@" key))))
+       (propertize " DUPLICATE" 'face 'error))))
+  :argument "--key="
+  :always-read t
+  :allow-empty nil
+  :inapt-if
+  (lambda () (null (plist-get org-registry--type-resource-data :bibtex)))
+  :reader
+  (lambda (prompt initial-input history)
+    (let ((key (read-string "Key (empty to auto-generate): ")))
+      (when (string-empty-p key)
+        (with-temp-buffer
+          (insert (mochar-utils--format-bibtex-entry
+                   (plist-get org-registry--type-resource-data :bibtex)
+                   (plist-get org-registry--type-resource-data :key)))
+          (goto-char (point-min))
+          (setq key (ignore-errors (bibtex-generate-autokey)))
+          (when (string-empty-p key) (setq key nil))))
+      (setf (plist-get org-registry--type-resource-data :key) key))))
+
 (transient-define-prefix org-registry--type-resource-transient ()
   :refresh-suffixes t
   :value
@@ -889,6 +927,7 @@ See `parsebib-read-entry'."
                (org-registry--type-resource-process-source))
          (setq source (plist-get org-registry--type-resource-data :source)))
        (list (concat "--source=" source)
+             (concat "--key=" (plist-get org-registry--type-resource-data :key))
              (concat "--type=" (plist-get org-registry--type-resource-data :type))))))
 
   ["Resource"
@@ -898,6 +937,7 @@ See `parsebib-read-entry'."
       (let ((title (plist-get org-registry--type-resource-data :title)))
           (propertize title 'face 'italic)))
     :if (lambda () (plist-get org-registry--type-resource-data :title)))
+   (org-registry--type-resource-transient-key)
    ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource"))
    ("H" "HTML download" "--html-download" :transient transient--do-call
     :if (lambda ()
@@ -942,7 +982,7 @@ See `parsebib-read-entry'."
     (lambda ()
       (interactive)
       (cl-destructuring-bind
-          (&key source source-type type bibtex title
+          (&key source source-type type bibtex key title
                 paper-download
                 html-download html-simplify html-orgify
                 media-download media-template media-audio-only media-sub-langs)
@@ -950,14 +990,12 @@ See `parsebib-read-entry'."
 
         (when (and (null title) bibtex)
           (setq title
-                (or
-                 (alist-get "title" bibtex nil nil #'equal)
-                 (alist-get "=key=" bibtex nil nil #'equal)
-                 (alist-get "url" bibtex nil nil #'equal)
-                 source)))
+                (or (cdr (assoc "title" bibtex))
+                    key
+                    (cdr (assoc "url" bibtex))
+                    source)))
 
         (let* ((id (org-id-new))
-               (key (alist-get "=key=" bibtex nil nil #'equal))
                (registry (org-registry--registry-select))
                ;; Determine attach dir from within registry in case the dir is set
                ;; buffer or dir local
@@ -972,8 +1010,7 @@ See `parsebib-read-entry'."
             :type type
             :props
             (append
-             (when key
-               (list :KEY key))
+             (when key (list :KEY key))
              (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
              (list :ROAM_REFS (if key (concat source " @" key) source)))
             :on-success
@@ -1042,7 +1079,6 @@ See `parsebib-read-entry'."
                      (message "[Registry] Media download completed: %s" source)
                      (mochar-utils--org-with-point-at id
                        (org-attach-sync)))))
-                
                 ))
             ))))))
    ]
@@ -1056,9 +1092,7 @@ See `parsebib-read-entry'."
                 org-registry--type-resource-fields
                 (make-hash-table :test #'equal)
                 t))]
-     (let ((url (or
-                 (alist-get "url" bibtex nil nil #'equal)
-                 (alist-get "doi" bibtex nil nil #'equal))))
+     (let ((url (or (cdr (assoc "url" bibtex)) (cdr (assoc "doi" bibtex)))))
        (list :source url :bibtex bibtex)))
     ([url (thing-at-point 'url)]
      (list :source url))))

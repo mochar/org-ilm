@@ -167,6 +167,33 @@ Uses various utilities from `url.el'."
       (oset target-obj value new-value))))
 
 
+;;;; Bibtex
+
+(defun mochar-utils--format-bibtex-entry (entry &optional key)
+  "Format a parsebib ENTRY alist or hash entry as a BibTeX string.
+ENTRY may be an alist or association list with keys like \"=type=\", \"=key=\" and field names.
+KEY may be the key to use instead of =key=."
+  (let* ((key (or key (cdr (assoc "=key=" entry))))
+         (type (cdr (assoc "=type=" entry)))
+         (fields (cl-remove-if
+                  (lambda (f) (string-prefix-p "=" (car f)))
+                  entry))
+         (pad 2))
+    (concat "@"
+            (or type "misc")
+            "{"
+            (or key "")
+            ",\n"
+            (mapconcat
+             (lambda (pair)
+               (format "%s%s = {%s}" 
+                       (make-string pad ?\s)
+                       (car pair) 
+                       (cdr pair)))
+             fields
+             ",\n")
+            "\n}\n")))
+
 ;;;; Footer
 
 (provide 'mochar-utils)
