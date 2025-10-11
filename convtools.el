@@ -737,6 +737,175 @@ SUB-LANGS may also be 'all' to download all subtitles."
       (goto-char (point-min)))
     (switch-to-buffer buf)))
 
+;;;; Org headings
+
+;; Convert using metadata in Org heading properties and attachments.
+
+(defvar convtools--org-data nil)
+
+(defun convtools-org-convert ()
+  (interactive)
+  (let* ((attach-dir (org-attach-dir))
+         (attachments (org-attach-file-list attach-dir))
+         (entry (org-node-at-point))
+         (refs (mapcar
+                (lambda (ref)
+                  (if-let ((type (gethash ref org-mem--roam-ref<>type)))
+                      (concat type ":" ref)
+                    ref))
+                (org-mem-entry-roam-refs entry))))
+    (when-let ((url (org-entry-get nil "URL")))
+      (cl-pushnew url refs :test #'equal))
+    (setq refs (seq-filter #'org-url-p refs))
+    
+    (let* ((choice (consult--multi
+                    (list
+                     (list
+                      :name "Refs"
+                      :narrow ?r
+                      :items refs
+                      :action #'message)
+                     (list
+                      :name "Attachments"
+                      :narrow ?a
+                      :items attachments
+                      :action #'message))))
+           (source (car choice))
+           (type (if (string= (plist-get (cdr choice) :name) "Attachments")
+                   'attachment 'url)))
+      (setq convtools--org-data
+            (list :title (org-mem-entry-title entry) :source source :type type))
+      (mochar-utils--add-hook-once
+       'transient-post-exit-hook
+       (lambda () (setq convtools--org-data nil)))
+      (convtools--org-transient))))
+
+(transient-define-prefix convtools--org-transient ()
+  :refresh-suffixes t
+
+  ["Convtool"
+   (:info*
+    (lambda ()
+      (propertize (plist-get convtools--org-data :title) 'face 'italic))
+    :if (lambda () (plist-get convtools--org-data :title)))]
+
+  ["HTML"
+   :if
+   (lambda ()
+     (or (eq (plist-get convtools--org-data :type) 'url)
+         (string= (file-name-extension (plist-get convtools--org-data :source)) "html")))
+   :setup-children
+   (lambda (_)
+     (let* ((url-p (eq (plist-get convtools--org-data :type) 'url))
+            (inapt-if
+             (lambda ()
+               (and url-p
+                    (null (transient-arg-value "--html-download" (transient-get-value)))))))
+       (mapcar
+        (lambda (suffix)
+          (transient-parse-suffix 'transient--prefix suffix))
+        (append
+         (when url-p
+           (list convtools--transient-html-download-suffix))
+         (mapcar
+          (lambda (suffix)
+            (append suffix (list :inapt-if inapt-if)))
+          (list convtools--transient-html-simplify-suffix
+                convtools--transient-html-orgify-suffix))))))
+   ]
+
+  ["Actions"
+   ("RET" "Convert"
+    (lambda ()
+      (interactive)
+      (when-let* ((args (transient-args 'convtools--org-transient))
+                  (source (plist-get convtools--org-data :source))
+                  (type (plist-get convtools--org-data :type))
+                  (org-id (org-id-get))
+                  (title (if (eq type 'url)
+                             (if-let ((title (mochar-utils--get-page-title source)))
+                                 (mochar-utils--slugify-title title)
+                               org-id)
+                           (file-name-base source)))
+                  (attach-dir (org-attach-dir-get-create)))
+        (convtools--transient-html-run source title attach-dir org-id args)))
+    :inapt-if
+    (lambda ()
+      (and (eq (plist-get convtools--org-data :type) 'url)
+           (not (transient-arg-value "--html-download" (transient-get-value))))))
+   ]
+  )
+
+;;;;; HTML
+
+(defvar convtools--transient-html-download-suffix
+  '("hd" "Download" "--html-download" :transient transient--do-call))
+
+(defvar convtools--transient-html-simplify-suffix
+  '("hs" "Simplify" "--html-simplify="
+     :class transient-switches
+     :transient transient--do-call
+     :argument-format "--html-simplify-to-%s"
+     :argument-regexp "\\(--html-simplify-to-\\(markdown\\|html\\)\\)"
+     :choices ("markdown" "html")))
+
+(defvar convtools--transient-html-orgify-suffix
+  '("ho" "Orgify" "--html-orgify"
+    :summary "Convert to Org mode with Pandoc"
+    :transient transient--do-call))
+
+(defun convtools--transient-html-run (source title output-dir id transient-args)
+  (let* ((download (transient-arg-value "--html-download" transient-args))
+         (simplify (cond
+                    ((transient-arg-value "--html-simplify-to-html" transient-args)
+                     "html")
+                    ((transient-arg-value "--html-simplify-to-markdown" transient-args)
+                     "markdown")))
+         (orgify (transient-arg-value "--html-orgify" transient-args))
+         (html-path (expand-file-name (concat title ".html") output-dir))
+         (on-success
+          (lambda (proc buf id)
+            (message "[Convtools] HTML conversion completed: %s" source)
+            (mochar-utils--org-with-point-at id
+              (org-attach-sync))))
+         converters)
+
+    (when download
+      (push
+       (cons #'convtools--convert-with-monolith
+             (list :input-path source :output-path html-path))
+       converters))
+
+    (when simplify
+      (push
+       (cons #'convtools--convert-with-defuddle
+             (list :input-path html-path :output-format simplify))
+       converters))
+
+    (when orgify
+      (push
+       (cons #'convtools--convert-with-pandoc
+             (list :input-path
+                   (if simplify
+                       (concat
+                        (file-name-sans-extension html-path)
+                        "."
+                        (if (string= simplify "markdown") "md" "html"))
+                     html-path)
+                   :input-format
+                   (or simplify "html")))
+       converters))
+
+    (setq converters (reverse converters))
+    
+    (convtools--convert-multi
+     :process-name "html"
+     :process-id id
+     :converters converters
+     :on-error nil
+     :on-final-success on-success)))
+        
+
 ;;;; Footer
 
 (provide 'convtools)
