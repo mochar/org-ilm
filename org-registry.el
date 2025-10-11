@@ -748,19 +748,6 @@ See `parsebib-read-entry'."
 
 (defvar org-registry--type-resource-data nil)
 
-(defun org-registry--type-resource-url-is-media-p (url)
-  ;; Determine if media type by attempting to extract filename from url
-  ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
-  ;; not media type.
-  ;; NOTE Quite slow (~3 sec)
-  ;; (condition-case err
-  ;;     (or (convtools--ytdlp-filename-from-url url) t)
-  ;;   (error nil))
-
-  ;; Instead just check if its a youtube link for now
-  (member (url-domain (url-generic-parse-url url))
-          '("youtube.com" "youtu.be")))
-
 (defun org-registry--type-resource-transient-args (&optional args)
   (setq args (or args (transient-args 'org-registry--type-resource-transient)))
   (list :source (transient-arg-value "--source=" args)
@@ -807,7 +794,7 @@ See `parsebib-read-entry'."
 
       ;; Figure out what type 
       (cond
-       ((org-registry--type-resource-url-is-media-p source)
+       ((convtools--transient-media-url-is-media-p source)
         (setq type "media"))
        (t (setq type "website"))))
 
@@ -858,33 +845,6 @@ See `parsebib-read-entry'."
       (mochar-utils--transiet-set-target-value "t" (plist-get source-data :type))
       (mochar-utils--transiet-set-target-value "k" (plist-get source-data :key))
       (plist-get source-data :source))))
-
-(transient-define-infix org-registry--type-resource-transient-subs ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :key "ms"
-  :description "Subtitles download"
-  :argument "--media-subs="
-  :multi-value 'rest
-  :choices 
-  (lambda ()
-    (let* ((args (org-registry--type-resource-transient-args))
-           (url (plist-get args :source))
-           (subs (plist-get org-registry--type-resource-data :media-subs)))
-      (unless subs
-        (let ((subs-data (convtools--ytdlp-subtitles-from-url url)))
-          (setf (plist-get org-registry--type-resource-data :media-subs) subs-data
-                subs subs-data)))
-      (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
-
-(transient-define-argument org-registry--type-resource-transient-simplify ()
-  :class 'transient-switches
-  :transient 'transient--do-call
-  :key "hs"
-  :description "Simplify"
-  :argument-format "--html-simplify-to-%s"
-  :argument-regexp "\\(--html-simplify-to-\\(html\\|markdown\\)\\)"
-  :choices '("html" "markdown"))
 
 (transient-define-infix org-registry--type-resource-transient-key ()
   :class 'transient-option
@@ -940,11 +900,6 @@ See `parsebib-read-entry'."
    (org-registry--type-resource-transient-key)
    ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
       :always-read t :allow-empty nil)
-   ("M" "Media download" "--media-download" :transient transient--do-call
-    :if (lambda ()
-          (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
-            (and (string= "media" (plist-get args :type))
-                 (eq (plist-get args :source-type) 'url)))))
    ("P" "Paper PDF download" "--paper-download" :transient transient--do-call
     :if (lambda ()
           (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
@@ -961,15 +916,15 @@ See `parsebib-read-entry'."
    (lambda (_)
      (convtools--transient-html-build t t))]
 
-  ["Media download (yt-dlp)"
+  ["Media download"
    :if
    (lambda ()
      (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
        (and (string= (plist-get args :type) "media")
-            (plist-get args :media-download))))
-   ("mt" "Template" "--media-template=" :prompt "Template: " :transient transient--do-call)
-   ("ma" "Audio only" "--media-audio" :transient transient--do-call)
-   ("ms" org-registry--type-resource-transient-subs)
+            (eq (plist-get args :source-type) 'url))))
+   :setup-children
+   (lambda (_)
+     (convtools--transient-media-build))
    ]
 
   ["Actions"
@@ -1027,19 +982,9 @@ See `parsebib-read-entry'."
                   (convtools--transient-html-run
                    source title attach-dir id transient-args))
 
-                (when media-download
-                  (convtools--convert-with-ytdlp
-                   :process-id id
-                   :url source
-                   :output-dir attach-dir
-                   :filename-template media-template
-                   :audio-only-p media-audio-only
-                   :sub-langs media-sub-langs
-                   :on-success
-                   (lambda (proc buf id)
-                     (message "[Registry] Media download completed: %s" source)
-                     (mochar-utils--org-with-point-at id
-                       (org-attach-sync)))))
+                (when (or media-download media-sub-langs)
+                  (convtools--transient-media-run
+                   source attach-dir id transient-args))
                 ))
             ))))))
    ]

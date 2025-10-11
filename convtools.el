@@ -574,7 +574,7 @@ Parse the OUTPUT string from:
       (setcdr r (nreverse (cdr r))))
     (nreverse result)))
 
-(cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs audio-only-p working-dir on-success &allow-other-keys)
+(cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs audio-only-p no-download working-dir on-success &allow-other-keys)
   "yt-dlp
 
 SUB-LANGS may also be 'all' to download all subtitles."
@@ -616,6 +616,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
          (t (list "--no-download")))
         (when audio-only-p
           (list "-x"))
+        (when no-download
+          (list "--no-download"))
         (when sub-langs
           (append '("--write-sub" "--sub-lang") (list (string-join sub-langs ","))))
        ))))))
@@ -769,7 +771,9 @@ SUB-LANGS may also be 'all' to download all subtitles."
                       :name "Attachments"
                       :narrow ?a
                       :items attachments
-                      :action #'message))))
+                      :action #'message))
+                    :require-match t
+                    :prompt "Convert: " ))
            (source (car choice))
            (type (if (string= (plist-get (cdr choice) :name) "Attachments")
                    'attachment 'url)))
@@ -782,12 +786,22 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
 (transient-define-prefix convtools--org-transient ()
   :refresh-suffixes t
+  :value
+  (lambda ()
+    (list (concat "--source=" (plist-get convtools--org-data :source))))
 
   ["Convtool"
    (:info*
     (lambda ()
       (propertize (plist-get convtools--org-data :title) 'face 'italic))
-    :if (lambda () (plist-get convtools--org-data :title)))]
+    :if (lambda () (plist-get convtools--org-data :title)))
+   (:info*
+    (lambda ()
+      (propertize (plist-get convtools--org-data :source) 'face 'transient-value))
+    :if (lambda () (plist-get convtools--org-data :source)))
+   ]
+
+  [:hide (lambda () t) ("s" "Source" "--source=")]
 
   ["HTML"
    :if
@@ -800,6 +814,17 @@ SUB-LANGS may also be 'all' to download all subtitles."
       (eq (plist-get convtools--org-data :type) 'url)))
    ]
 
+  ["Media"
+   :if
+   (lambda ()
+     (and (eq (plist-get convtools--org-data :type) 'url)
+          (convtools--transient-media-url-is-media-p
+           (plist-get convtools--org-data :source))))
+   :setup-children
+   (lambda (_)
+     (convtools--transient-media-build))
+   ]
+
   ["Actions"
    ("RET" "Convert"
     (lambda ()
@@ -808,17 +833,27 @@ SUB-LANGS may also be 'all' to download all subtitles."
                   (source (plist-get convtools--org-data :source))
                   (type (plist-get convtools--org-data :type))
                   (org-id (org-id-get))
-                  (title (if (eq type 'url)
-                             (if-let ((title (mochar-utils--get-page-title source)))
-                                 (mochar-utils--slugify-title title)
-                               org-id)
-                           (file-name-base source)))
                   (attach-dir (org-attach-dir-get-create)))
-        (convtools--transient-html-run source title attach-dir org-id args)))
+
+        ;; HTML 
+        (when-let ((_ (transient-arg-value "--html-download" (transient-get-value)))
+                   (title (if (eq type 'url)
+                              (if-let ((title (mochar-utils--get-page-title source)))
+                                  (mochar-utils--slugify-title title)
+                                org-id)
+                            (file-name-base source))))
+          (convtools--transient-html-run source title attach-dir org-id args))
+
+        ;; Media
+        (when (or (transient-arg-value "--media-download" args)
+                  (cdr (assoc "--media-subs=" args)))
+          (convtools--transient-media-run source attach-dir org-id args))))
     :inapt-if
     (lambda ()
       (and (eq (plist-get convtools--org-data :type) 'url)
-           (not (transient-arg-value "--html-download" (transient-get-value))))))
+           (not (transient-arg-value "--html-download" (transient-get-value)))
+           (not (transient-arg-value "--media-download" (transient-get-value)))
+           (not (cdr (assoc "--media-subs=" (transient-get-value)))))))
    ]
   )
 
@@ -909,6 +944,77 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :on-final-success on-success)))
 
 ;;;;; Media
+
+(defun convtools--transient-media-url-is-media-p (url)
+  ;; Determine if media type by attempting to extract filename from url
+  ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
+  ;; not media type.
+  ;; NOTE Quite slow (~3 sec)
+  ;; (condition-case err
+  ;;     (or (convtools--ytdlp-filename-from-url url) t)
+  ;;   (error nil))
+
+  ;; Instead just check if its a youtube link for now
+  (member (url-domain (url-generic-parse-url url))
+          '("youtube.com" "youtu.be")))
+
+(defvar convtools--transient-media-download-suffix
+  '("md" "Download" "--media-download" :transient transient--do-call))
+
+(defvar convtools--transient-media-template-suffix
+  '("mt" "Template" "--media-template="
+    :prompt "Template: " :transient transient--do-call))
+
+(defvar convtools--transient-media-audio-suffix
+  '("ma" "Audio only" "--media-audio" :transient transient--do-call))
+
+(defvar convtools--transient-media-subs-suffix
+  '("ms" "Subtitles download" "--media-subs="
+    :class transient-option
+    :transient transient--do-call
+    :multi-value rest
+    :choices
+    (lambda ()
+      (let* ((url (transient-arg-value "--source=" (transient-args transient-current-command)))
+             (subs (convtools--ytdlp-subtitles-from-url url)))
+        (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs))))))
+
+(defun convtools--transient-media-build ()
+  (let ((inapt-if
+         (lambda ()
+           (null (transient-arg-value "--media-download" (transient-get-value))))))
+  (mapcar
+   (lambda (suffix)
+     (transient-parse-suffix 'transient--prefix suffix))
+   (list
+    convtools--transient-media-download-suffix
+    (append
+     convtools--transient-media-template-suffix
+     (list :inapt-if inapt-if))
+    (append
+     convtools--transient-media-audio-suffix
+     (list :inapt-if inapt-if))
+    convtools--transient-media-subs-suffix))))
+
+(defun convtools--transient-media-run (url output-dir id transient-args)
+  (let* ((download (transient-arg-value "--media-download" transient-args))
+         (template (transient-arg-value "--media-template=" transient-args))
+         (audio-only (transient-arg-value "--media-audio" transient-args))
+         (sub-langs (cdr (assoc "--media-subs=" transient-args))))
+
+    (convtools--convert-with-ytdlp
+     :process-id id
+     :url url
+     :output-dir output-dir
+     :filename-template template
+     :audio-only-p audio-only
+     :sub-langs sub-langs
+     :no-download (not download)
+     :on-success
+     (lambda (proc buf id)
+       (message "[Convtools] Media conversion completed: %s" url)
+       (mochar-utils--org-with-point-at id
+         (org-attach-sync))))))
 
         
 
