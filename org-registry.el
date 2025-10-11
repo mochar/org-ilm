@@ -938,11 +938,8 @@ See `parsebib-read-entry'."
           (propertize title 'face 'italic)))
     :if (lambda () (plist-get org-registry--type-resource-data :title)))
    (org-registry--type-resource-transient-key)
-   ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource"))
-   ("H" "HTML download" "--html-download" :transient transient--do-call
-    :if (lambda ()
-          (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
-            (eq (plist-get args :source-type) 'url))))
+   ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
+      :always-read t :allow-empty nil)
    ("M" "Media download" "--media-download" :transient transient--do-call
     :if (lambda ()
           (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
@@ -955,16 +952,14 @@ See `parsebib-read-entry'."
                  (member (plist-get args :source-type) '(url id))))))
    ]
 
-  ["HTML download (marker)"
+  ["HTML download"
    :hide
    (lambda ()
      (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
-       (not (and (member (plist-get args :source-type) '(url))
-                 (plist-get args :html-download)))))
-    [("hs" org-registry--type-resource-transient-simplify)
-     ("ho" "Org conversion" "--html-orgify"
-      :summary "Convert to Org mode with Pandoc"
-      :transient transient--do-call)]]
+       (not (member (plist-get args :source-type) '(url)))))
+   :setup-children
+   (lambda (_)
+     (convtools--transient-html-build t t))]
 
   ["Media download (yt-dlp)"
    :if
@@ -995,7 +990,8 @@ See `parsebib-read-entry'."
                     (cdr (assoc "url" bibtex))
                     source)))
 
-        (let* ((id (org-id-new))
+        (let* ((transient-args (transient-args 'org-registry--type-resource-transient))
+               (id (org-id-new))
                (registry (org-registry--registry-select))
                ;; Determine attach dir from within registry in case the dir is set
                ;; buffer or dir local
@@ -1026,45 +1022,10 @@ See `parsebib-read-entry'."
                                        attach-dir))
                     (mochar-utils--org-with-point-at id
                       (org-attach-sync))))
-                
-                (when html-download
-                  (let ((monolith-args
-                         (list :input-path source
-                               :output-path
-                               (expand-file-name
-                                (concat (mochar-utils--slugify-title title) ".html")
-                                attach-dir)))
-                        (on-success
-                         (lambda (proc buf id)
-                           (message "[Registry] Website download completed: %s" source)
-                           (mochar-utils--org-with-point-at id
-                             (org-attach-sync)))))
 
-                    (cond
-                     (html-orgify
-                      (apply
-                       (if html-simplify
-                           #'convtools--convert-to-org-with-monolith-defuddle-pandoc
-                         #'convtools--convert-to-org-with-monolith-pandoc)
-                       (list
-                        :process-id id
-                        :monolith-args monolith-args
-                        :defuddle-args (list :output-format html-simplify)
-                        :on-success on-success)))
-                     (html-simplify
-                      (apply
-                       #'convtools--convert-with-monolith-defuddle
-                       (list
-                        :process-id id
-                        :monolith-args monolith-args
-                        :defuddle-args (list :output-format html-simplify)
-                        :on-success on-success)))
-                     (t ; Download, dont simplify or orgify
-                      (apply
-                       #'convtools--convert-with-monolith
-                       :process-id org-id
-                       :on-success on-success
-                       monolith-args)))))
+                (when html-download
+                  (convtools--transient-html-run
+                   source title attach-dir id transient-args))
 
                 (when media-download
                   (convtools--convert-with-ytdlp

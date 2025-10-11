@@ -746,7 +746,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
 (defun convtools-org-convert ()
   (interactive)
   (let* ((attach-dir (org-attach-dir))
-         (attachments (org-attach-file-list attach-dir))
+         (attachments (when attach-dir (org-attach-file-list attach-dir)))
          (entry (org-node-at-point))
          (refs (mapcar
                 (lambda (ref)
@@ -796,22 +796,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
          (string= (file-name-extension (plist-get convtools--org-data :source)) "html")))
    :setup-children
    (lambda (_)
-     (let* ((url-p (eq (plist-get convtools--org-data :type) 'url))
-            (inapt-if
-             (lambda ()
-               (and url-p
-                    (null (transient-arg-value "--html-download" (transient-get-value)))))))
-       (mapcar
-        (lambda (suffix)
-          (transient-parse-suffix 'transient--prefix suffix))
-        (append
-         (when url-p
-           (list convtools--transient-html-download-suffix))
-         (mapcar
-          (lambda (suffix)
-            (append suffix (list :inapt-if inapt-if)))
-          (list convtools--transient-html-simplify-suffix
-                convtools--transient-html-orgify-suffix))))))
+     (convtools--transient-html-build
+      (eq (plist-get convtools--org-data :type) 'url)))
    ]
 
   ["Actions"
@@ -853,6 +839,23 @@ SUB-LANGS may also be 'all' to download all subtitles."
   '("ho" "Orgify" "--html-orgify"
     :summary "Convert to Org mode with Pandoc"
     :transient transient--do-call))
+
+(defun convtools--transient-html-build (&optional with-download hide-invalid-p)
+  (let ((condition
+         (lambda ()
+           (and with-download
+                (null (transient-arg-value "--html-download" (transient-get-value)))))))
+    (mapcar
+     (lambda (suffix)
+       (transient-parse-suffix 'transient--prefix suffix))
+     (append
+      (when with-download
+        (list convtools--transient-html-download-suffix))
+      (mapcar
+       (lambda (suffix)
+         (append suffix (list (if hide-invalid-p :if-not :inapt-if) condition)))
+       (list convtools--transient-html-simplify-suffix
+             convtools--transient-html-orgify-suffix))))))
 
 (defun convtools--transient-html-run (source title output-dir id transient-args)
   (let* ((download (transient-arg-value "--html-download" transient-args))
@@ -904,6 +907,9 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :converters converters
      :on-error nil
      :on-final-success on-success)))
+
+;;;;; Media
+
         
 
 ;;;; Footer
