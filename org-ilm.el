@@ -82,6 +82,11 @@
   :type '(repeat string)
   :group 'org-ilm)
 
+(defcustom org-ilm-reset-org-mem-after-capture t
+  "Force org-mem to rescan after an extract or creating a card."
+  :type 'boolean
+  :group 'org-ilm)
+
 (defcustom org-ilm-debug nil
   "Print stuff to message buffer."
   :type 'boolean
@@ -262,7 +267,7 @@
   (if (eq 'attachment (car (org-ilm--where-am-i)))
     (cond
      ((eq major-mode 'org-mode)
-      (org-ilm-org-extract))
+      (call-interactively #'org-ilm-org-extract))
      ((or (eq major-mode 'pdf-view-mode)
           (eq major-mode 'pdf-virtual-view-mode))
       (call-interactively #'org-ilm-pdf-extract)))
@@ -996,7 +1001,7 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
-(defun org-ilm--capture (type target data &optional on-success on-abort)
+(defun org-ilm--capture (type target data &optional on-success on-abort &rest capture-args)
   "Make an org capture to make a new source heading, extract, or card.
 
 TYPE should be one of 'extract 'card, or 'source.
@@ -1061,7 +1066,9 @@ The callback ON-ABORT is called when capture is cancelled."
               ;; node so I need to rerun the scan. Org-mem is fast, but this is
               ;; still very wasteful.
               ;; TODO Figure out how to prevent doing a full rescan
-              (org-mem-reset)
+              (when org-ilm-reset-org-mem-after-capture
+                (org-mem-reset)
+                (org-mem-await nil 5))
               (when on-success
                 (funcall on-success attach-dir))))))
 
@@ -1117,75 +1124,78 @@ The callback ON-ABORT is called when capture is cancelled."
 
     (cl-letf (((symbol-value 'org-capture-templates)
                (list
-                (list
-                 "i" "Import" 'entry target template
-                 :hook
-                 (lambda ()
-                   ;; Set attach dir which will be passed to on-success
-                   ;; callback. Has to be done in the hook so that point is on
-                   ;; the headline, and respects file-local or .dir-locals
-                   ;; `org-attach-id-dir'.
-                   (setq attach-dir
-                         ;; If extract/card need to use inherited attach dir. If
-                         ;; new source, make new one from id.
-                         (if-let ((d (org-attach-dir)))
-                             (expand-file-name d)
-                           (org-attach-dir-from-id id)))
-                   
-                   ;; Regardless of type, every headline will have an id.
-                   (org-entry-put nil "ID" id)
-                   ;; Also trigger org-mem to update cache
-                   (org-node-nodeify-entry)
+                (append
+                 (list
+                  "i" "Import" 'entry target template
+                  :hook
+                  (lambda ()
+                    ;; Set attach dir which will be passed to on-success
+                    ;; callback. Has to be done in the hook so that point is on
+                    ;; the headline, and respects file-local or .dir-locals
+                    ;; `org-attach-id-dir'.
+                    (setq attach-dir
+                          ;; If extract/card need to use inherited attach dir. If
+                          ;; new source, make new one from id.
+                          (if-let ((d (org-attach-dir)))
+                              (expand-file-name d)
+                            (org-attach-dir-from-id id)))
+                    
+                    ;; Regardless of type, every headline will have an id.
+                    (org-entry-put nil "ID" id)
+                    ;; Also trigger org-mem to update cache
+                    (org-node-nodeify-entry)
 
-                   ;; Attachment extension if specified
-                   (when ext
-                     (org-entry-put nil "ILM_EXT" ext))
+                    ;; Attachment extension if specified
+                    (when ext
+                      (org-entry-put nil "ILM_EXT" ext))
 
-                   ;; Additional properties
-                   (when props
-                     (cl-loop for (p v) on props by #'cddr
-                              do (org-entry-put nil (if (stringp p) p (substring (symbol-name p) 1)) v)))
+                    ;; Additional properties
+                    (when props
+                      (cl-loop for (p v) on props by #'cddr
+                               do (org-entry-put nil (if (stringp p) p
+                                                       (substring (symbol-name p) 1)) v)))
 
-                   ;; Scheduling. We do not add a schedule for cards, as that
-                   ;; info is parsed with
-                   ;; `org-ilm--srs-earliest-due-timestamp'.
-                   (unless (eq type 'card)
-                     ;; Set initial schedule data based on priortiy
-                     (org-ilm--set-schedule-from-priority)
+                    ;; Scheduling. We do not add a schedule for cards, as that
+                    ;; info is parsed with
+                    ;; `org-ilm--srs-earliest-due-timestamp'.
+                    (unless (eq type 'card)
+                      ;; Set initial schedule data based on priortiy
+                      (org-ilm--set-schedule-from-priority)
 
-                     ;; Add advice around priority change to automatically
-                     ;; update schedule, but remove advice as soon as capture
-                     ;; is finished.
-                     (advice-add 'org-priority
-                                 :around #'org-ilm--update-from-priority-change)
-                     (add-hook 'kill-buffer-hook
-                               (lambda ()
-                                 (advice-remove 'org-priority
-                                                #'org-ilm--update-from-priority-change))
-                               nil t))
+                      ;; Add advice around priority change to automatically
+                      ;; update schedule, but remove advice as soon as capture
+                      ;; is finished.
+                      (advice-add 'org-priority
+                                  :around #'org-ilm--update-from-priority-change)
+                      (add-hook 'kill-buffer-hook
+                                (lambda ()
+                                  (advice-remove 'org-priority
+                                                 #'org-ilm--update-from-priority-change))
+                                nil t))
 
-                   ;; For cards, need to transclude the contents in order for
-                   ;; org-srs to detect the clozes.
-                   ;; TODO `org-transclusion-add' super slow!!
-                   (when (eq type 'card)
-                     ;; TODO this can be a nice macro
-                     ;; `org-ilm-with-attachment-transcluded'
-                     (save-excursion
-                       (org-ilm--transclusion-goto file 'create)
-                       (org-transclusion-add)
-                       (org-srs-item-new 'ilm-cloze)
-                       (org-ilm--transclusion-goto file 'delete))))
-                 :before-finalize before-finalize
-                 :after-finalize after-finalize))))
+                    ;; For cards, need to transclude the contents in order for
+                    ;; org-srs to detect the clozes.
+                    ;; TODO `org-transclusion-add' super slow!!
+                    (when (eq type 'card)
+                      ;; TODO this can be a nice macro
+                      ;; `org-ilm-with-attachment-transcluded'
+                      (save-excursion
+                        (org-ilm--transclusion-goto file 'create)
+                        (org-transclusion-add)
+                        (org-srs-item-new 'ilm-cloze)
+                        (org-ilm--transclusion-goto file 'delete))))
+                  :before-finalize before-finalize
+                  :after-finalize after-finalize)
+                 capture-args))))
       (org-capture nil "i"))))
 
 ;;;; Org attachment
 
-(defun org-ilm-org-extract ()
+(cl-defun org-ilm-org-extract (capture-p &key title dont-update-priority)
   "Extract text in region.
 
 Will become an attachment Org file that is the child heading of current entry."
-  (interactive)
+  (interactive "P")
   (unless (use-region-p) (user-error "No region active."))
   (let* ((file-buf (current-buffer))
          (file-path buffer-file-name)
@@ -1209,7 +1219,7 @@ Will become an attachment Org file that is the child heading of current entry."
       (org-ilm--capture
        'extract
        file-org-id
-       (list :id extract-org-id :content region-text)
+       (list :id extract-org-id :content region-text :title title)
        (lambda (&rest _) ;; on-success
 
          ;; Wrap region with targets.
@@ -1230,11 +1240,15 @@ Will become an attachment Org file that is the child heading of current entry."
 
                ;; Insert target after region, adjusting for start target length
                (goto-char (+ region-end (length target-begin)))
-               (insert target-end)))
-           (save-buffer)
-           (org-ilm-recreate-overlays))
+               (insert target-end)
 
-         (org-ilm--attachment-priority-update 'extract))))))
+               (save-buffer)
+               (org-ilm-recreate-overlays region-begin (point)))))
+
+         (unless dont-update-priority
+           (org-ilm--attachment-priority-update 'extract)))
+       nil
+       :immediate-finish (not capture-p)))))
 
 (defun org-ilm-cloze ()
   "Create a cloze card.
@@ -1299,6 +1313,31 @@ command."
        (when auto-clozed
          (with-current-buffer file-buf
            (org-srs-item-uncloze-dwim)))))))
+
+(defun org-ilm-org-split (&optional level)
+  "Split org document by heading level."
+  (interactive)
+
+  (unless level
+    (setq level (read-number "Split by level: "  (max (org-outline-level) 1))))
+  
+  (save-excursion
+    (goto-char (point-min))
+    (let ((re (format "^\\*\\{%d\\} " level))
+          (org-ilm-reset-org-mem-after-capture nil)
+          title)
+      (while (re-search-forward re nil t)
+        (setq title (org-get-heading t t t t))
+        (beginning-of-line)
+        (insert "\n")
+        (set-mark (point))
+        (org-end-of-subtree t)
+        (insert "\n")
+        (org-ilm-org-extract nil :title title :dont-update-priority t))))
+
+  (org-mem-reset)
+  (org-mem-await nil 5))
+
 
 
 ;;;; PDF attachment
