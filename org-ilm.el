@@ -2612,34 +2612,36 @@ See `org-ilm-attachment-transclude'."
     (overlay-put ov 'org-ilm-id id)
     (overlay-put ov 'help-echo (format "Highlight %s" id))))
 
-(defun org-ilm-remove-overlays ()
+(defun org-ilm-remove-overlays (&optional point-min point-max)
   ""
   (interactive)
   (org-with-wide-buffer
-   (remove-overlays (point-min) (point-max) 'org-ilm-highlight t)
-   (remove-overlays (point-min) (point-max) 'org-ilm-target t)))
+   (remove-overlays point-min point-max 'org-ilm-highlight t)
+   (remove-overlays point-min point-max 'org-ilm-target t)))
 
-;; TODO Accept begin and end position so that new overlays can be processed by
-;; narrowing to just that region, without having to redo the whole file.
-(defun org-ilm-recreate-overlays (&optional no-face)
+(defun org-ilm-recreate-overlays (&optional point-min point-max no-face)
   ""
   (interactive)
-  (org-ilm-remove-overlays)
+  (org-ilm-remove-overlays point-min point-max)
   (org-with-wide-buffer
+   (goto-char (or point-min (point-min)))
    (let ((begin-targets (make-hash-table :test 'equal)))
-     (org-element-map (org-element-parse-buffer) 'target
-       (lambda (target-element)
-         (when-let* ((target (org-ilm--target-parse-element target-element))
-                     (target-id (plist-get target :id)))
-           (when (member (plist-get target :type) '("extract" "card"))
-             (pcase (plist-get target :pos)
-               ("begin" (puthash target-id target begin-targets))
-               ("end"
-                (when-let ((begin-target (gethash target-id begin-targets)))
-                 (progn
-                   (org-ilm--create-overlay begin-target target no-face)
-                   ;; TODO Do we need to remove it?
-                   (remhash target-id begin-targets))))))))))))
+     (while-let ((end (re-search-forward org-ilm-target-regexp point-max t))
+                 (begin (match-beginning 0))
+                 (string (match-string-no-properties 0))
+                 (type (match-string-no-properties 1))
+                 (pos (match-string-no-properties 2))
+                 (id (match-string-no-properties 3))
+                 (target (list :end end :begin begin :string string
+                               :type type :pos pos :id id)))
+       (when (member type '("extract" "card"))
+         (pcase pos
+           ("begin" (puthash id target begin-targets))
+           ("end"
+            (when-let ((begin-target (gethash id begin-targets)))
+              (org-ilm--create-overlay begin-target target no-face)
+              ;; TODO Do we need to remove it?
+              (remhash id begin-targets)))))))))
 
 (defun org-ilm--open-from-ov (ov)
   ""
