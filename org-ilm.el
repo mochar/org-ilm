@@ -2830,12 +2830,21 @@ If available, the last alias in the ROAM_ALIASES property will be used."
      collection :elements elements :query query)))
 
 (defun org-ilm--queue-rebuild (&optional buffer)
-  "Replace the queue object by a rebuild one, thereby rerunning the query.
-This will simply do nothing if queue was build dynamically (no query)."
+  "Replace the queue object by a rebuild one.
+If the queue has a query, run it again. Else re-parse elements."
   (org-ilm-with-queue-buffer buffer
-    (if-let ((query (plist-get org-ilm-queue :query)))
-        (setq org-ilm-queue (org-ilm--queue-build
-                             (plist-get org-ilm-queue :collection) query)))
+    (setq org-ilm-queue 
+          (if-let ((query (plist-get org-ilm-queue :query)))
+              (org-ilm--queue-build
+               (plist-get org-ilm-queue :collection) query)
+            (org-ilm--queue-create
+             (plist-get org-ilm-queue :collection)
+             :name (plist-get org-ilm-queue :name)
+             :elements
+             (mapcar
+              (lambda (element)
+                (org-ilm-element-from-id (org-ilm-element-id element)))
+              (hash-table-values (plist-get org-ilm-queue :elements))))))
     (current-buffer)))
 
 (cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
@@ -3193,14 +3202,12 @@ DAYS can be specified as numeric prefix arg."
          ")")))
 
 (defun org-ilm-queue-revert (&optional rebuild)
-  "Revert/refresh the queue buffer. With REBUILD, run query again."
+  "Revert/refresh the queue buffer. With REBUILD, reparse elements."
   (interactive "P")
   (let ((was-empty (org-ilm-queue-empty-p)))
     (when rebuild
-      (if (plist-get org-ilm-queue :query)
-          (when (yes-or-no-p "Query again?")
-            (org-ilm--queue-rebuild))
-        (user-error "Can't query again as is queue is built dynamically.")))
+      (when (yes-or-no-p "Rebuild queue? This will parse the elements again. ")
+        (org-ilm--queue-rebuild)))
     (if (or (and was-empty (not (org-ilm-queue-empty-p)))
             (org-ilm-queue-empty-p)
             (not (vtable-current-table)))
