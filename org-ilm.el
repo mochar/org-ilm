@@ -2862,6 +2862,10 @@ If the queue has a query, run it again. Else re-parse elements."
                     (org-ilm-queue--set-active-buffer nil)))
                 nil 'local)
 
+      ;; Update queue buffer header to reflect state
+      (add-hook 'org-ilm-queue-active-buffer-change-hook
+                #'org-ilm-queue--set-header nil 'local)
+
       ;; Refresh when queue popped during review
       (add-hook 'org-ilm-review-next-hook
                 #'org-ilm-queue-revert nil t)
@@ -3196,6 +3200,10 @@ DAYS can be specified as numeric prefix arg."
 (defun org-ilm-queue--set-header ()
   (setq header-line-format
         (concat
+         (when (eq (current-buffer) org-ilm-queue-active-buffer)
+           (if (org-ilm-reviewing-p)
+               (propertize "[R] " 'face 'error)
+             (propertize "[A] " 'face 'bold)))
          (plist-get org-ilm-queue :name)
          " ("
          (symbol-name (plist-get org-ilm-queue :collection))
