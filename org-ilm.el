@@ -704,6 +704,15 @@ The collections are stored in `org-ilm-collections'."
      ((> (length files) 1)
       (completing-read "Collection file: " files nil 'require-match)))))
 
+(defun org-ilm--collection-entries (collection)
+  (seq-filter
+   (lambda (entry)
+     (member
+      (org-ilm-type (org-mem-entry-todo-state entry))
+      '(incr card)))
+  (org-mem-entries-in-files (org-ilm--collection-files collection))))
+
+
 ;;;; Types
 
 ;; There are three headline types: Subjects, Incrs, and Cards.
@@ -2787,9 +2796,26 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 (defvar org-ilm-queue-active-buffer-change-hook nil
   "Hook called when `org-ilm-queue-active-buffer' changes.")
 
-;;;;; Building a queue buffer
+;;;;; Building a queue 
 
 ;; Queues are stored locally within each queue buffer.
+
+(cl-defun org-ilm--queue-create (collection &key elements query name)
+  "Create a new ilm queue object."
+  (let ((element-map (make-hash-table :test #'equal))
+        (ost (make-ost-tree)))
+    (dolist (element elements)
+      (puthash (org-ilm-element-id element) element element-map)
+      (ost-tree-insert ost (org-ilm-element-psample element)
+                       (org-ilm-element-id element)))
+    (list
+     :name (or name
+               (when query (symbol-name query))
+               (symbol-name collection))
+     :elements element-map
+     :ost ost
+     :collection collection
+     :query query)))
 
 (defun org-ilm--queue-build (&optional collection query)
   "Build a queue and return it."
@@ -2800,37 +2826,22 @@ If available, the last alias in the ROAM_ALIASES property will be used."
          (elements (org-ilm-query-collection collection query))
          (element-map (make-hash-table :test #'equal))
          (ost (make-ost-tree)))
-    (dolist (element elements)
-      (puthash (org-ilm-element-id element) element element-map)
-      (ost-tree-insert ost (org-ilm-element-psample element)
-                       (org-ilm-element-id element)))
-    (list
-     :elements element-map
-     :ost ost
-     :collection collection
-     :query query)))
+    (org-ilm--queue-create
+     collection :elements elements :query query)))
 
-;; TODO I think this should be removed
-(cl-defun org-ilm-queue-build (&key buffer select-collection)
-  "Built the queue and store it in a queue buffer, which is returned."
-  (interactive "P")
-
+(defun org-ilm--queue-rebuild (&optional buffer)
+  "Replace the queue object by a rebuild one, thereby rerunning the query.
+This will simply do nothing if queue was build dynamically (no query)."
   (org-ilm-with-queue-buffer buffer
-    (let ((collection (if select-collection
-                          (car (org-ilm--select-collection))
-                        (or
-                         (plist-get org-ilm-queue :collection)
-                         (car (org-ilm--select-collection)))))
-          (query (or (plist-get org-ilm-queue :query) (car (org-ilm--query-select)))))
-      (setq org-ilm-queue (org-ilm--queue-build collection query))
-      (current-buffer))))
+    (if-let ((query (plist-get org-ilm-queue :query)))
+        (setq org-ilm-queue (org-ilm--queue-build
+                             (plist-get org-ilm-queue :collection) query)))
+    (current-buffer)))
 
 (cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
   "Create a new queue buffer."
   (let ((buffer (generate-new-buffer
-                 (format "*Ilm Queue (%s|%s)*"
-                         (plist-get queue :collection)
-                         (plist-get queue :query)))))
+                 (format "*Ilm Queue (%s)*" (plist-get queue :name)))))
     (with-current-buffer buffer
       (setq-local org-ilm-queue queue)
 
@@ -2886,7 +2897,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 This is either the current buffer if its a queue buffer, or the active
 queue buffer."
   (or (and (org-ilm--queue-buffer-p (current-buffer)) (current-buffer))
-      org-ilm-queue-active-buffer))
+      org-ilm-queue-active-buffer))  
 
 (defmacro org-ilm-with-queue-buffer (buffer &rest body)
   "Run BODY with BUFFER set to a valid queue buffer."
@@ -2897,12 +2908,12 @@ queue buffer."
      (with-current-buffer buf
        ,@body)))
 
-(defun org-ilm-queue (new)
+(defun org-ilm-queue (new &optional dont-switch)
   "Build a queue and view it in Agenda-like buffer."
   (interactive "P")
   (if new
       (org-ilm--queue-buffer-create
-       (org-ilm--queue-build) :switch-p t)
+       (org-ilm--queue-build) :switch-p (not dont-switch))
     (cond
      ;; If current buffer is queue buffer, switch to active queue buffer, or ask
      ;; to make this the active queue buffer.
@@ -2926,14 +2937,14 @@ queue buffer."
             (if (string-empty-p choice)
                 (org-ilm--queue-buffer-create
                  (org-ilm--queue-build)
-                 :active-p t :switch-p t)
+                 :active-p t :switch-p (not dont-switch))
               (with-current-buffer (switch-to-buffer choice)
                 (org-ilm-queue--set-active-buffer (current-buffer)))))
         ;; If outside a queue buffer and there are no active or inactive queue
         ;; buffers, make one and make it active.
         (org-ilm--queue-buffer-create
          (org-ilm--queue-build)
-         :active-p t :switch-p t))))))
+         :active-p t :switch-p (not dont-switch)))))))
 
 ;;;;; Queue operations
 
@@ -3002,6 +3013,8 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
     (let ((top (org-ilm-queue-head)))
       (org-ilm-queue-remove (org-ilm-element-id top)))))
 
+;;;;; Dynamic building
+
 ;; TODO With prefix arg: transient with additional settings
 ;; - Mainly queue-specific priorities.
 ;; - Exclude cards.
@@ -3013,57 +3026,80 @@ If point on headline, add headline and descendants.
 If point on subject, add all headlines of subject."
   (interactive "P")
   (when-let* ((headline (org-ilm--org-headline-at-point))
-              (type (org-ilm-type headline)))
-    (pcase type
-      ('subj
-       ;; TODO
-       )
+              (type (org-ilm-type headline))
+              (collection (or (org-ilm--active-collection)
+                              (org-ilm--select-collection)))
+              (queue-buffer
+               (let* ((queue-buffers (mapcar (lambda (b) (cons (buffer-name b) b))
+                                             (org-ilm--queue-buffers)))
+                      (queue (completing-read "Add to queue, or create new: "
+                                              queue-buffers)))
+                 (or (cdr (assoc queue queue-buffers))
+                     (org-ilm--queue-buffer-create
+                      (org-ilm--queue-create
+                       collection
+                       :name (when (string-empty-p queue)
+                               (format "[%s] %s" (upcase (symbol-name type))
+                                       (org-element-property :title headline))))))))
+              (n-added 0))
+    (if (eq type 'subj)
+        (dolist (entry (org-ilm--collection-entries collection))
+          (when-let* ((element (org-ilm-element-from-id (org-mem-entry-id entry)))
+                      (subjects (car (org-ilm-element-subjects element)))
+                      (ancestor-ids (mapcar #'car subjects)))
+            (when (member (org-element-property :ID headline) ancestor-ids)
+              (when (org-ilm-queue-insert element :buffer queue-buffer :exists-ok t)
+                (cl-incf n-added)))))
 
-      ('incr
-       (save-excursion
-         (org-back-to-heading t)
-         (let ((n-added 0)
-               (end (save-excursion (org-end-of-subtree t)))
-               el)
-           (while (< (point) end)
-             (when (setq el (org-ilm-element-at-point))
-               (when (org-ilm-queue-insert el :exists-ok t)
-                 (cl-incf n-added))
-               (outline-next-heading)))
-           (message "Added %s element(s) to the queue" n-added)))))))
+      (save-excursion
+        (org-back-to-heading t)
+        (let ((end (save-excursion (org-end-of-subtree t)))
+              el)
+          (while (< (point) end)
+            (when (setq el (org-ilm-element-at-point))
+              (when (org-ilm-queue-insert el :buffer queue-buffer :exists-ok t)
+                (cl-incf n-added))
+              (outline-next-heading))))))
+
+    (message "Added %s element(s) to the queue" n-added)
+    
+    (with-current-buffer (switch-to-buffer queue-buffer)
+      (org-ilm-queue-revert))))
+
 
 ;;;;; Queue view
 
-(defvar org-ilm-queue-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n")
-                (lambda ()
-                  (interactive)
-                  (next-line)
-                  (when (eobp) (previous-line))))
-    (define-key map (kbd "p") #'previous-line)
-    (define-key map (kbd "b") #'backward-char)
-    (define-key map (kbd "f") #'forward-char)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "k")
-                (lambda ()
-                  (interactive)
-                  (kill-buffer (current-buffer))))
-    (define-key map (kbd "r") #'org-ilm-review-start)
-    (define-key map (kbd "m") #'org-ilm-queue-object-mark)
-    (define-key map (kbd "g") #'org-ilm-queue-revert)
-    (define-key map (kbd "RET") #'org-ilm-queue-open-attachment)
-    (define-key map (kbd "SPC") #'org-ilm-queue-open-element)
-    (define-key map (kbd "M j") #'org-ilm-queue-mark-by-subject)
-    (define-key map (kbd "M :") #'org-ilm-queue-mark-by-tag)
-    (define-key map (kbd "M s") #'org-ilm-queue-mark-by-scheduled)
-    (define-key map (kbd "M u") #'org-ilm-queue-mark-unmark-all)
-    ;; TODO r: Review start command
-    ;; TODO G: query again - undo manual changes
-    ;; TODO C-u G: like G but also select collection
-    ;; TODO B: bulk commands
-    map)
-  "Keymap for the queue buffer.")
+(defvar-keymap org-ilm-queue-base-map
+  :doc "Base map of ilm queue, regardless if empty or not."
+  "n" (lambda ()
+        (interactive)
+        (next-line)
+        (when (eobp) (previous-line)))
+  "p" #'previous-line
+  "b" #'backward-char
+  "f" #'forward-char
+  "q" #'quit-window
+  "k" (lambda ()
+        (interactive)
+        (kill-buffer (current-buffer)))
+  "g" #'org-ilm-queue-revert)
+  
+(defvar-keymap org-ilm-queue-map
+  :doc "Keymap for the queue buffer."
+  :parent org-ilm-queue-base-map
+  "r" #'org-ilm-review-start
+  "m" #'org-ilm-queue-object-mark
+  "RET" #'org-ilm-queue-open-attachment
+  "SPC" #'org-ilm-queue-open-element
+  "M j" #'org-ilm-queue-mark-by-subject
+  "M :" #'org-ilm-queue-mark-by-tag
+  "M s" #'org-ilm-queue-mark-by-scheduled
+  "M u" #'org-ilm-queue-mark-unmark-all
+  ;; TODO r: Review start command
+  ;; TODO G: query again - undo manual changes
+  ;; TODO C-u G: like G but also select collection
+  ;; TODO B: bulk commands
+  )
 
 (defvar-local org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
@@ -3110,7 +3146,7 @@ If point on subject, add all headlines of subject."
   "Mark all elements in queue that are part of subject with id SUBJECT-ID."
   (interactive
    (list
-    (org-mem-entry-id (org-ilm--subject-select))))
+    (org-mem-entry-id (org-ilm--subject-select-entry))))
 
   ;; Alternatively, we could have used
   ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
@@ -3151,21 +3187,26 @@ DAYS can be specified as numeric prefix arg."
 (defun org-ilm-queue--set-header ()
   (setq header-line-format
         (concat
-         (symbol-name (plist-get org-ilm-queue :query))
+         (plist-get org-ilm-queue :name)
          " ("
          (symbol-name (plist-get org-ilm-queue :collection))
          ")")))
 
-(defun org-ilm-queue-revert (&optional arg)
+(defun org-ilm-queue-revert (&optional rebuild)
+  "Revert/refresh the queue buffer. With REBUILD, run query again."
   (interactive "P")
-  (cond
-   ((equal arg '(4))   ;; C-u
-    (when (yes-or-no-p "Query again?")
-      (org-ilm-queue-build)))
-   ((equal arg '(16))  ;; C-u C-u
-    (org-ilm-queue-build 'select-collection)))
-  (vtable-revert-command)
-  (org-ilm-queue--set-header))
+  (let ((was-empty (org-ilm-queue-empty-p)))
+    (when rebuild
+      (if (plist-get org-ilm-queue :query)
+          (when (yes-or-no-p "Query again?")
+            (org-ilm--queue-rebuild))
+        (user-error "Can't query again as is queue is built dynamically.")))
+    (if (or (and was-empty (not (org-ilm-queue-empty-p)))
+            (org-ilm-queue-empty-p)
+            (not (vtable-current-table)))
+        (org-ilm--queue-buffer-build)
+      (vtable-revert-command))
+    (org-ilm-queue--set-header)))
 
 (defun org-ilm--vtable-format-marked (string marked)
   (if marked
@@ -3310,15 +3351,14 @@ A lot of formatting code from org-ql."
 (cl-defun org-ilm--queue-buffer-build (&key buffer switch-p)
   "Build the contents of the queue buffer, and optionally switch to it."
   (org-ilm-with-queue-buffer buffer
-    (when (org-ilm-queue-empty-p)
-      (org-ilm-queue-build)
-      (when (org-ilm-queue-empty-p)
-        (user-error "Queue is empty!")))
-    
     (setq-local buffer-read-only nil)
     (erase-buffer)
     (goto-char (point-min))
-    (vtable-insert (org-ilm--queue-make-vtable))
+    (if (org-ilm-queue-empty-p)
+        (progn
+          (insert (propertize "Queue empty..." 'face 'italic))
+          (use-local-map org-ilm-queue-base-map))
+      (vtable-insert (org-ilm--queue-make-vtable)))
     (org-ilm-queue--set-header)
     (setq-local buffer-read-only t)
     (hl-line-mode 1)
@@ -3327,8 +3367,6 @@ A lot of formatting code from org-ql."
     (goto-char (point-min))
     (when switch-p
       (switch-to-buffer buffer))))
-
-
 
 ;;;; Import
 
@@ -4449,9 +4487,7 @@ during review."
   ;; Make sure queue is not empty
   (with-current-buffer org-ilm-queue-active-buffer
     (when (org-ilm-queue-empty-p)
-      (org-ilm-queue-build)
-      (when (org-ilm-queue-empty-p)    
-        (user-error "Queue is empty!"))))
+      (user-error "Queue is empty!")))
 
   (when (yes-or-no-p "Start reviewing?")
 
