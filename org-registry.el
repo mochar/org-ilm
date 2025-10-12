@@ -255,40 +255,32 @@ This helps share functionality of a type while being able to filter on a more gr
 
 ;;;; Functions
 
-;; See: https://github.com/meedstrom/org-node/issues/137
-(defun org-registry--org-node-read-candidate (&optional prompt blank-ok initial-input predicate)
-  "Like `org-node-read-candidate' but with PREDICATE and returns the node."
-  (gethash
-   (completing-read (or prompt "Node: ")
-                    (if blank-ok #'org-node-collection-main
-                      #'org-node-collection-basic)
-                    predicate
-                    ()
-                    initial-input
-                    (if org-node-alter-candidates 'org-node-hist-altered
-                      'org-node-hist))
-   org-node--candidate<>entry))
-
 (cl-defun org-registry--select-entry (&key types registries)
   "Select registry entry."
-  (let ((types (if (listp types) types (list types)))
-        (registries (mapcar
-                     (lambda (x) (expand-file-name x "~/"))
-                     (if registries
-                         (if (listp registries) registries (list registries))
-                       org-registry-registries))))
-    (org-registry--org-node-read-candidate
-     "Entry: "
-     nil nil
-     ;; filter predicate
-     (lambda (name node)
-       (and
-        (member (org-mem-entry-file-truename node) registries)
-        (if types
-          (member (org-mem-entry-property "TYPE" node)
-                  types)
-          t)
-        )))))
+  (let* ((types (if (listp types) types (list types)))
+         (registries (mapcar
+                      (lambda (x) (expand-file-name x "~/"))
+                      (if registries
+                          (if (listp registries) registries (list registries))
+                        org-registry-registries)))
+         (predicate
+          (lambda (name node)
+            (and
+             (member (org-mem-entry-file-truename node) registries)
+             (if types
+                 (member (org-mem-entry-property "TYPE" node) types)
+               t)))))
+    (gethash
+     (org-node-read-candidate
+      "Entry: "
+      nil
+      predicate
+      'require-match
+      (when-let* ((entry (ignore-errors (org-node-at-point)))
+                  (title (org-mem-entry-title entry)))
+        (when (funcall predicate title entry) title))
+      )
+     org-node--candidate<>entry)))
 
 (defun org-registry-type-aliases ()
   "Return alist of type name to aliases.
