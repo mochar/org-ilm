@@ -750,12 +750,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
   (let* ((attach-dir (org-attach-dir))
          (attachments (when attach-dir (org-attach-file-list attach-dir)))
          (entry (org-node-at-point))
-         (refs (mapcar
-                (lambda (ref)
-                  (if-let ((type (gethash ref org-mem--roam-ref<>type)))
-                      (concat type ":" ref)
-                    ref))
-                (org-mem-entry-roam-refs entry))))
+         (refs (mochar-utils--org-mem-refs entry)))
     (when-let ((url (org-entry-get nil "URL")))
       (cl-pushnew url refs :test #'equal))
     (setq refs (seq-filter #'org-url-p refs))

@@ -118,12 +118,15 @@ save-excursion."
 
 ;;;; org-mem / org-node
 
-(defun mochar-utils--org-mem-website-refs (&optional entry)
-  (let ((entry (or entry (org-node-at-point))))
+(defun mochar-utils--org-mem-refs (&optional entry types)
+  (let* ((entry (or entry (org-node-at-point))))
     (cl-loop for ref in (org-mem-entry-roam-refs entry)
              for type = (gethash ref org-mem--roam-ref<>type)
-             when (member type '("http" "https"))
-             collect (concat type ":" ref))))
+             when (or (null types) (member type types))
+             collect (if type (concat type ":" ref) ref))))
+
+(defun mochar-utils--org-mem-website-refs (&optional entry)
+  (mochar-utils--org-mem-refs entry '("http" "https")))
 
 ;;;; Web
 

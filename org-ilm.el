@@ -114,7 +114,8 @@
   "j" #'org-ilm-subject-dwim
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
-  "+" #'org-ilm-queue-add-dwim)
+  "+" #'org-ilm-queue-add-dwim
+  "g" #'org-ilm-registry)
 
 (defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
   "Regexp to match values of targets enclosing extracts and clozes.")
@@ -272,6 +273,11 @@
           (eq major-mode 'pdf-virtual-view-mode))
       (call-interactively #'org-ilm-pdf-extract)))
     (message "Extracts can only be made from within an attachment")))
+
+(defun org-ilm-registry ()
+  "Open collection registry."
+  (interactive)
+  (org-registry-open))
   
 ;;;; Utilities
 
@@ -631,6 +637,26 @@ the priority, or error if there is no priority."
               (org-clock-idle-time nil))
           (org-clock-in))))))
 
+(defun org-ilm--entry-media-sources (&optional entry)
+  "Return all sources of media of ENTRY or entry at point."
+  (setq entry (or entry (org-node-at-point)))
+  (cl-assert (org-mem-entry-p entry))
+  (let* ((url (org-mem-entry-property "URL" entry))
+         (path (org-mem-entry-property "PATH" entry))
+         (refs (mochar-utils--org-mem-website-refs entry))
+         (attachments
+          (org-ilm--org-with-point-at (org-mem-entry-id entry)
+            (when-let ((attach-dir (org-attach-dir)))
+              (seq-filter
+               (lambda (attachment)
+                 (member (file-name-extension attachment)
+                         (append org-media-note--video-types
+                                 org-media-note--audio-types)))
+               (org-attach-file-list attach-dir))))))
+    (cl-remove-duplicates
+     (delq nil (append (list url path) refs attachments))
+     :test #'string=)))
+
 ;;;; Collection
 
 (defcustom org-ilm-collections '((ilm . "~/ilm/"))
@@ -691,7 +717,7 @@ The collections are stored in `org-ilm-collections'."
      ((f-file-p file-or-dir)
       (list (expand-file-name file-or-dir)))
      ((f-dir-p file-or-dir)
-      (directory-files file-or-dir nil "^[^.].*\\.org$"))
+      (directory-files file-or-dir 'full "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
 (defun org-ilm--select-collection-file (collection)
@@ -849,6 +875,68 @@ wasteful if headline does not match query."
                   t))
           (org-ilm-element-at-point))))))
 
+;;;;; Media
+
+(defun org-ilm--element-source-recover (source element-id &optional registry-id)
+  (cond-let*
+    ((org-url-p source) source)
+    ([attach-dir (mapcan
+                  (lambda (id)
+                    (when id 
+                      (org-ilm--org-with-point-at id
+                        (when-let ((attach-dir (org-attach-dir)))
+                          (when (member source (org-attach-file-list attach-dir))
+                            attach-dir)))))
+                  (list element-id registry-id))]
+     (expand-file-name source attach-dir))))
+
+(defun org-ilm--element-media-source (&optional element media)
+  "Return the source of the media associated with ELEMENT."
+  (unless element (setq element (org-ilm-element-at-point)))
+  (let* ((id (org-ilm-element-id element))
+         (entry (org-mem-entry-by-id id))
+         (registry-id (org-ilm-element-registry element))
+         (registry-entry (org-mem-entry-by-id registry-id)))
+    (unless media (setq media (org-mem-entry-property "ILM_MEDIA" entry)))
+    
+    (if media
+        ;; Media property set explicitely: return it
+        (org-ilm--element-source-recover media id registry-id)
+      ;; Media might be implicitely defined in element or registry properties or
+      ;; attachments. Find and if more than one, set explicitely in property.
+      (let* ((element-medias (org-ilm--entry-media-sources entry))
+             (registry-medias (org-ilm--entry-media-sources registry-entry))
+             (all-medias (cl-remove-duplicates
+                          (append element-medias registry-medias)
+                          :test #'equal)))
+        (cond
+         ((= (length all-medias) 1)
+          (car medias-combined))
+         ((> (length all-medias) 1)
+          (let* ((choice (consult--multi
+                          (list
+                           (list
+                            :name "Element"
+                            :narrow ?e
+                            :items element-medias
+                            :action #'message)
+                           (list
+                            :name "Registry"
+                            :narrow ?r
+                            :items registry-medias
+                            :action #'message))
+                          :require-match t
+                          :prompt "Media: "))
+                 (media (car choice)))
+            (org-ilm--org-with-point-at id
+              (org-entry-put nil "ILM_MEDIA" media)
+              (save-buffer))
+            (org-ilm--element-source-recover media id registry-id))))))))
+
+(defun org-ilm--element-media-open (&optional element media)
+  (when-let* ((source (org-ilm--element-media-source element media)))
+    (org-media-note--follow-link source nil nil)))
+
 ;;;;; Logbook
 
 (defun org-ilm--logbook-parse (logbook)
@@ -990,6 +1078,18 @@ If `HEADLINE' is passed, read it as org-property."
           (org-ilm-element-registry org-ilm--element-transient-element)
         (org-attach-dir)))
     :transient t)
+   ]
+
+  ["Actions"
+   ("m" "Media open"
+    (lambda ()
+      (interactive)
+      (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
+        (org-ilm--element-media-open)))
+    :inapt-if-not
+    (lambda ()
+      (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
+        (org-ilm--element-media-source))))
    ]
   )
 
@@ -2329,50 +2429,54 @@ This is used to keep track of changes in priority and scheduling.")
 
 (cl-defun org-ilm--attachment-open (&key pdf-no-region no-error)
   "Open the attachment of collection element at point, returns its buffer."
-  (cond
-   ;; Check if there is an attachment org-id.ext where org-id is current
-   ;; headline's id and ext is org by default or ILM_EXT property
-   ((when-let ((path (org-ilm--attachment-find)))
-      (progn
-        (run-hook-with-args 'org-attach-open-hook path)
-        (find-file path))))
-   ;; Check if headline represents a virtual view of a parent PDF element by
-   ;; looking at the PDF_RANGE property.
-   ((when-let* ((pdf-range (org-entry-get nil "PDF_RANGE"))
-                ;; Returns 0 if not a number
-                (pdf-page-maybe (string-to-number pdf-range))
-                (attachment (org-ilm--attachment-find-ancestor "pdf"))
-                (buffer-name (concat (org-id-get) ".pdf")))
-      (if (not (= pdf-page-maybe 0))
-          (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
-        (org-ilm--pdf-open-ranges
-         (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
-         buffer-name
-         pdf-no-region))))
-   ;; Check if attachment is in the process of being generated with a conversion
-   ;; tool.
-   ((when-let* ((org-id (org-id-get))
-                (conversion (convtools--conversion-by-id org-id)))
-      (let ((message (pcase (plist-get conversion :state)
-                       ;; TODO for success and error, provide option to
-                       ;; delete headline and extract highlight in parent
-                       ;; attachment.
-                       ('success "Attachment finished conversion but not found.")
-                       ('error "Attachment conversion failed.")
-                       (_ "Attachment still being converted."))))
-        (when (yes-or-no-p (concat message " View conversion buffer?"))
-          (pop-to-buffer (plist-get conversion :buffer))))))
-   ;; Check if there is a web link in the ROAM_REFS property and open website in
-   ;; eww.
-   ((when-let* ((web-refs (mochar-utils--org-mem-website-refs))
-                (web-ref (if (= 1 (length web-refs))
-                             (car web-refs)
-                           (completing-read "Open: " web-refs nil t))))
-      ;; We use window excursion so that we can return the eww buffer
-      (save-window-excursion
-        (eww-browse-url web-ref))
-      (switch-to-buffer "*eww*")))
-   (t (unless no-error (user-error "Attachment not found")))))
+  (cond-let*
+    ;; Check if there is an attachment org-id.ext where org-id is current
+    ;; headline's id and ext is org by default or ILM_EXT property
+    ([path (org-ilm--attachment-find)]
+     (if-let ((buf (get-file-buffer path)))
+         (switch-to-buffer buf)
+       ;; If media type, open the media file with org-media-note.
+       (org-ilm--element-media-open)
+       ;; Open org file
+       (run-hook-with-args 'org-attach-open-hook path)
+       (find-file path)))
+    ;; Check if headline represents a virtual view of a parent PDF element by
+    ;; looking at the PDF_RANGE property.
+    ([pdf-range (org-entry-get nil "PDF_RANGE")]
+     ;; Returns 0 if not a number
+     [pdf-page-maybe (string-to-number pdf-range)]
+     [attachment (org-ilm--attachment-find-ancestor "pdf")]
+     [buffer-name (concat (org-id-get) ".pdf")]
+     (if (not (= pdf-page-maybe 0))
+         (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
+       (org-ilm--pdf-open-ranges
+        (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
+        buffer-name
+        pdf-no-region)))
+    ;; Check if attachment is in the process of being generated with a conversion
+    ;; tool.
+    ([org-id (org-id-get)]
+     [conversion (convtools--conversion-by-id org-id)]
+     (let ((message (pcase (plist-get conversion :state)
+                      ;; TODO for success and error, provide option to
+                      ;; delete headline and extract highlight in parent
+                      ;; attachment.
+                      ('success "Attachment finished conversion but not found.")
+                      ('error "Attachment conversion failed.")
+                      (_ "Attachment still being converted."))))
+       (when (yes-or-no-p (concat message " View conversion buffer?"))
+         (pop-to-buffer (plist-get conversion :buffer)))))
+    ;; Check if there is a web link in the ROAM_REFS property and open website in
+    ;; eww.
+    ([web-refs (mochar-utils--org-mem-website-refs)]
+     [web-ref (if (= 1 (length web-refs))
+                  (car web-refs)
+                (completing-read "Open: " web-refs nil t))]
+     ;; We use window excursion so that we can return the eww buffer
+     (save-window-excursion
+       (eww-browse-url web-ref))
+     (switch-to-buffer "*eww*"))
+    (t (unless no-error (user-error "Attachment not found")))))
   
 (defun org-ilm--attachment-open-by-id (id)
   (org-ilm--org-with-point-at id
@@ -2382,8 +2486,10 @@ This is used to keep track of changes in priority and scheduling.")
   "Prepare ilm attachment buffers."
   (when-let ((data (org-ilm--attachment-data)))
     (pcase-let* ((`(,id ,collection) data)
-                 (element (org-ilm--org-with-point-at id
-                            (org-ilm-element-at-point))))
+                 (element (org-ilm-element-from-id id))
+                 (entry (org-mem-entry-by-id id))
+                 (registry-entry (org-mem-entry-by-id
+                                  (org-ilm-element-registry element))))
 
       ;; Prepare the buffer local data object which contains info about the
       ;; attachment as well as data used to update the priority.
@@ -2412,8 +2518,7 @@ This is used to keep track of changes in priority and scheduling.")
          (setf (plist-get org-ilm--data :size)
                (save-restriction
                  (widen)
-                 (- (point-max) (point-min)))))
-        ))))
+                 (- (point-max) (point-min)))))))))
 
 (defun org-ilm--attachment-ensure-data-object ()
   "Ensure `org-ilm--object' is initialized properly.
@@ -3542,8 +3647,6 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   :class 'transient-option
   :transient 'transient--do-call
   :argument "--attachment="
-  :allow-empty nil
-  :always-read t
   :reader
   (lambda (prompt initial-input history)
     (let* ((entry (plist-get (org-ilm--import-registry-transient-args) :entry)))
@@ -3560,8 +3663,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                        (org-registry--select-entry))))
        (list
         (concat "--entry=" (org-mem-entry-id entry))
-        (when-let ((attachment (org-ilm--import-registry-read-attachment entry)))
-          (concat "--attachment=" attachment))))))
+        ;; (when-let ((attachment (org-ilm--import-registry-read-attachment entry)))
+        ;;   (concat "--attachment=" attachment))
+        ))))
 
   ["Registry import"
    ("e" "Entry" org-ilm--import-registry-transient-entry)
