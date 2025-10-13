@@ -525,6 +525,9 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
       (when restrict-p '("--restrict-filenames"))
       convtools-ytdlp-args)))))
 
+(defun convtools--ytdlp-title-from-url (url)
+  (convtools--ytdlp-filename-from-url url "%(title)s"))
+
 (defun convtools--ytdlp-subtitles-from-url (url)
   "Returns two alists of alist: 'subtitles and 'auto.
 

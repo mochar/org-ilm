@@ -82,8 +82,8 @@
   :type '(repeat string)
   :group 'org-ilm)
 
-(defcustom org-ilm-reset-org-mem-after-capture t
-  "Force org-mem to rescan after an extract or creating a card."
+(defcustom org-ilm-update-org-mem-after-capture t
+  "Update org-mem cache to include captured entry."
   :type 'boolean
   :group 'org-ilm)
 
@@ -1101,6 +1101,12 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
+(defun org-ilm--capture-update-org-mem ()
+  (with-current-buffer (marker-buffer org-capture-last-stored-marker)
+    (save-excursion
+      (goto-char (marker-position org-capture-last-stored-marker))
+      (org-mem-updater-ensure-id-node-at-point-known))))
+
 (defun org-ilm--capture (type target data &optional on-success on-abort &rest capture-args)
   "Make an org capture to make a new source heading, extract, or card.
 
@@ -1162,13 +1168,8 @@ The callback ON-ABORT is called when capture is cancelled."
             (if org-note-abort
                 (when on-abort
                   (funcall on-abort))
-              ;; More often than not org-node doens't register a newly created
-              ;; node so I need to rerun the scan. Org-mem is fast, but this is
-              ;; still very wasteful.
-              ;; TODO Figure out how to prevent doing a full rescan
-              (when org-ilm-reset-org-mem-after-capture
-                (org-mem-reset)
-                (org-mem-await nil 5))
+              (when org-ilm-update-org-mem-after-capture
+                (org-ilm--capture-update-org-mem))
               (when on-success
                 (funcall on-success attach-dir))))))
 
@@ -1430,7 +1431,6 @@ command."
   (save-excursion
     (goto-char (point-min))
     (let ((re (format "^\\*\\{%d\\} " level))
-          (org-ilm-reset-org-mem-after-capture nil)
           title)
       (while (re-search-forward re nil t)
         (setq title (org-get-heading t t t t))
@@ -1439,11 +1439,7 @@ command."
         (set-mark (point))
         (org-end-of-subtree t)
         (insert "\n")
-        (org-ilm-org-extract nil :title title :dont-update-priority t))))
-
-  (org-mem-reset)
-  (org-mem-await nil 5))
-
+        (org-ilm-org-extract nil :title title :dont-update-priority t)))))
 
 
 ;;;; PDF attachment
@@ -3552,6 +3548,8 @@ A lot of formatting code from org-ql."
     :inapt-if-nil org-ilm--active-collection)
    ("f" "File" org-ilm--import-file-transient
     :inapt-if-nil org-ilm--active-collection)
+   ("m" "Media" org-ilm--import-media-transient
+    :inapt-if-nil org-ilm--active-collection)
    ("g" "Registry" org-ilm--import-registry-transient
     :inapt-if-nil org-ilm--active-collection)
    ]
@@ -3630,6 +3628,63 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
    'source
    (car collection)
    (list :file file :method method :ext t)))
+
+;;;;; Media
+
+(defun org-ilm--import-media-transient-args (&optional args)
+  (setq args (or args (transient-args 'org-ilm--import-media-transient)))
+  (list :source (transient-arg-value "--source=" args)
+        :title (transient-arg-value "--title=" args)
+        :collection org-ilm--active-collection))
+
+(defun org-ilm--import-media-read-source ()
+  (when-let* ((source (ffap-read-file-or-url "File or URL: " nil))
+              (title source))
+    (setq title (if (org-url-p source)
+                    (convtools--ytdlp-title-from-url source)
+                  (file-name-base source)))
+    (mochar-utils--transiet-set-target-value "t" title)
+    (list source title)))
+
+(transient-define-infix org-ilm--import-media-transient-source ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--source="
+  :allow-empty nil
+  :always-read t
+  :reader
+  (lambda (prompt initial-input history)
+    (car (org-ilm--import-media-read-source))))
+
+(transient-define-prefix org-ilm--import-media-transient ()
+  :refresh-suffixes t
+  :value
+  (lambda ()
+    (append
+     (when-let ((source (org-ilm--import-media-read-source)))
+       (list (concat "--source=" (car source))
+             (concat "--title=" (cadr source))))))
+
+  ["Media import"
+   ("s" "Source" org-ilm--import-media-transient-source)
+   ("t" "Title" "--title=" :prompt "Title: " :always-read t :transient transient--do-call)
+   ("RET" "Import"
+    (lambda ()
+      (interactive)
+      (cl-destructuring-bind (&key source title collection &allow-other-keys)
+          (org-ilm--import-media-transient-args)
+        (org-ilm--capture
+         'source
+         collection
+         (list 
+          :title title
+          :content ""
+          :props (list :ILM_MEDIA source)))))
+    :inapt-if-not
+    (lambda ()
+      (cl-destructuring-bind (&key source &allow-other-keys)
+          (org-ilm--import-media-transient-args (transient-get-value))
+        source)))])
 
 ;;;;; Registry
 
