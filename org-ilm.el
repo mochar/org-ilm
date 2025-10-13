@@ -691,7 +691,7 @@ The collections are stored in `org-ilm-collections'."
      ((f-file-p file-or-dir)
       (list (expand-file-name file-or-dir)))
      ((f-dir-p file-or-dir)
-      (f-glob "*.org" file-or-dir))
+      (directory-files file-or-dir nil "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
 (defun org-ilm--select-collection-file (collection)
