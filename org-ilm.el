@@ -117,15 +117,6 @@
   "+" #'org-ilm-queue-add-dwim
   "g" #'org-ilm-registry)
 
-(defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
-  "Regexp to match values of targets enclosing extracts and clozes.")
-
-(defvar org-ilm-target-regexp (format "<<%s>>" org-ilm-target-value-regexp)
-  "Regexp to match targets enclosing extracts and clozes.")
-
-(defvar org-ilm--targets-editable nil
-  "Whether or not to allow editing/removing of target text.")
-
 ;;;; Minor mode
 
 ;; TODO This hook is called not just after file save but on a timer as well. Do we want the timer to reset cache?
@@ -1322,6 +1313,11 @@ Will become an attachment Org file that is the child heading of current entry."
     
     (let* ((region-begin (region-beginning))
            (region-end (region-end))
+           ;; If region end is beginning of line, reposition to end of previous
+           ;; line. This avoids formatting problems.
+           (region-end (if (save-excursion (goto-char region-end) (bolp))
+                           (max (- region-end 1) 0)
+                         region-end))
            (region-text (org-ilm--buffer-text-process region-begin region-end))
            (extract-org-id (org-id-new)))
 
@@ -1334,14 +1330,15 @@ Will become an attachment Org file that is the child heading of current entry."
          ;; Wrap region with targets.
          (with-current-buffer file-buf
            (save-excursion
-             (let* ((is-begin-line (or (= region-begin 0)
-                                       (eq (char-before region-begin) ?\n)))
-                    (target-template (format "<<extract:%s:%s>>" "%s" extract-org-id))
+             (let* ((target-template (format "<<extract:%s:%s>>" "%s" extract-org-id))
+                    (begin-is-bolp (save-excursion
+                                     (goto-char region-begin)
+                                     (bolp)))
                     (target-begin (concat
                                    (format target-template "begin")
                                    ;; Region starts at beginning of line: insert
                                    ;; on new line above
-                                   (when is-begin-line "\n")))
+                                   (when begin-is-bolp "\n")))
                     (target-end (format target-template "end")))
                ;; Insert target before region
                (goto-char region-begin)
@@ -2657,6 +2654,15 @@ See `org-ilm-attachment-transclude'."
 ;; one for each target element to hide it, and one that encapsulates the whole
 ;; target region to visually indicate it with a color.
 
+(defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
+  "Regexp to match values of targets enclosing extracts and clozes.")
+
+(defvar org-ilm-target-regexp (format "<<%s>>" org-ilm-target-value-regexp)
+  "Regexp to match targets enclosing extracts and clozes.")
+
+(defvar org-ilm--targets-editable nil
+  "Whether or not to allow editing/removing of target text.")
+
 (defun org-ilm--target-parse-string (string &optional with-brackets)
   "Parse and return parts of target string as specified in `org-ilm-target-value-regexp'."
   (when-let* ((regexp (if with-brackets
@@ -2726,26 +2732,47 @@ See `org-ilm-attachment-transclude'."
 
 ;;;; Overlays
 
-(defun org-ilm--ov-block-edit (ov after beg end &optional len)
-  (unless (or after org-ilm--targets-editable)
+(defun org-ilm--target-ov-block-edit (ov after-change-p beg end &optional len-pre)
+  ;; The hook functions are called both before and after each change. If the functions save the information they receive, and compare notes between calls, they can determine exactly what change has been made in the buffer text.
+  ;; When called before a change, each function receives four arguments: the overlay, nil, and the beginning and end of the text range to be modified.
+  ;; When called after a change, each function receives five arguments: the overlay, t, the beginning and end of the text range just modified, and the length of the pre-change text replaced by that range. (For an insertion, the pre-change length is zero; for a deletion, that length is the number of characters deleted, and the post-change beginning and end are equal.) 
+  (unless (or after-change-p org-ilm--targets-editable)
     (user-error "Cannot modify this region")))
+
+(defun org-ilm--overlay-edit-hook (ov after-change-p beg end &optional len-pre)
+  )
 
 (defun org-ilm--create-overlay (target-begin target-end &optional no-face)
   "Create an overlay to hide the target markers and highlight the target text."
   ;; Hide targets
   (dolist (target (list target-begin target-end))
     (let ((begin (plist-get target :begin))
-          (end (plist-get target :end)))
+          (end (plist-get target :end))
+          (begin-p (string= "begin" (plist-get target :pos))))
       (let ((ov (make-overlay
                  begin
                  ;; If next character is newline, include it.  Otherwise hitting
                  ;; backspace on header will look like header is still on
                  ;; newline but is in fact after the target.
-                 (if (eq (char-after end) ?\n) (+ end 1) end)
-                 nil t t)))
+                 ;; (if (eq (char-after end) ?\n) (+ end 1) end)
+                 (if (and (eq (char-after end) ?\n)
+                          (or (= begin (point-min)) (eq (char-before begin) ?\n)))
+                     (+ end 1)
+                 end)
+                 nil ;; buffer
+                 ;; FRONT-ADVANCE: if non-nil, makes the marker for the front of
+                 ;; the overlay advance when text is inserted there (which means
+                 ;; the text *is not* included in the overlay).
+                 t
+                 ;; REAR-ADVANCE: if non-nil, makes the marker for the rear of
+                 ;; the overlay advance when text is inserted there (which means
+                 ;; the text *is* included in the overlay).
+                 t)))
         (overlay-put ov 'org-ilm-target t)
         (overlay-put ov 'invisible t)
-        (overlay-put ov 'modification-hooks '(org-ilm--ov-block-edit))
+        ;; (overlay-put ov 'display "|")
+        ;; (overlay-put ov 'cursor-intangible t)
+        (overlay-put ov 'modification-hooks '(org-ilm--target-ov-block-edit))
         )
     ))
   
@@ -2755,15 +2782,20 @@ See `org-ilm-attachment-transclude'."
          (face (pcase type
                  ("extract" 'org-ilm-face-extract)
                  ("card" 'org-ilm-face-card)))
-         (ov (make-overlay
-             (plist-get target-begin :begin)
-             (plist-get target-end :end))))
-    (unless no-face
-      (overlay-put ov 'face face))
-    (overlay-put ov 'org-ilm-highlight t)
-    (overlay-put ov 'org-ilm-type type)
-    (overlay-put ov 'org-ilm-id id)
-    (overlay-put ov 'help-echo (format "Highlight %s" id))))
+         (begin (plist-get target-begin :begin))
+         (end (plist-get target-end :end))
+         ;; (begin (1+ (plist-get target-begin :end)))
+         ;; (end (plist-get target-end :begin))
+         ov)
+    (unless (= begin end)
+      (setq ov (make-overlay begin end nil t t))
+      (unless no-face
+        (overlay-put ov 'face face))
+      (overlay-put ov 'org-ilm-highlight t)
+      (overlay-put ov 'org-ilm-type type)
+      (overlay-put ov 'org-ilm-id id)
+      (overlay-put ov 'modification-hooks '(org-ilm--overlay-edit-hook))
+      (overlay-put ov 'help-echo (format "Highlight %s" id)))))
 
 (defun org-ilm-remove-overlays (&optional point-min point-max)
   ""
