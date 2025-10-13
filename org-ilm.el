@@ -812,7 +812,7 @@ wasteful if headline does not match query."
          :schedrel (when scheduled ; convert from sec to days
                      (/ (ts-diff now scheduled) 86400))
          :type type
-         :registry (org-element-property :REGISTRY headline)
+         :registry (org-mem-entry-property-with-inheritance "REGISTRY" (org-node-at-point))
          ;; cdr to get rid of headline priority in the car - redundant
          :subjects (cdr subjects)
          :prelative (cdr priority)
@@ -897,7 +897,7 @@ wasteful if headline does not match query."
          (entry (org-mem-entry-by-id id))
          (registry-id (org-ilm-element-registry element))
          (registry-entry (org-mem-entry-by-id registry-id)))
-    (unless media (setq media (org-mem-entry-property "ILM_MEDIA" entry)))
+    (unless media (setq media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry)))
     
     (if media
         ;; Media property set explicitely: return it
