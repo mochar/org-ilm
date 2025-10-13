@@ -3695,6 +3695,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (list :entry (org-mem-entry-by-id (transient-arg-value "--entry=" args))
         :attachment (transient-arg-value "--attachment=" args)
         :method (transient-arg-value "--method=" args)
+        :media (transient-arg-value "--media=" args)
         :collection org-ilm--active-collection))
 
 (defun org-ilm--import-registry-attachments (entry)
@@ -3739,6 +3740,16 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
     (let* ((entry (plist-get (org-ilm--import-registry-transient-args) :entry)))
       (org-ilm--import-registry-read-attachment entry))))
 
+(transient-define-infix org-ilm--import-registry-transient-media ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--media="
+  :reader
+  (lambda (prompt initial-input history)
+    (let* ((args (org-ilm--import-registry-transient-args))
+           (sources (org-ilm--entry-media-sources (plist-get args :entry))))
+      (completing-read "Media: " sources))))
+
 (transient-define-prefix org-ilm--import-registry-transient ()
   :refresh-suffixes t
   :value
@@ -3780,17 +3791,33 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
             (entry (plist-get args :entry)))
        (not (and entry (org-ilm--import-registry-attachments entry)))))
    ("a" "Attachment" org-ilm--import-registry-transient-attachment)
-   ("m" "Method of attachment" "--method="
+   ("M" "Method of attachment" "--method="
     :allow-empty nil :transient transient--do-call
     :choices (mv cp ln lns) :prompt "Method of attachment: ")]
+
+  ["Media"
+   ("m" "Media" org-ilm--import-registry-transient-media)
+   ]
   
   [
    [("RET" "Import"
      (lambda ()
        (interactive)
-       (cl-destructuring-bind (&key collection entry attachment method)
+       (cl-destructuring-bind (&key collection entry attachment method media)
            (org-ilm--import-registry-transient-args)
-         (org-ilm-import-registry collection entry attachment (when method (intern method)))))
+         (org-ilm--capture
+          'source
+          collection
+          (list :file attachment
+                :content (when (and (not attachment) media) "")
+                :method (or (when method (intern method)) 'cp)
+                :ext (when attachment t)
+                :title (org-mem-entry-title entry)
+                :props
+                (append
+                 (list :REGISTRY (org-mem-entry-id entry))
+                 (when media (list :ILM_MEDIA media))
+                 )))))
      :inapt-if
      (lambda ()
        (let ((args (org-ilm--import-registry-transient-args (transient-get-value))))
