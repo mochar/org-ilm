@@ -1,0 +1,21 @@
+* Incremental learning in Emacs org-mode
+
+This Emacs package implements [[https://supermemo.guru/wiki/Incremental_reading][incremental reading]] (+ watching/listening/writing).
+
+** Dependencies
+
+Emacs packages:
+- [[https://github.com/meedstrom/org-node][Org-node/org-mem]] to cache the nodes for quick access
+- [[https://github.com/bohonghuang/org-srs][Org-srs]] for flashcards
+- [[https://github.com/yuchen-lea/org-media-note][Org-media-note]] for video/audio elements
+- [[https://github.com/vedang/pdf-tools][PDF-tools]] for PDF elements
+- [[https://github.com/mpedramfar/zotra][Zotra]] to retrieve citation data
+
+External:
+- [[https://github.com/Y2Z/monolith][Monolith]] to save webpages as single HTML files
+- [[https://github.com/kepano/defuddle][Defuddle]] to extract main content from webpages
+- [[https://pandoc.org/][Pandoc]] to convert between formats
+- [[https://github.com/yt-dlp/yt-dlp][Yt-dlp]] to download videos and subtitles
+- [[https://github.com/datalab-to/marker][Marker]] to convert PDF files to Markdown 
+
+Thanks to all for the developers for the tools on which I rely on daily.
