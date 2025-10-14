@@ -830,6 +830,16 @@ wasteful if headline does not match query."
 (defun org-ilm-element-entry (element)
   (org-mem-entry-by-id (org-ilm-element-id element)))
 
+(defmacro org-ilm-element-with-point-at (element &rest body)
+  (declare (debug (body)) (indent 1))
+  `(org-ilm--org-with-point-at (org-ilm-element-id ,element)
+     ,@body))
+
+(defmacro org-ilm-element-with-point-at-registry (element &rest body)
+  (declare (debug (body)) (indent 1))
+  `(org-ilm--org-with-point-at (org-ilm-element-registry ,element)
+     ,@body))
+
 (defun org-ilm-element-is-card (element)
   (cl-assert (org-ilm-element-p element))
   (eq 'card (org-ilm-element-type element)))
@@ -1017,6 +1027,56 @@ If `HEADLINE' is passed, read it as org-property."
   (call-interactively #'org-ilm-element-set-priority)
   (setq org-ilm--element-transient-element (org-ilm-element-from-context)))
 
+(defun org-ilm--element-transient-registry-attach-read ()
+  (org-ilm-element-with-point-at-registry
+      org-ilm--element-transient-element
+    (when-let* ((attach-dir (org-attach-dir))
+                (attachments (org-attach-file-list attach-dir)))
+      (completing-read "Attachment: " attachments nil t))))
+
+(transient-define-infix org-ilm--element-transient-registry-attach-attachment ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :argument "--attachment="
+  :reader
+  (lambda (prompt initial-input history)
+    (org-ilm--element-transient-registry-attach-read)))
+
+(transient-define-prefix org-ilm--element-transient-registry-attach ()
+  :refresh-suffixes t
+  :value
+  (lambda ()
+    (append
+     (list "--method=lns" "--main")
+     (when-let ((attachment (org-ilm--element-transient-registry-attach-read)))
+       (list (concat "--attachment=" attachment)))))
+  
+  ["Attach from registry"
+   ("a" "Attachment" org-ilm--element-transient-registry-attach-attachment)
+   ("m" "Method" "--method=" :choices ("cp" "mv" "ln" "lns") :always-read t)
+   ("M" "Main attachment (use id)" "--main")
+   ("RET" "Attach"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (attachment (transient-arg-value "--attachment=" args))
+             (attach-dir (org-ilm-element-with-point-at-registry
+                             org-ilm--element-transient-element
+                           (org-attach-dir)))
+             (method (transient-arg-value "--method=" args))
+             (main (transient-arg-value "--main" args)))
+        (org-ilm-element-with-point-at org-ilm--element-transient-element
+          (org-attach-attach (expand-file-name attachment attach-dir) nil (intern method))
+          (when main
+            (let ((default-directory (org-attach-dir)))
+              (rename-file attachment
+                           (concat (org-id-get) "." (file-name-extension attachment))))))))
+    :inapt-if-not
+    (lambda ()
+      (transient-arg-value "--attachment=" (transient-get-value))))
+   ]
+  )
+
 (transient-define-prefix org-ilm--element-transient ()
   :refresh-suffixes t
   [:description
@@ -1027,30 +1087,16 @@ If `HEADLINE' is passed, read it as org-property."
 
   ["Registry"
    :if (lambda () (org-ilm-element-registry org-ilm--element-transient-element))
-   ("rj" "Jump"
+   ("gj" "Jump"
     (lambda ()
       (interactive)
       (org-node-goto-id (org-ilm-element-registry org-ilm--element-transient-element))))
-   ("ra" "Attach"
-    (lambda ()
-      (interactive)
-      (org-ilm--org-with-point-at
-          (org-ilm-element-registry org-ilm--element-transient-element)
-        (if-let* ((registry-attach-dir (org-attach-dir))
-                  (attachments (org-attach-file-list registry-attach-dir))
-                  (attachment (expand-file-name
-                               (completing-read "Attachment: " attachments nil t)
-                               registry-attach-dir))
-                  (method (intern (completing-read "Method: " '(cp mv ln lns) nil t))))
-            (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
-              (org-attach-attach attachment nil method))
-          (message "No attachments"))))
+   ("ga" "Attach..." org-ilm--element-transient-registry-attach
     :inapt-if-not
     (lambda ()
       (org-ilm--org-with-point-at
           (org-ilm-element-registry org-ilm--element-transient-element)
-        (org-attach-dir)))
-    :transient t)
+        (org-attach-dir))))
    ]
 
   ["Media"
