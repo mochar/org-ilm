@@ -805,7 +805,7 @@ wasteful if headline does not match query."
                      (/ (ts-diff now scheduled) 86400))
          :type type
          :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
-         :media (org-ilm--element-media-compile entry)
+         :media (org-ilm--media-compile entry)
          ;; cdr to get rid of headline priority in the car - redundant
          :subjects (cdr subjects)
          :prelative (cdr priority)
@@ -883,45 +883,6 @@ wasteful if headline does not match query."
                   if-matches-query
                   t))
           (org-ilm-element-at-point))))))
-
-;;;;; Media
-
-(defun org-ilm--element-source-recover (source element-id &optional registry-id)
-  (cond-let*
-    ((org-url-p source) source)
-    ([attach-dir (mapcan
-                  (lambda (id)
-                    (when id 
-                      (org-ilm--org-with-point-at id
-                        (when-let ((attach-dir (org-attach-dir)))
-                          (when (member source (org-attach-file-list attach-dir))
-                            attach-dir)))))
-                  (list element-id registry-id))]
-     (expand-file-name source attach-dir))))
-
-(defun org-ilm--element-media-parse (media)
-  (org-media-note--split-link media))
-
-(defun org-ilm--element-media-compile (entry)
-  (let ((media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry))
-        (media2 (org-mem-entry-property-with-inheritance "ILM_MEDIA+" entry)))
-    (when media
-      (cl-destructuring-bind (source start end) (org-ilm--element-media-parse media)
-        (cl-destructuring-bind (start2 end2) (or (ignore-errors (split-string media2 "-"))
-                                                 '(nil nil))
-          (setq start (or start2 start)
-                end (if start2 end2 end))
-          (concat source (when start (concat "#" start (when end (concat "-" end))))))))))
-
-(defun org-ilm--element-media-open (&optional entry)
-  (when-let* ((entry (or entry (org-node-at-point)))
-              (media (org-ilm--element-media-compile entry)))
-    (cl-destructuring-bind (source start end)
-        (org-ilm--element-media-parse media)
-      (setq source (org-ilm--element-source-recover
-                    source (org-mem-entry-id entry)
-                    (org-mem-entry-property-with-inheritance "REGISTRY" entry)))
-      (org-media-note--follow-link source start end))))
 
 ;;;;; Logbook
 
@@ -1136,7 +1097,7 @@ If `HEADLINE' is passed, read it as org-property."
     ("mo" "Open"
      (lambda ()
        (interactive)
-       (org-ilm--element-media-open
+       (org-ilm--media-open
         (org-ilm-element-entry org-ilm--element-transient-element)))
      :if (lambda () (org-ilm-element-media org-ilm--element-transient-element)))
     ("mr" "Range"
@@ -1144,7 +1105,7 @@ If `HEADLINE' is passed, read it as org-property."
        (interactive)
        (let* ((element org-ilm--element-transient-element)
               (entry (org-ilm-element-entry element))
-              (parts (org-ilm--element-media-parse (org-ilm--element-media-compile entry)))
+              (parts (org-ilm--media-parse (org-ilm--media-compile entry)))
               (range (read-string "Range: "
                                   (when (stringp (nth 1 parts))
                                     (if (stringp (nth 2 parts))
@@ -1393,22 +1354,10 @@ Will become an attachment Org file that is the child heading of current entry."
            (entry (org-mem-entry-by-id attach-org-id))
            props)
 
-      ;; If the element has media, then extract the first and last timers as
-      ;; start and end points.
-      ;; TODO too fragile. should at the very least check in org-media-note org links
+      ;; If the element has media, then extract time.
       (when (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry)
-        (let (start end)
-          (with-temp-buffer
-            (insert region-text)
-            (goto-char (point-min))
-            (when (re-search-forward org-timer-re nil t)
-              (setq start (match-string 0))
-              (delete-region (point-min) (point)))
-            (goto-char (point-max))
-            (when (re-search-backward org-timer-re nil t)
-              (setq end (match-string 0))))
-          (when start
-            (setf (plist-get props :ILM_MEDIA+) (if end (concat start "-" end) start)))))
+        (when-let ((timer (org-ilm--media-extract-range region-text)))
+          (setf (plist-get props :ILM_MEDIA+) timer)))
           
       (org-ilm--capture
        'extract
@@ -1528,6 +1477,62 @@ command."
         (org-end-of-subtree t)
         (insert "\n")
         (org-ilm-org-extract nil :title title :dont-update-priority t)))))
+
+;;;; Media attachment
+
+;; Media attachments are actually just org attachmnets with a ILM_MEDIA property.
+
+(defun org-ilm--source-recover (source element-id &optional registry-id)
+  (cond-let*
+    ((org-url-p source) source)
+    ([attach-dir (mapcan
+                  (lambda (id)
+                    (when id 
+                      (org-ilm--org-with-point-at id
+                        (when-let ((attach-dir (org-attach-dir)))
+                          (when (member source (org-attach-file-list attach-dir))
+                            attach-dir)))))
+                  (list element-id registry-id))]
+     (expand-file-name source attach-dir))))
+
+(defun org-ilm--media-parse (media)
+  (org-media-note--split-link media))
+
+(defun org-ilm--media-compile (entry)
+  (let ((media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry))
+        (media2 (org-mem-entry-property-with-inheritance "ILM_MEDIA+" entry)))
+    (when media
+      (cl-destructuring-bind (source start end) (org-ilm--media-parse media)
+        (cl-destructuring-bind (start2 end2) (or (ignore-errors (split-string media2 "-"))
+                                                 '(nil nil))
+          (setq start (or start2 start)
+                end (if start2 end2 end))
+          (concat source (when start (concat "#" start (when end (concat "-" end))))))))))
+
+(defun org-ilm--media-open (&optional entry)
+  (when-let* ((entry (or entry (org-node-at-point)))
+              (media (org-ilm--media-compile entry)))
+    (cl-destructuring-bind (source start end)
+        (org-ilm--media-parse media)
+      (setq source (org-ilm--source-recover
+                    source (org-mem-entry-id entry)
+                    (org-mem-entry-property-with-inheritance "REGISTRY" entry)))
+      (org-media-note--follow-link source start end))))
+
+;; TODO too fragile. should at the very least check in org-media-note org links
+(defun org-ilm--media-extract-range (text)
+  "Extract the first and last timers in TEXT as start and end points."
+  (let (start end)
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (when (re-search-forward org-timer-re nil t)
+        (setq start (match-string-no-properties 0))
+        (delete-region (point-min) (point)))
+      (goto-char (point-max))
+      (when (re-search-backward org-timer-re nil t)
+        (setq end (match-string-no-properties 0))))
+    (when start (if end (concat start "-" end) start))))
 
 
 ;;;; PDF attachment
@@ -2517,7 +2522,7 @@ This is used to keep track of changes in priority and scheduling.")
      (if-let ((buf (get-file-buffer path)))
          (switch-to-buffer buf)
        ;; If media type, open the media file with org-media-note.
-       (org-ilm--element-media-open)
+       (org-ilm--media-open)
        ;; Open org file
        (run-hook-with-args 'org-attach-open-hook path)
        (find-file path)))
