@@ -3039,14 +3039,12 @@ If the queue has a query, run it again. Else re-parse elements."
                     (org-ilm-queue--set-active-buffer nil)))
                 nil 'local)
 
-      ;; Update queue buffer header to reflect state
-      (add-hook 'org-ilm-queue-active-buffer-change-hook
-                #'org-ilm-queue--set-header nil 'local)
-
-      ;; Refresh when queue popped during review
+      ;; Refresh when queue during changes that effect queue
       (add-hook 'org-ilm-review-next-hook
                 #'org-ilm-queue-revert nil t)
       (add-hook 'org-ilm-review-quit-hook
+                #'org-ilm-queue-revert nil t)
+      (add-hook 'org-ilm-queue-active-buffer-change-hook
                 #'org-ilm-queue-revert nil t)
       
       (org-ilm--queue-buffer-build :buffer buffer :switch-p switch-p)
@@ -3080,7 +3078,15 @@ If the queue has a query, run it again. Else re-parse elements."
 (defun org-ilm-queue--set-active-buffer (buffer)
   (cl-assert (or (null buffer) (org-ilm--queue-buffer-p buffer)))
   (setq org-ilm-queue-active-buffer buffer)
-  (run-hooks 'org-ilm-queue-active-buffer-change-hook))
+  (run-hooks 'org-ilm-queue-active-buffer-change-hook)
+  buffer)
+
+(defun org-ilm--queue-select-active-buffer ()
+  (when-let ((buffers (org-ilm--queue-buffers)))
+    (org-ilm-queue--set-active-buffer
+     (if (= (length buffers) 1)
+         (car buffers)
+       (completing-read "Set active queue buffer: " buffers nil t)))))
 
 (defun org-ilm--queue-buffer-current ()
   "Return the current queue buffer.
@@ -4757,7 +4763,8 @@ during review."
   (when queue-buffer
     (org-ilm-queue--set-active-buffer queue-buffer))
 
-  (unless org-ilm-queue-active-buffer
+  (unless (or org-ilm-queue-active-buffer
+              (org-ilm--queue-select-active-buffer))
     ;; TODO let user choose inactive one and make it active
     (user-error "No active queue buffer!"))
 
