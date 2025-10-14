@@ -833,9 +833,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
                   (org-id (org-id-get))
                   (attach-dir (org-attach-dir-get-create)))
 
-        ;; HTML 
-        (when-let ((_ (transient-arg-value "--html-download" (transient-get-value)))
-                   (title (if (eq type 'url)
+        ;; HTML
+        (when-let ((title (if (eq type 'url)
                               (if-let ((title (mochar-utils--get-page-title source)))
                                   (mochar-utils--slugify-title title)
                                 org-id)

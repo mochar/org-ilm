@@ -472,8 +472,8 @@ org-capture template properties."
                  (lambda ()
                    (if org-note-abort
                        nil
-                     (org-mem-reset)
-                     (org-mem-await nil 5)
+
+                     (mochar-utils--org-mem-update-cache-after-capture 'entry)
 
                      (pcase-let ((`(,begin ,end) (plist-get data :region)))
                        (when (and begin end (yes-or-no-p "Replace with registry link? "))

@@ -825,6 +825,9 @@ wasteful if headline does not match query."
          (error nil)))
       ('attachment
        (org-ilm--org-with-point-at (nth 1 location)
+         (org-ilm-element-at-point)))
+      ('queue
+       (org-ilm--org-with-point-at (nth 2 location)
          (org-ilm-element-at-point))))))
 
 (defun org-ilm-element-entry (element)
@@ -1173,13 +1176,6 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
-;; TODO this doesnt properly take care of inherited properties
-(defun org-ilm--capture-update-org-mem ()
-  (with-current-buffer (marker-buffer org-capture-last-stored-marker)
-    (save-excursion
-      (goto-char (marker-position org-capture-last-stored-marker))
-      (org-mem-updater-ensure-id-node-at-point-known))))
-
 (defun org-ilm--capture (type target data &optional on-success on-abort &rest capture-args)
   "Make an org capture to make a new source heading, extract, or card.
 
@@ -1240,7 +1236,7 @@ The callback ON-ABORT is called when capture is cancelled."
                 (when on-abort
                   (funcall on-abort))
               (when org-ilm-update-org-mem-after-capture
-                (org-ilm--capture-update-org-mem))
+                (mochar-utils--org-mem-update-cache-after-capture 'entry))
               (when on-success
                 (funcall on-success attach-dir))))))
 

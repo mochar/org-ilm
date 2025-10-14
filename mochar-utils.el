@@ -128,6 +128,18 @@ save-excursion."
 (defun mochar-utils--org-mem-website-refs (&optional entry)
   (mochar-utils--org-mem-refs entry '("http" "https")))
 
+;; TODO this doesnt properly take care of inherited properties
+(defun mochar-utils--org-mem-update-cache-after-capture (extent)
+  (with-current-buffer (marker-buffer org-capture-last-stored-marker)
+    (pcase extent
+      ('file
+       (org-mem-updater-ensure-buffer-file-known))
+      ('entry
+       (save-excursion
+         (goto-char (marker-position org-capture-last-stored-marker))
+         (org-mem-updater-ensure-id-node-at-point-known)))
+      (_ (error "EXTENT must be one of 'file or 'entry")))))
+
 ;;;; Web
 
 (defun mochar-utils--get-page-title (url &optional slugify)
