@@ -129,6 +129,7 @@ save-excursion."
   (mochar-utils--org-mem-refs entry '("http" "https")))
 
 ;; TODO this doesnt properly take care of inherited properties
+;; https://github.com/meedstrom/org-mem/issues/31
 (defun mochar-utils--org-mem-update-cache-after-capture (extent)
   (with-current-buffer (marker-buffer org-capture-last-stored-marker)
     (pcase extent

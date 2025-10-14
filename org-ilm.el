@@ -1071,9 +1071,11 @@ If `HEADLINE' is passed, read it as org-property."
         (org-ilm-element-with-point-at org-ilm--element-transient-element
           (org-attach-attach (expand-file-name attachment attach-dir) nil (intern method))
           (when main
-            (let ((default-directory (org-attach-dir)))
-              (rename-file attachment
-                           (concat (org-id-get) "." (file-name-extension attachment))))))))
+            (rename-file
+             (expand-file-name attachment (org-attach-dir))
+             (expand-file-name 
+              (concat (org-id-get) "." (file-name-extension attachment))
+              (org-attach-dir)))))))
     :inapt-if-not
     (lambda ()
       (transient-arg-value "--attachment=" (transient-get-value))))
