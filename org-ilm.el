@@ -753,7 +753,7 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
   id state level pcookie rawval title tags sched schedrel
-  type subjects prelative psample pbeta registry)
+  type subjects prelative psample pbeta registry media)
 
 (defun org-ilm-element-at-point ()
   "Parse org-ilm data of headline at point.
@@ -784,7 +784,8 @@ wasteful if headline does not match query."
                           (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
                         (when-let ((s (org-element-property :scheduled headline)))
                           (ts-parse-org-element s))))
-           (now (ts-now)))
+           (now (ts-now))
+           (entry (org-node-at-point)))
       
       (when type ; non-nil only when org-ilm type
         (make-org-ilm-element
@@ -803,7 +804,8 @@ wasteful if headline does not match query."
          :schedrel (when scheduled ; convert from sec to days
                      (/ (ts-diff now scheduled) 86400))
          :type type
-         :registry (org-mem-entry-property-with-inheritance "REGISTRY" (org-node-at-point))
+         :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
+         :media (org-ilm--element-media-compile entry)
          ;; cdr to get rid of headline priority in the car - redundant
          :subjects (cdr subjects)
          :prelative (cdr priority)
@@ -824,6 +826,9 @@ wasteful if headline does not match query."
       ('attachment
        (org-ilm--org-with-point-at (nth 1 location)
          (org-ilm-element-at-point))))))
+
+(defun org-ilm-element-entry (element)
+  (org-mem-entry-by-id (org-ilm-element-id element)))
 
 (defun org-ilm-element-is-card (element)
   (cl-assert (org-ilm-element-p element))
@@ -881,52 +886,29 @@ wasteful if headline does not match query."
                   (list element-id registry-id))]
      (expand-file-name source attach-dir))))
 
-(defun org-ilm--element-media-source (&optional element media)
-  "Return the source of the media associated with ELEMENT."
-  (unless element (setq element (org-ilm-element-at-point)))
-  (let* ((id (org-ilm-element-id element))
-         (entry (org-mem-entry-by-id id))
-         (registry-id (org-ilm-element-registry element))
-         (registry-entry (org-mem-entry-by-id registry-id)))
-    (unless media (setq media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry)))
-    
-    (if media
-        ;; Media property set explicitely: return it
-        (org-ilm--element-source-recover media id registry-id)
-      ;; Media might be implicitely defined in element or registry properties or
-      ;; attachments. Find and if more than one, set explicitely in property.
-      (let* ((element-medias (org-ilm--entry-media-sources entry))
-             (registry-medias (org-ilm--entry-media-sources registry-entry))
-             (all-medias (cl-remove-duplicates
-                          (append element-medias registry-medias)
-                          :test #'equal)))
-        (cond
-         ((= (length all-medias) 1)
-          (car medias-combined))
-         ((> (length all-medias) 1)
-          (let* ((choice (consult--multi
-                          (list
-                           (list
-                            :name "Element"
-                            :narrow ?e
-                            :items element-medias
-                            :action #'message)
-                           (list
-                            :name "Registry"
-                            :narrow ?r
-                            :items registry-medias
-                            :action #'message))
-                          :require-match t
-                          :prompt "Media: "))
-                 (media (car choice)))
-            (org-ilm--org-with-point-at id
-              (org-entry-put nil "ILM_MEDIA" media)
-              (save-buffer))
-            (org-ilm--element-source-recover media id registry-id))))))))
+(defun org-ilm--element-media-parse (media)
+  (org-media-note--split-link media))
 
-(defun org-ilm--element-media-open (&optional element media)
-  (when-let* ((source (org-ilm--element-media-source element media)))
-    (org-media-note--follow-link source nil nil)))
+(defun org-ilm--element-media-compile (entry)
+  (let ((media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry))
+        (media2 (org-mem-entry-property-with-inheritance "ILM_MEDIA+" entry)))
+    (when media
+      (cl-destructuring-bind (source start end) (org-ilm--element-media-parse media)
+        (cl-destructuring-bind (start2 end2) (or (ignore-errors (split-string media2 "-"))
+                                                 '(nil nil))
+          (setq start (or start2 start)
+                end (if start2 end2 end))
+          (concat source (when start (concat "#" start (when end (concat "-" end))))))))))
+
+(defun org-ilm--element-media-open (&optional entry)
+  (when-let* ((entry (or entry (org-node-at-point)))
+              (media (org-ilm--element-media-compile entry)))
+    (cl-destructuring-bind (source start end)
+        (org-ilm--element-media-parse media)
+      (setq source (org-ilm--element-source-recover
+                    source (org-mem-entry-id entry)
+                    (org-mem-entry-property-with-inheritance "REGISTRY" entry)))
+      (org-media-note--follow-link source start end))))
 
 ;;;;; Logbook
 
@@ -1071,16 +1053,60 @@ If `HEADLINE' is passed, read it as org-property."
     :transient t)
    ]
 
-  ["Actions"
-   ("m" "Media open"
+  ["Media"
+   ("ms" "Set"
     (lambda ()
       (interactive)
-      (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
-        (org-ilm--element-media-open)))
-    :inapt-if-not
-    (lambda ()
-      (org-ilm--org-with-point-at (org-ilm-element-id org-ilm--element-transient-element)
-        (org-ilm--element-media-source))))
+      (let* ((element org-ilm--element-transient-element)
+             (id (org-ilm-element-id element))
+             (entry (org-mem-entry-by-id id))
+             (registry-entry (org-mem-entry-by-id (org-ilm-element-registry element)))
+             (element-medias (org-ilm--entry-media-sources entry))
+             (registry-medias (org-ilm--entry-media-sources registry-entry))
+             (choice (consult--multi
+                      (list
+                       (list
+                        :name "Element"
+                        :narrow ?e
+                        :items element-medias
+                        :action #'message)
+                       (list
+                        :name "Registry"
+                        :narrow ?r
+                        :items registry-medias
+                        :action #'message))
+                      :require-match t
+                      :prompt "Media: "))
+             (media (car choice)))
+        (org-ilm--org-with-point-at id
+          (org-entry-put nil "ILM_MEDIA" media)
+          (save-buffer))))
+    :transient transient--do-call)
+    ("mo" "Open"
+     (lambda ()
+       (interactive)
+       (org-ilm--element-media-open
+        (org-ilm-element-entry org-ilm--element-transient-element)))
+     :if (lambda () (org-ilm-element-media org-ilm--element-transient-element)))
+    ("mr" "Range"
+     (lambda ()
+       (interactive)
+       (let* ((element org-ilm--element-transient-element)
+              (entry (org-ilm-element-entry element))
+              (parts (org-ilm--element-media-parse (org-ilm--element-media-compile entry)))
+              (range (read-string "Range: "
+                                  (when (stringp (nth 1 parts))
+                                    (if (stringp (nth 2 parts))
+                                        (string-join (cdr parts) "-")
+                                      (nth 1 parts)))))
+              (source (car parts)))
+         (org-ilm--org-with-point-at (org-ilm-element-id element)
+           (org-entry-put nil "ILM_MEDIA+" range)
+           (save-buffer)
+           (org-mem-updater-ensure-id-node-at-point-known)
+           (setq org-ilm--element-transient-element (org-ilm-element-at-point)))))
+     :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
+     :transient transient--do-call)
    ]
   )
 
