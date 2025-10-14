@@ -1127,6 +1127,7 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
+;; TODO this doesnt properly take care of inherited properties
 (defun org-ilm--capture-update-org-mem ()
   (with-current-buffer (marker-buffer org-capture-last-stored-marker)
     (save-excursion
@@ -1183,9 +1184,7 @@ The callback ON-ABORT is called when capture is cancelled."
                 (rename-file
                  (expand-file-name (file-name-nondirectory file) attach-dir)
                  (expand-file-name (concat id "." (file-name-extension file)) attach-dir)
-                 'ok-if-already-exists)))
-            
-                ))
+                 'ok-if-already-exists)))))
          (after-finalize
           (lambda ()
             ;; Deal with success and aborted capture. This can be detected in
@@ -1346,12 +1345,31 @@ Will become an attachment Org file that is the child heading of current entry."
                            (max (- region-end 1) 0)
                          region-end))
            (region-text (org-ilm--buffer-text-process region-begin region-end))
-           (extract-org-id (org-id-new)))
+           (extract-org-id (org-id-new))
+           (entry (org-mem-entry-by-id attach-org-id))
+           props)
 
+      ;; If the element has media, then extract the first and last timers as
+      ;; start and end points.
+      ;; TODO too fragile. should at the very least check in org-media-note org links
+      (when (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry)
+        (let (start end)
+          (with-temp-buffer
+            (insert region-text)
+            (goto-char (point-min))
+            (when (re-search-forward org-timer-re nil t)
+              (setq start (match-string 0))
+              (delete-region (point-min) (point)))
+            (goto-char (point-max))
+            (when (re-search-backward org-timer-re nil t)
+              (setq end (match-string 0))))
+          (when start
+            (setf (plist-get props :ILM_MEDIA+) (if end (concat start "-" end) start)))))
+          
       (org-ilm--capture
        'extract
        file-org-id
-       (list :id extract-org-id :content region-text :title title)
+       (list :id extract-org-id :content region-text :title title :props props)
        (lambda (&rest _) ;; on-success
 
          ;; Wrap region with targets.
