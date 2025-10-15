@@ -730,6 +730,85 @@ The collections are stored in `org-ilm-collections'."
   (org-mem-entries-in-files (org-ilm--collection-files collection))))
 
 
+;;;; Priority queue
+
+(defcustom org-ilm-pqueue-data-dir
+  (expand-file-name
+   (file-name-concat (convert-standard-filename "var/") "org-ilm")
+   user-emacs-directory)
+  "The directory where the queues are stored."
+  :type 'directory
+  :group 'org-ilm)
+
+(cl-defstruct org-ilm-pqueue
+  "Priority queue."
+  collection ost)
+
+(defun org-ilm--pqueue-file (collection)
+  (expand-file-name (concat (symbol-name collection) ".el")
+                    org-ilm-pqueue-data-dir))
+
+(defun org-ilm--pqueue-read (collection)
+  (when-let ((ost (ost-read (org-ilm--pqueue-file collection))))
+    (make-org-ilm-pqueue :collection collection :ost ost)))
+
+(defun org-ilm-pqueue-write (pqueue)
+  (let ((file (org-ilm--pqueue-file (org-ilm-pqueue-collection pqueue))))
+    (make-directory (file-name-directory file) 'parents)
+    (ost-write (org-ilm-pqueue-ost pqueue) file))
+  ;; Return nil prevent printing
+  nil)
+
+(defvar org-ilm--pqueues nil
+  "Alist collection -> pqueue.")
+
+(defun org-ilm--pqueue-new (collection)
+  (let* ((ost (make-ost-tree :dynamic t))
+         (pqueue (make-org-ilm-pqueue :collection collection :ost ost))
+         ;; TODO Use org-mem instead
+         (elements (org-ilm-query-collection collection #'org-ilm-query-all)))
+    (dolist (element elements)
+      (ost-tree-insert ost 0 (org-ilm-element-id element)))
+    pqueue))
+    
+(defun org-ilm--pqueue (collection)
+  (cond-let*
+    ([pqueue (cdr (assoc collection org-ilm--pqueues))]
+     pqueue)
+    ([pqueue (org-ilm--pqueue-read collection)]
+     (setf (alist-get collection org-ilm--pqueues) pqueue))
+    (t
+     (when (yes-or-no-p (format "No priority queue found for collection \"%s\". Create a new one?" collection))
+       (let* ((pqueue (org-ilm--pqueue-new collection)))
+         (org-ilm-pqueue-write pqueue)
+         (setf (alist-get collection org-ilm--pqueues) pqueue))))))
+
+(cl-defun org-ilm-pqueue-priority (id &key pqueue collection rank quantile)
+  "Position of the ID in PQUEUE as a cons (rank . quantile).
+With RANK or QUANTILE, set the new position in the queue."
+  (cl-assert (not (and pqueue collection)))
+  (cl-assert (not (and rank quantile)))
+  (unless pqueue
+    (let ((collection (or collection (org-ilm--active-collection))))
+      (setq pqueue (org-ilm--pqueue collection))))
+  (cl-assert (org-ilm-pqueue-p pqueue))
+  (let* ((ost (org-ilm-pqueue-ost pqueue))
+         (node (ost-tree-node-by-id ost id)))
+    (if (or rank quantile)
+        (progn
+          (unless rank
+            (cl-assert (<= 0 quantile 1))
+            (setq rank (1+ (* quantile (1- (ost-tree-size ost))))))
+          (if node
+              (ost-tree-move ost id rank)
+            (ost-tree-insert ost rank id)))
+      (when node
+        (let ((node (ost-tree-node-by-id ost id))
+              (rank (ost-rank ost id))
+              (size (ost-tree-size ost)))
+          (cons rank (if (= 1 size) 0 (/ (float rank) (1- size)))))))))
+
+
 ;;;; Types
 
 ;; There are three headline types: Subjects, Incrs, and Cards.
@@ -752,7 +831,7 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
-  id state level pcookie rawval title tags sched schedrel
+  id collection state level pcookie rawval title tags sched schedrel
   type subjects prelative psample pbeta registry media)
 
 (defun org-ilm-element-at-point ()
@@ -800,6 +879,7 @@ wasteful if headline does not match query."
                  (org-element-interpret-data (org-element-property :title headline)))
 
          ;; Ilm stuff
+         :collection (car (org-ilm--collection-file (buffer-file-name (buffer-base-buffer))))
          :sched scheduled
          :schedrel (when scheduled ; convert from sec to days
                      (/ (ts-diff now scheduled) 86400))
@@ -883,6 +963,17 @@ wasteful if headline does not match query."
                   if-matches-query
                   t))
           (org-ilm-element-at-point))))))
+
+;;;;; Priority
+
+(cl-defun org-ilm-element-priority (element &key rank quantile)
+  "Position of ELEMENT in the priority queue.
+With RANK or QUANTILE, set the new position in the queue."
+  (cl-assert (not (and rank quantile)))
+  (org-ilm-pqueue-priority
+   (org-ilm-element-id element)
+   :collection (org-ilm-element-collection element)
+   :rank rank :quantile quantile))
 
 ;;;;; Logbook
 
@@ -2961,9 +3052,11 @@ See `org-ilm-attachment-transclude'."
 
 (defun org-ilm-query-collection (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
+  (unless (functionp query)
+    (setq query (cdr (assoc query org-ilm-queries))))
   (let ((files (org-ilm--collection-files collection)))
     (org-ql-select files
-      (funcall (cdr (assoc query org-ilm-queries)))
+      (funcall query)
       ;; TODO Pass as sexp so that org-ql can byte compile it
       :action #'org-ilm-element-at-point)))
 

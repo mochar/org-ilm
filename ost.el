@@ -155,6 +155,15 @@ Returns the node."
       (puthash (ost-node-id node) node (ost-tree-nodes tree)))
     (remhash id (ost-tree-nodes tree))))
 
+(defun ost-tree-move (tree node new-rank)
+  "Move NODE in dynamic TREE to NEW-RANK."
+  (cl-assert (ost-tree-dynamic tree))
+  (unless (ost-node-p node)
+    (setq node (ost-tree-node-by-id tree node)))
+  (cl-assert (ost-node-p node))
+  (ost-tree-remove tree node)
+  (ost-tree-insert tree new-rank (ost-node-id node)))
+
 ;;;; Utilities
 
 (defun ost--opposite (direction)
@@ -696,31 +705,32 @@ This assumes PARENT has already replace NODE with nil."
   nil)
 
 (defun ost-read (file)
-  (let* ((data (with-temp-buffer
-                 (insert-file-contents file)
-                 (read (current-buffer))))
-         (tree (make-ost-tree :dynamic (plist-get data :dynamic))))
+  (when (file-exists-p file)
+    (let* ((data (with-temp-buffer
+                   (insert-file-contents file)
+                   (read (current-buffer))))
+           (tree (make-ost-tree :dynamic (plist-get data :dynamic))))
 
-    ;; Pass 1: Create nodes without linking them
-    (dolist (node-data (plist-get data :nodes))
-      (cl-destructuring-bind (id key black size parent left right) node-data
-        (let ((node (make-ost-node :black black :key key :id id :size size
-                                   :left left :right right :parent parent)))
-          (puthash id node (ost-tree-nodes tree)))))
+      ;; Pass 1: Create nodes without linking them
+      (dolist (node-data (plist-get data :nodes))
+        (cl-destructuring-bind (id key black size parent left right) node-data
+          (let ((node (make-ost-node :black black :key key :id id :size size
+                                     :left left :right right :parent parent)))
+            (puthash id node (ost-tree-nodes tree)))))
 
-    ;; Pass 2: Link nodes together
-    (dolist (node-data (plist-get data :nodes))
-      (let* ((id (car node-data))
-             (node (gethash id (ost-tree-nodes tree))))
-        (setf (ost-node-left node) (gethash (ost-node-left node) (ost-tree-nodes tree))
-              (ost-node-right node) (gethash (ost-node-right node) (ost-tree-nodes tree))
-              (ost-node-parent node) (gethash (ost-node-parent node) (ost-tree-nodes tree)))))
+      ;; Pass 2: Link nodes together
+      (dolist (node-data (plist-get data :nodes))
+        (let* ((id (car node-data))
+               (node (gethash id (ost-tree-nodes tree))))
+          (setf (ost-node-left node) (gethash (ost-node-left node) (ost-tree-nodes tree))
+                (ost-node-right node) (gethash (ost-node-right node) (ost-tree-nodes tree))
+                (ost-node-parent node) (gethash (ost-node-parent node) (ost-tree-nodes tree)))))
 
-    ;; Tree root node
-    (when-let ((root-id (plist-get data :root)))
-      (setf (ost-tree-root tree) (gethash root-id (ost-tree-nodes tree))))
+      ;; Tree root node
+      (when-let ((root-id (plist-get data :root)))
+        (setf (ost-tree-root tree) (gethash root-id (ost-tree-nodes tree))))
 
-    tree))
+      tree)))
     
     
 
