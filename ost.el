@@ -157,7 +157,9 @@ Returns the node."
 
 (defun ost-tree-move (tree node new-rank)
   "Move NODE in dynamic TREE to NEW-RANK."
-  (cl-assert (ost-tree-dynamic tree))
+  (cl-assert (and (ost-tree-dynamic tree)
+                  ;; Size cannot increase when moving
+                  (<= 0 new-rank (1- (ost-tree-size tree)))))
   (unless (ost-node-p node)
     (setq node (ost-tree-node-by-id tree node)))
   (cl-assert (ost-node-p node))
