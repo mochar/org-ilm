@@ -711,6 +711,10 @@ The collections are stored in `org-ilm-collections'."
       (directory-files file-or-dir 'full "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
+(defun org-ilm--collection-single-file-p (collection)
+  "Return t if COLLECTION is a single file collection."
+  (f-file-p (alist-get collection org-ilm-collections)))
+
 (defun org-ilm--select-collection-file (collection)
   "Propmt user to select a file from COLLECTION."
   (cl-assert (assoc collection org-ilm-collections))
@@ -742,7 +746,7 @@ The collections are stored in `org-ilm-collections'."
   (expand-file-name
    (file-name-concat (convert-standard-filename "var/") "org-ilm")
    user-emacs-directory)
-  "The directory where the queues are stored."
+  "The directory where the queues are stored for single file collections."
   :type 'directory
   :group 'org-ilm)
 
@@ -752,9 +756,16 @@ The collections are stored in `org-ilm-collections'."
   "Priority queue."
   collection ost)
 
+(defun org-ilm--pqueue-dir (collection)
+  (let ((file-or-dir (alist-get collection org-ilm-collections)))
+    (if (f-file-p file-or-dir)
+        org-ilm-pqueue-data-dir
+      (let ((dir (expand-file-name ".ilm/" file-or-dir)))
+        (make-directory dir 'parents)
+        dir))))
+
 (defun org-ilm--pqueue-file (collection)
-  (expand-file-name (concat (symbol-name collection) ".el")
-                    org-ilm-pqueue-data-dir))
+  (expand-file-name "element-queue.el" (org-ilm--pqueue-dir collection)))
 
 (defun org-ilm--pqueue-read (collection)
   (when-let ((ost (ost-read (org-ilm--pqueue-file collection))))
@@ -3568,6 +3579,7 @@ If point on subject, add all headlines of subject."
   :doc "Keymap for the queue buffer."
   :parent org-ilm-queue-base-map
   "r" #'org-ilm-review-start
+  "e" #'org-ilm-element-actions
   "m" #'org-ilm-queue-object-mark
   "RET" #'org-ilm-queue-open-attachment
   "SPC" #'org-ilm-queue-open-element
