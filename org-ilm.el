@@ -3223,13 +3223,18 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 (defun org-ilm-queue--element-value (queue element)
   "Return the value of ELEMENT by which it is sorted in QUEUE."
-  (let* ((key (org-ilm-queue--key queue))
-         (getter (intern (concat "org-ilm-element-" key))))
-    (cl-assert (functionp getter))
-    (when-let ((value (funcall getter element)))
-      (cl-typecase value
-        (ts (ts-unix value))
-        (t value)))))
+  (cond-let*
+    ([key (org-ilm-queue--key queue)]
+     [getter (intern (concat "org-ilm-element-" key))]
+     (cl-assert (functionp getter))
+     (when-let ((value (funcall getter element)))
+       (cl-typecase value
+         (ts (ts-unix value))
+         (t value))))
+    ([node (ost-tree-node-by-id
+            (org-ilm-queue--ost queue)
+            (org-ilm-element-id element))]
+     (ost-node-key node))))
 
 (defun org-ilm-queue--count (queue)
   "Return the number of elements in QUEUE."
@@ -3239,12 +3244,13 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   "Return t if QUEUE is empty."
   (hash-table-empty-p (org-ilm-queue--elements queue)))
 
-(defun org-ilm-queue--insert (queue element)
+(defun org-ilm-queue--insert (queue element &optional value)
   "Insert ELEMENT in QUEUE."
   (let ((id (org-ilm-element-id element)))
     (puthash id element (org-ilm-queue--elements queue))
     (ost-tree-insert (org-ilm-queue--ost queue)
-                     (org-ilm-queue--element-value queue element)
+                     (or value
+                         (org-ilm-queue--element-value queue element))
                      id)))
 
 ;; TODO Some type of caching so that repeated selects doesnt search tree again
@@ -3910,7 +3916,10 @@ A lot of formatting code from org-ql."
             ("priority" (org-ilm--queue-sort "prank" reversed))
             ("schedule" (org-ilm--queue-sort "sched" reversed))
             (_ (user-error "Invalid key: %s" key)))
-          (org-ilm-queue-revert)))))
+          (org-ilm-queue-revert))))
+    :inapt-if-not
+    (lambda ()
+      (transient-arg-value "--key=" (transient-get-value))))
    ]
   )
 
