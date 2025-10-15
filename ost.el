@@ -511,6 +511,8 @@ nodes cannot have red children."
   "Insert new node into the tree.
 Dynamic trees require a rank, else a key."
   (cl-assert (numberp key-or-rank))
+  (when (and id (ost-tree-node-by-id tree id))
+    (error "Node with ID already exists."))
   (if (not (ost-tree-dynamic tree))
       (ost-insert-key tree key-or-rank id)
     (cl-assert id)

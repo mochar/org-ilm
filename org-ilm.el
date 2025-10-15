@@ -3226,7 +3226,10 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   (let* ((key (org-ilm-queue--key queue))
          (getter (intern (concat "org-ilm-element-" key))))
     (cl-assert (functionp getter))
-    (funcall getter element)))
+    (when-let ((value (funcall getter element)))
+      (cl-typecase value
+        (ts (ts-unix value))
+        (t value)))))
 
 (defun org-ilm-queue--count (queue)
   "Return the number of elements in QUEUE."
@@ -3335,6 +3338,16 @@ If the queue has a query, run it again. Else re-parse elements."
                      (hash-table-values (org-ilm-queue--elements org-ilm-queue))))
               queue)))
     (current-buffer)))
+
+(defun org-ilm--queue-sort (key reversed &optional buffer)
+  (org-ilm-with-queue-buffer buffer
+    (unless (string= (org-ilm-queue-key org-ilm-queue) key)
+      (setf (org-ilm-queue--ost org-ilm-queue) (make-ost-tree)
+            (org-ilm-queue--key org-ilm-queue) key)
+      (dolist (element (hash-table-values (org-ilm-queue--elements org-ilm-queue)))
+        (org-ilm-queue--insert org-ilm-queue element)))
+    (setf (org-ilm-queue--reversed org-ilm-queue) reversed)
+    org-ilm-queue))
 
 (cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
   "Create a new queue buffer."
@@ -3580,6 +3593,7 @@ If point on subject, add all headlines of subject."
   :parent org-ilm-queue-base-map
   "r" #'org-ilm-review-start
   "e" #'org-ilm-element-actions
+  "v" #'org-ilm-queue-sort
   "m" #'org-ilm-queue-object-mark
   "RET" #'org-ilm-queue-open-attachment
   "SPC" #'org-ilm-queue-open-element
@@ -3863,6 +3877,48 @@ A lot of formatting code from org-ql."
     (goto-char (point-min))
     (when switch-p
       (switch-to-buffer buffer))))
+
+;;;;;; Sort transient
+
+(defvar org-ilm--queue-transient-buffer nil)
+
+(transient-define-prefix org-ilm--queue-sort-transient ()
+  :refresh-suffixes t
+  :value
+  (lambda ()
+    (org-ilm-with-queue-buffer org-ilm--queue-transient-buffer
+      (append
+       (let ((key (org-ilm-queue-key org-ilm-queue)))
+         (pcase key
+           ("prank" '("--key=priority"))
+           ("sched" '("--key=schedule"))))
+       (when (org-ilm-queue-reversed org-ilm-queue)
+         '("--reversed"))
+       )))
+
+  ["queue sort"
+   ("k" "Key" "--key=" :choices ("priority" "schedule") :always-read t :transient t)
+   ("r" "Reversed" "--reversed" :transient t)
+   ("RET" "Sort"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (reversed (transient-arg-value "--reversed" args))
+             (key (transient-arg-value "--key=" args)))
+        (org-ilm-with-queue-buffer org-ilm--queue-transient-buffer
+          (pcase key
+            ("priority" (org-ilm--queue-sort "prank" reversed))
+            ("schedule" (org-ilm--queue-sort "sched" reversed))
+            (_ (user-error "Invalid key: %s" key)))
+          (org-ilm-queue-revert)))))
+   ]
+  )
+
+(defun org-ilm-queue-sort ()
+  (interactive)
+  (setq org-ilm--queue-transient-buffer (current-buffer))
+  (org-ilm--queue-sort-transient))
+
 
 ;;;; Import
 
