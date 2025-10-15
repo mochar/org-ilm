@@ -110,15 +110,16 @@ First orders by key, then by id."
 
 ;;;; Tree
 
-;; TODO Add slot for hashmap id -> node
-;; All operations then go through `ost-tree-{add,remove}' etc.
-;; These functions then keep the hashmap and ost in sync.
 (cl-defstruct ost-tree
   "An ordered statistic, red-black, binary search tree."
   (root
    nil
    :documentation "The root node of the tree."
    :type ost-node)
+  (dynamic
+   nil
+   :documentation "Dynamic tree nodes do not hold keys - the rank act as the key."
+   :type boolean)
   (nodes
    (make-hash-table :test #'equal)
    :documentation "Hashmap id -> node."))
@@ -131,11 +132,11 @@ First orders by key, then by id."
   "Return the node with id ID."
   (gethash id (ost-tree-nodes tree)))
 
-(defun ost-tree-insert (tree key id)
+(defun ost-tree-insert (tree key-or-rank id)
   "Insert a new node into the TREE.
 The node will be stored in the nodes slot of TREE.
 Returns the node."
-  (let ((node (ost-insert tree key id)))
+  (let ((node (ost-insert tree key-or-rank id)))
     (puthash id node (ost-tree-nodes tree))
     node))
 
@@ -177,6 +178,14 @@ Returns the node."
           (ost-print left (1+ level) 'left))
         (when-let ((right (ost-node-right node)))
           (ost-print right (1+ level) 'right))))))
+
+(defun ost--node-from (tree-or-node)
+  (if (ost-tree-p tree-or-node)
+      (ost-tree-root tree-or-node)
+    tree-or-node))
+
+(defun ost-size (tree-or-node)
+  (ost--node-size (ost--node-from tree-or-node)))
 
 ;;;; Operations
 
@@ -288,14 +297,14 @@ For now this means the 'key' and 'id' properties."
 
 ;;;; Lookup
 
-(cl-defun ost-search (tree key &optional id)
+(cl-defun ost-search (tree-or-node key &optional id)
   "Find node with KEY in TREE.
 An additional ID may be given as a tie braker in case of duplicate
 keys. Note however that when using the `ost-tree-insert' and
 `ost-tree-remove' commands, a id -> hashmap object stored in `ost-tree'
 is kept in sync with the ost, so that ID may be used to directly
 retrieve a node without search."
-  (let ((node (ost-tree-root tree)))
+  (let ((node (ost--node-from tree-or-node)))
     (while (and node
                 (or (not (= key (ost-node-key node)))
                     (and id (not (equal id (ost-node-id node))))))
@@ -338,9 +347,11 @@ INDEX is out of bounds."
       nil)))
 
 (defun ost-rank (tree node)
-  "Return the 0-based rank (index) of NODE in TREE.
+  "Return the 0-based rank (index) of NODE in TREE. NODE may also be its ID.
 The rank is its position in the in-order traversal of the tree,
 starting from 0. Requires NODE to be a node within TREE."
+  (unless (ost-node-p node)
+    (setq node (ost-tree-node-by-id tree node)))
   (cl-assert (ost-node-p node) nil "Input must be a valid node")
   ;; The rank starts as the number of nodes in its own left subtree.
   (let ((rank (ost--node-size (ost-node-left node)))
@@ -433,7 +444,7 @@ nodes cannot have red children."
   ;; Ensure root is always black
   (setf (ost-node-black (ost-tree-root tree)) t))
 
-(defun ost-insert (tree key &optional id)
+(defun ost-insert-key (tree key &optional id)
   "Insert a new node into TREE by its KEY, returns node."
   (let ((node (make-ost-node :key key :id id)))
     ;; Standard BST Insert. New node is insert as a leaf node by going down the
@@ -458,6 +469,41 @@ nodes cannot have red children."
 
       (ost--insert tree node parent direction))
     node))
+
+(defun ost-insert-rank (tree rank id)
+  "Insert new node with ID at position RANK in TREE."
+  (cl-assert (and (ost-tree-dynamic tree)
+                  (<= 0 rank (ost-size tree))))
+  (let ((node (make-ost-node :id id))
+        (direction 'left)
+        (current (ost-tree-root tree))
+        parent)
+    (while current
+      (setq parent current)
+      ;; Increment size of ancestors on the path down.
+      (cl-incf (ost-node-size current))
+
+      (let ((left-size (ost--node-size (ost-node-left current))))
+        (if (<= rank left-size)
+            ;; Target index is in the left subtree
+            (setq current (ost-node-left current)
+                  direction 'left)
+          ;; Skip left subtree + current node
+          (setq rank (- rank (1+ left-size))
+                current (ost-node-right current)
+                direction 'right))))
+    (ost--insert tree node parent direction)
+    (puthash id node (ost-tree-nodes tree))
+    node))
+
+(defun ost-insert (tree key-or-rank &optional id)
+  "Insert new node into the tree.
+Dynamic trees require a rank, else a key."
+  (cl-assert (numberp key-or-rank))
+  (if (not (ost-tree-dynamic tree))
+      (ost-insert-key tree key-or-rank id)
+    (cl-assert id)
+    (ost-insert-rank tree key-or-rank id)))
 
 ;;;; Remove
 
@@ -620,6 +666,16 @@ This assumes PARENT has already replace NODE with nil."
   (let ((tree (make-ost-tree)))
     (dolist (key keys tree)
       (ost-insert tree key key))))
+
+;;;; Storage
+
+(defun ost-write (tree-or-node file)
+  (let (ids)
+    (dotimes (i (ost-size tree-or-node))
+      (setq ids (push (ost-node-id (ost-select tree-or-node i)) ids)))
+    (with-temp-file file
+      (prin1 ids (current-buffer)))
+    nil))
 
 ;;;; Footer
 
