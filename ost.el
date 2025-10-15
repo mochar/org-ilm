@@ -669,13 +669,60 @@ This assumes PARENT has already replace NODE with nil."
 
 ;;;; Storage
 
-(defun ost-write (tree-or-node file)
-  (let (ids)
-    (dotimes (i (ost-size tree-or-node))
-      (setq ids (push (ost-node-id (ost-select tree-or-node i)) ids)))
+(defun ost-write (tree file)
+  (let (nodes)
+    (maphash
+     (lambda (id node)
+       (let* ((parent (ost-node-parent node))
+              (left (ost-node-left node))
+              (right (ost-node-right node)))
+         (push (list id
+                     (ost-node-key node)
+                     (ost-node-black node)
+                     (ost-node-size node)
+                     (when parent (ost-node-id parent))
+                     (when left (ost-node-id left))
+                     (when right (ost-node-id right)))
+               nodes)))
+     (ost-tree-nodes tree))
     (with-temp-file file
-      (prin1 ids (current-buffer)))
-    nil))
+      (let* ((print-level nil)
+             (print-length nil)
+             (root (ost-tree-root tree))
+             (data (list :root (when root (ost-node-id root))
+                         :dynamic (ost-tree-dynamic tree)
+                         :nodes nodes)))
+        (prin1 data (current-buffer)))))
+  nil)
+
+(defun ost-read (file)
+  (let* ((data (with-temp-buffer
+                 (insert-file-contents file)
+                 (read (current-buffer))))
+         (tree (make-ost-tree :dynamic (plist-get data :dynamic))))
+
+    ;; Pass 1: Create nodes without linking them
+    (dolist (node-data (plist-get data :nodes))
+      (cl-destructuring-bind (id key black size parent left right) node-data
+        (let ((node (make-ost-node :black black :key key :id id :size size
+                                   :left left :right right :parent parent)))
+          (puthash id node (ost-tree-nodes tree)))))
+
+    ;; Pass 2: Link nodes together
+    (dolist (node-data (plist-get data :nodes))
+      (let* ((id (car node-data))
+             (node (gethash id (ost-tree-nodes tree))))
+        (setf (ost-node-left node) (gethash (ost-node-left node) (ost-tree-nodes tree))
+              (ost-node-right node) (gethash (ost-node-right node) (ost-tree-nodes tree))
+              (ost-node-parent node) (gethash (ost-node-parent node) (ost-tree-nodes tree)))))
+
+    ;; Tree root node
+    (when-let ((root-id (plist-get data :root)))
+      (setf (ost-tree-root tree) (gethash root-id (ost-tree-nodes tree))))
+
+    tree))
+    
+    
 
 ;;;; Footer
 
