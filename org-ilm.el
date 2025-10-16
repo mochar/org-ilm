@@ -1305,6 +1305,18 @@ If `HEADLINE' is passed, read it as org-property."
            (setq org-ilm--element-transient-element (org-ilm-element-at-point)))))
      :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
      :transient transient--do-call)
+    ]
+
+  ["Open"
+   ("SPC" "Collection"
+    (lambda ()
+      (interactive)
+      (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
+   ("RET" "Attachment"
+    (lambda ()
+      (interactive)
+      (org-ilm-element-with-point-at org-ilm--element-transient-element
+        (org-ilm-open-attachment))))
    ]
   )
 
