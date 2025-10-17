@@ -1203,7 +1203,7 @@ If `HEADLINE' is passed, read it as org-property."
   "Set the schedule of an ilm element."
   (interactive
    (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (org-ilm--org-with-point-at (org-ilm-element-id element)
+  (org-ilm-element-with-point-at element
     (call-interactively #'org-ilm-schedule)))
 
 (defun org-ilm-element-set-priority--cookie (element)
@@ -3720,6 +3720,7 @@ If point on subject, add all headlines of subject."
   "SPC" #'org-ilm-queue-open-element
   "P" #'org-ilm-queue-set-priority
   "N" #'org-ilm-queue-set-position
+  "S" #'org-ilm-queue-set-schedule
   "M j" #'org-ilm-queue-mark-by-subject
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
@@ -3973,7 +3974,8 @@ A lot of formatting code from org-ql."
                 (when (nth 0 subjects)
                   (mapcar (lambda (s) (org-mem-entry-by-id (car s)))
                           (last (nth 0 subjects) (nth 1 subjects)))))))))
-   :keymap (or keymap org-ilm-queue-map)))
+   :keymap (or keymap org-ilm-queue-map)
+   :actions '("S" ignore)))
 
 (defun org-ilm--queue-eldoc-show-info ()
   "Return info about the element at point in the queue buffer."
@@ -4022,6 +4024,34 @@ A lot of formatting code from org-ql."
      (org-ilm-element-id (org-ilm-element-from-context))
      (car (org-ilm--queue-select-read org-ilm-queue))))
   (org-ilm-queue-revert))
+
+(defun org-ilm-queue-set-schedule ()
+  (interactive)
+  (let ((elements (org-ilm-queue--elements org-ilm-queue)))
+    (if org-ilm--queue-marked-objects
+        (let ((start-ts (ts-parse (org-read-date nil nil nil "Start date: ")))
+              end-ts)
+          (while (not end-ts)
+            (let ((ts (ts-parse (org-read-date nil nil nil "End date: "))))
+              (if (ts>= ts start-ts)
+                  (setq end-ts ts)
+                (message "End date must be after start date")
+                (sleep-for 1))))
+          (dolist (id org-ilm--queue-marked-objects)
+            (org-ilm--org-with-point-at id
+              (let* ((diff-days (plist-get
+                                 (ts-human-duration
+                                  (ts-difference end-ts start-ts))
+                                 :days))
+                     (rand-interval (random (1+ diff-days)))
+                     (ts (ts-adjust 'day rand-interval start-ts))
+                     (date (ts-format "%Y-%m-%d" ts)))
+                (org-ilm-schedule (org-ilm-element-at-point) date)
+                (puthash id (org-ilm-element-at-point) elements)))))
+      (org-ilm-element-set-schedule (org-ilm-element-from-context))
+      (let ((element (org-ilm-element-from-context)))
+        (puthash (org-ilm-element-id element) element elements)))
+    (org-ilm-queue-revert)))
 
 ;;;;; Sort transient
 
