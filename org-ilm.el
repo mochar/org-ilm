@@ -1218,8 +1218,8 @@ If `HEADLINE' is passed, read it as org-property."
   "Set the priority of an ilm element."
   (interactive
    (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (let ((rank (org-ilm-pqueue-read-rank (org-ilm-element-id element))))
-    (org-ilm-element-priority element :rank rank)))
+  (let ((position (org-ilm-pqueue-select (org-ilm-element-priority element))))
+    (org-ilm-element-priority element :rank (car position))))
 
 ;;;;; Transient
 
@@ -3691,7 +3691,7 @@ If point on subject, add all headlines of subject."
   "m" #'org-ilm-queue-object-mark
   "RET" #'org-ilm-queue-open-attachment
   "SPC" #'org-ilm-queue-open-element
-  "P" #'org-ilm-queue-spread-priority
+  "P" #'org-ilm-queue-set-priority
   "M j" #'org-ilm-queue-mark-by-subject
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
@@ -3975,6 +3975,16 @@ A lot of formatting code from org-ql."
 
 (defvar org-ilm--queue-transient-buffer nil)
 
+;;;;; Actions
+
+(defun org-ilm-queue-set-priority ()
+  "Set the priority of the element at point, or bulk spread of marked elements."
+  (interactive)
+  (if org-ilm--queue-marked-objects
+      (org-ilm-queue-spread-priority)
+    (org-ilm-element-set-priority (org-ilm-element-from-context)))
+  (org-ilm-queue-revert))
+
 ;;;;; Sort transient
 
 (transient-define-prefix org-ilm--queue-sort-transient ()
@@ -4105,7 +4115,8 @@ A lot of formatting code from org-ql."
                                        (* (/ (float j) (max 1 (1- size)))
                                           (- max-rank min-rank))))))
               (cons id new-rank)))
-          (number-sequence 0 (1- size))))))
+          (number-sequence 0 (1- size))))
+        (org-ilm-queue-revert)))
     :inapt-if-not
     (lambda ()
       (let ((args (transient-get-value)))
@@ -4143,13 +4154,15 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm--queue-select-update (rank)
   "Update preview buffer based on minibuffer INPUT."
-  (with-current-buffer org-ilm--queue-select-buffer
-    (setq header-line-format
-          (org-ilm--ost-format-position org-ilm-queue rank))
-    (with-selected-window (get-buffer-window)
-      (goto-line (1+ rank))
-      (hl-line-highlight)
-      (recenter-top-bottom))))
+  (when (buffer-live-p org-ilm--queue-select-buffer)
+    (with-current-buffer org-ilm--queue-select-buffer
+      (setq header-line-format
+            (concat "Select position: "
+                    (org-ilm--ost-format-position org-ilm-queue rank)))
+      (with-selected-window (get-buffer-window)
+        (goto-line (1+ rank))
+        (hl-line-highlight)
+        (recenter-top-bottom)))))
 
 (defun org-ilm--queue-select-update-minibuffer ()
   (with-current-buffer org-ilm--queue-select-buffer
