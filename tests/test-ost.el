@@ -308,5 +308,38 @@ Returns t if the tree is valid, nil otherwise."
        (expect (ost-node-id n1) :to-be 4)
        (expect (gethash 3 (ost-tree-nodes tree)) :to-be nil)
        (expect (ost-node-key (gethash 4 (ost-tree-nodes tree))) :to-equal 4)))
+
+ (it "dynamic tree correct rank"
+     (let* ((tree (make-ost-tree :dynamic t)))
+
+       ;; Order: 2 1 0
+       (dotimes (i 3)
+         (ost-tree-insert tree 0 (number-to-string i)))
+       (expect (ost-rank tree "2") :to-equal 0)
+
+       ;; Order: 1 0 2
+       (ost-tree-move tree "2" 2)
+       (expect (ost-rank tree "1") :to-equal 0)
+       (expect (ost-rank tree "0") :to-equal 1)
+       (expect (ost-rank tree "2") :to-equal 2)
+       )
+
+     (let* ((tree (make-ost-tree :dynamic t))
+            (_ (ost-insert tree 0 "_"))
+            (q (ost-insert tree 1 "q"))
+            (l (ost-insert tree 2 "l"))
+            (z (ost-insert tree 3 "z"))
+            (y (ost-insert tree 4 "y"))
+            (x (ost-insert tree 5 "x")))
+       ;; (expect (ost-remove tree z) :to-equal 'swap)
+
+       (ost-tree-move tree z 5)
+       (ost-tree-move tree l 4)
+       (expect (ost-rank tree "z") :to-equal 5)
+       (expect (ost-rank tree "l") :to-equal 4)
+
+       )
+
+     )
  )
               

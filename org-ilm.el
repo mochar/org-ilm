@@ -757,7 +757,8 @@ The collections are stored in `org-ilm-collections'."
   collection ost)
 
 (defun org-ilm--pqueue-dir (collection)
-  (let ((file-or-dir (alist-get collection org-ilm-collections)))
+  "Return the directory path where the queue of COLLECTION is stored."
+  (when-let ((file-or-dir (alist-get collection org-ilm-collections)))
     (if (f-file-p file-or-dir)
         org-ilm-pqueue-data-dir
       (let ((dir (expand-file-name ".ilm/" file-or-dir)))
@@ -771,6 +772,8 @@ The collections are stored in `org-ilm-collections'."
   (when-let ((ost (ost-read (org-ilm--pqueue-file collection))))
     (make-org-ilm-pqueue :collection collection :ost ost)))
 
+;; TODO Schedule for write in background process
+;; If new scheduled, old one cancelled. Use org-mem thing?
 (defun org-ilm-pqueue--write (pqueue)
   (let ((file (org-ilm--pqueue-file (org-ilm-pqueue--collection pqueue))))
     (make-directory (file-name-directory file) 'parents)
@@ -779,15 +782,89 @@ The collections are stored in `org-ilm-collections'."
   nil)
 
 (defun org-ilm-pqueue--insert (pqueue id rank)
+  "Insert element with ID in PQUEUE with RANK."
   (ost-tree-insert (org-ilm-pqueue--ost pqueue) rank id)
   (org-ilm-pqueue--write pqueue))
 
 (defun org-ilm-pqueue--move (pqueue id new-rank)
+  "Move element ID in PQUEUE to NEW-RANK."
   (ost-tree-move (org-ilm-pqueue--ost pqueue) id new-rank)
   (org-ilm-pqueue--write pqueue))
 
+(defun org-ilm-pqueue--move-many (pqueue id->new-rank &optional dont-sort)
+  "Move many elements in PQUEUE to a new rank.
+
+Alist ID->NEW-RANK maps element id to new rank.
+
+DONT-SORT turns off sorting by rank, which is necessary to preserve
+requested ranks, as moving around previous elements will shift elements
+in queue.
+
+Note that if the same new rank is specified for different elements, only
+the last element with the same rank will have the new rank."
+  (unless dont-sort
+    (setq id->new-rank (sort id->new-rank :lessp #'> :key #'cdr)))
+  (let ((ost (org-ilm-pqueue--ost pqueue)))
+    (dolist (id-newrank id->new-rank)
+      (ost-tree-move ost (car id-newrank) (cdr id-newrank)))
+    (org-ilm-pqueue--write pqueue)))
+
 (defun org-ilm-pqueue--count (pqueue)
+  "Return number of elements in PQUEUE."
   (ost-size (org-ilm-pqueue--ost pqueue)))
+
+(defun org-ilm-pqueue--contains-p (pqueue id)
+  "Return ID if it is in QUEUE."
+  (when (ost-tree-node-by-id (org-ilm-pqueue--ost pqueue) id)
+    id))
+
+(defun org-ilm-pqueue--rank-to-quantile (pqueue rank)
+  (let ((size (org-ilm-pqueue--count pqueue)))
+    (if (= 1 size) 0 (/ (float rank) (1- size)))))
+
+(defun org-ilm-pqueue--quantile-to-rank (pqueue quantile)
+  (cl-assert (<= 0 quantile 1))
+  (let ((size (org-ilm-pqueue--count pqueue)))
+    (round (* quantile (1- size)))))
+
+(defun org-ilm-pqueue--read-rank (pqueue &optional numnew-or-id)
+  (let* ((pqueue-size (org-ilm-pqueue--count pqueue))
+         (numnew (cond
+                  ((null numnew-or-id) 0)
+                  ((numberp numnew-or-id) numnew-or-id)
+                  ((stringp numnew-or-id)
+                   ;; If element not yet in queue, max position is queue size + 1
+                   (if (org-ilm-pqueue--contains-p pqueue numnew-or-id)
+                       0 1))
+                  (t (error "Invalid value for NUMNEW-OR-ID"))))
+         (min 1)
+         (max (+ pqueue-size numnew))
+         rank)
+    (while (not rank)
+      (let ((number (read-number
+                     (format "Priority (#%s-%s / 0.0-1.0): " min max))))
+        (cond
+         ;; Inputted quantile
+         ((and (floatp number) (<= 0.0 number 1.0))
+          (setq rank (+ (org-ilm-pqueue--quantile-to-rank pqueue number) numnew)))
+         ;; Inputted rank
+         ((<= min number max)
+          (setq rank (1- number))))))
+    rank))
+
+(defun org-ilm-pqueue--format-priority (pqueue priority)
+  (let ((rank (car priority))
+        (quantile (cdr priority)))
+    (cl-assert (or rank quantile))
+    (unless quantile
+      (setq quantile (org-ilm-pqueue--rank-to-quantile pqueue rank)))
+    (unless rank
+      (setq rank (org-ilm-pqueue--quantile-to-rank pqueue quantile)))
+    (format "#%s/%s (%.2f%s)"
+            (1+ rank)
+            (org-ilm-pqueue--count pqueue)
+            (* 100 quantile)
+            "%")))
 
 ;;;;; Create
 
@@ -824,25 +901,8 @@ The collections are stored in `org-ilm-collections'."
 (defun org-ilm-pqueue-count (&optional collection)
   (org-ilm-pqueue--count (org-ilm-pqueue collection)))
 
-(defun org-ilm-pqueue-read-rank (&optional id collection)
-  (let* ((pqueue (org-ilm-pqueue collection))
-         (pqueue-size (org-ilm-pqueue--count pqueue))
-         (current-priority (when id (org-ilm-pqueue-priority id :nil-if-absent t)))
-         (min 1)
-         ;; If element not yet in queue, max position is queue size + 1
-         (max (+ pqueue-size (if current-priority 0 1)))
-         rank)
-    (while (not rank)
-      (let ((number (read-number
-                     (format "Priority (#%s-%s / 0.0-1.0): " min max))))
-        (cond
-         ;; Inputted quantile
-         ((and (floatp number) (<= 0.0 number 1.0))
-          (setq rank (+ (* number (1- pqueue-size)) (if current-priority 0 1))))
-         ;; Inputted rank
-         ((<= min number max)
-          (setq rank (1- number))))))
-    rank))
+(defun org-ilm-pqueue-read-rank (&optional numnew-or-id collection)
+  (org-ilm-pqueue--read-rank (org-ilm-pqueue collection) numnew-or-id))
 
 (cl-defun org-ilm-pqueue-priority (id &key pqueue collection rank quantile nil-if-absent)
   "Position of the ID in PQUEUE as a cons (rank . quantile).
@@ -857,16 +917,15 @@ With RANK or QUANTILE, set the new position in the queue, or insert there if not
      ;; Position specified: Move or add the element 
      ((or rank quantile)
       (unless rank
-        (cl-assert (<= 0 quantile 1))
-        (setq rank (1+ (* quantile (1- (ost-tree-size ost))))))
+        (setq rank (org-ilm-pqueue--quantile-to-rank pqueue quantile)))
       (if node
           (org-ilm-pqueue--move pqueue id rank)
         (org-ilm-pqueue--insert pqueue id rank)))
      ;; Retrieve position
      (node
-      (let ((rank (ost-rank ost id))
-            (size (ost-tree-size ost)))
-        (cons rank (if (= 1 size) 0 (/ (float rank) (1- size))))))
+      (let* ((rank (ost-rank ost id))
+             (quantile (org-ilm-pqueue--rank-to-quantile pqueue rank)))
+        (cons rank quantile)))
      ;; Element not found in priority queue
      (t
       (when (and (not nil-if-absent)
@@ -1048,6 +1107,9 @@ With RANK or QUANTILE, set the new position in the queue."
    :collection (org-ilm-element-collection element)
    :rank rank :quantile quantile))
 
+(defun org-ilm-element-pqueue (element)
+  (org-ilm-pqueue (org-ilm-element-collection element)))
+
 (defun org-ilm-element-prank (element)
   "Position of ELEMENT in the priority queue."
   (car (org-ilm-element-priority element)))
@@ -1057,11 +1119,9 @@ With RANK or QUANTILE, set the new position in the queue."
   (cdr (org-ilm-element-priority element)))
 
 (defun org-ilm-element-priority-formatted (element)
-  (let ((priority (org-ilm-element-priority element)))
-    (format "#%s (%.2f%s)"
-            (1+ (car priority))
-            (* 100 (cdr priority))
-            "%")))
+  (org-ilm-pqueue--format-priority
+   (org-ilm-element-pqueue element)
+   (org-ilm-element-priority element)))
 
 ;;;;; Logbook
 
@@ -3588,7 +3648,7 @@ If point on subject, add all headlines of subject."
       (org-ilm-queue-revert))))
 
 
-;;;;; Queue view
+;;;; Queue view
 
 (defvar-keymap org-ilm-queue-base-map
   :doc "Base map of ilm queue, regardless if empty or not."
@@ -3615,6 +3675,7 @@ If point on subject, add all headlines of subject."
   "m" #'org-ilm-queue-object-mark
   "RET" #'org-ilm-queue-open-attachment
   "SPC" #'org-ilm-queue-open-element
+  "P" #'org-ilm-queue-spread-priority
   "M j" #'org-ilm-queue-mark-by-subject
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
@@ -3896,9 +3957,9 @@ A lot of formatting code from org-ql."
     (when switch-p
       (switch-to-buffer buffer))))
 
-;;;;;; Sort transient
-
 (defvar org-ilm--queue-transient-buffer nil)
+
+;;;;; Sort transient
 
 (transient-define-prefix org-ilm--queue-sort-transient ()
   :refresh-suffixes t
@@ -3940,6 +4001,104 @@ A lot of formatting code from org-ql."
   (setq org-ilm--queue-transient-buffer (current-buffer))
   (org-ilm--queue-sort-transient))
 
+;;;;;; Priority spread transient
+
+(defun org-ilm--queue-pspread-transient-format (arg)
+  (when-let* ((args (transient-get-value))
+              (min (transient-arg-value (concat "--" arg "=") args)))
+    (propertize
+     (org-ilm-pqueue--format-priority
+      (org-ilm-pqueue) (cons (1- (string-to-number min)) nil))
+     'face 'italic)))
+
+(defun org-ilm--queue-pspread-transient-read (extremum)
+  (cl-assert (member extremum '("a" "b")))
+  (let* ((minimum-p (string= extremum "a"))
+         (rank-this (org-ilm-pqueue-read-rank))
+         (rank-other (transient-arg-value
+                      (concat "--" (if minimum-p "max" "min") "=")
+                      (transient-args transient-current-command)))
+         (rank-other (when rank-other
+                       (1- (string-to-number rank-other)))))
+    (cond
+     (rank-other
+      (when (or (< (1+ (abs (- rank-other rank-this )))
+                   (length org-ilm--queue-marked-objects))
+                (funcall (if minimum-p #'<= #'>=) rank-other rank-this))
+        (mochar-utils--transiet-set-target-value (if minimum-p "b" "a") nil)))
+     (minimum-p
+      ;; TODO Auto fill based on length
+      ))
+    (number-to-string (1+ rank-this))))
+
+(transient-define-prefix org-ilm--queue-pspread-transient ()
+  :refresh-suffixes t
+
+  ["Priority spread"
+   (:info
+    (lambda ()
+      (let ((n-incrs 0)
+            (n-cards 0))
+        (dolist (id org-ilm--queue-marked-objects)
+          (pcase (org-ilm-type (org-mem-entry-todo-state (org-mem-entry-by-id id)))
+            ('incr (cl-incf n-incrs))
+            ('card (cl-incf n-cards))))
+        (propertize
+         (format "%s element (%s incrs, %s cards)"
+                 (length org-ilm--queue-marked-objects)
+                 n-incrs n-cards)
+         'face 'transient-value))))
+   ("a" "Min" "--min=" :always-read t
+    :transient transient--do-call
+    :reader (lambda (&rest _) (org-ilm--queue-pspread-transient-read "a")))
+   (:info
+    (lambda () (or (org-ilm--queue-pspread-transient-format "min") ""))
+    :if
+    (lambda () (org-ilm--queue-pspread-transient-format "min")))
+   ("b" "Max" "--max=" :always-read t
+    :transient transient--do-call
+    :reader (lambda (&rest _) (org-ilm--queue-pspread-transient-read "b")))
+   (:info
+    (lambda () (or (org-ilm--queue-pspread-transient-format "max") ""))
+    :if
+    (lambda () (org-ilm--queue-pspread-transient-format "max")))
+   ]
+
+  [
+   ("RET" "Spread"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (min-rank (1- (string-to-number (transient-arg-value "--min=" args))))
+             (max-rank (1- (string-to-number (transient-arg-value "--max=" args))))
+             (marked org-ilm--queue-marked-objects)
+             (size (length marked)))
+        (org-ilm-pqueue--move-many
+         (org-ilm-pqueue)
+         (mapcar 
+          (lambda (i)
+            (let* ((id (nth i marked))
+                   (j (- size i 1))
+                   (new-rank (round (+ min-rank
+                                       (* (/ (float j) (max 1 (1- size)))
+                                          (- max-rank min-rank))))))
+              (cons id new-rank)))
+          (number-sequence 0 (1- size))))))
+    :inapt-if-not
+    (lambda ()
+      (let ((args (transient-get-value)))
+        (and (transient-arg-value "--min=" args)
+             (transient-arg-value "--max=" args)))))
+   ]
+  )
+
+(defun org-ilm-queue-spread-priority ()
+  (interactive)
+  (unless org-ilm--queue-marked-objects
+    (user-error "No elements marked!"))
+  (setq org-ilm--queue-transient-buffer (current-buffer))
+  (org-ilm--queue-pspread-transient))
+  
 
 ;;;; Import
 
@@ -4382,8 +4541,7 @@ If SEED is provided, sets the random seed first for reproducible results."
         (beta (cdr beta)))
     (/ (- alpha 1) (+ alpha beta -2))))
 
-
-;;;; Priority
+;;;; Priority (cookie)
 
 (defun org-ilm--get-priority (&optional headline-or-entry)
   "Return priority data of HEADLINE, or if nil, the one at point.

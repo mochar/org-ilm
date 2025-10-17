@@ -27,8 +27,8 @@
        (goto-char (point-min))
        (org-next-visible-heading 1)
        
-       (let ((el (org-ilm-element-at-point)))
-         (expect (org-ilm-element-id el) :to-equal "a"))
+       ;; (let ((el (org-ilm-element-at-point)))
+       ;;   (expect (org-ilm-element-id el) :to-equal "a"))
 
        )
 

@@ -172,8 +172,9 @@ returned."
     (setq node (ost-tree-node-by-id tree node)))
   (cl-assert (ost-node-p node))
   ;; Extract id first in case node gets swapped
-  (let ((id (ost-node-id node)))
-    (ost-tree-remove tree node)
+  (let ((id (ost-node-id node))
+        (swap-p (ost-tree-remove tree node)))
+    ;; Returns new node (useful in case of swap)
     (ost-tree-insert tree new-rank id)))
 
 ;;;; Utilities
@@ -492,7 +493,7 @@ nodes cannot have red children."
     node))
 
 (defun ost-insert-rank (tree rank id)
-  "Insert new node with ID at position RANK in TREE."
+  "Insert new node with ID at position RANK in a dynamic TREE."
   (cl-assert (and (ost-tree-dynamic tree)
                   (<= 0 rank (ost-size tree))))
   (let ((node (make-ost-node :id id))
