@@ -141,19 +141,27 @@ Returns the node."
     node))
 
 (defun ost-tree-remove (tree id-or-node)
-  "Remove a node from TREE by id or node reference."
-  (let (node id)
+  "Remove a node from TREE by id or node reference.
+
+Note: If a node reference is passed, it may end up references another
+node due to the swap operation. In that case, the symbol 'swap is
+returned."
+  (let (node id swapped)
     (if (ost-node-p id-or-node)
         (setq node id-or-node
               id (ost-node-id id-or-node))
       (setq id id-or-node
             node (ost-tree-node-by-id tree id-or-node)))
     (cl-assert (ost-node-p node))
-    (when (eq 'swap (ost-remove tree node))
+    (cl-assert (gethash id (ost-tree-nodes tree)))
+    (when (eq 'swap (setq swapped (ost-remove tree node)))
       ;; The node wasn't deleted directly. Instead its values (id and key) were
-      ;; swapped with its successor, and the successor was deleted instead.
+      ;; swapped with its successor, and the successor node was deleted
+      ;; instead. Thus `node' now references the successor node, which we need
+      ;; to update in the hashmap.
       (puthash (ost-node-id node) node (ost-tree-nodes tree)))
-    (remhash id (ost-tree-nodes tree))))
+    (remhash id (ost-tree-nodes tree))
+    swapped))
 
 (defun ost-tree-move (tree node new-rank)
   "Move NODE in dynamic TREE to NEW-RANK."
@@ -163,8 +171,10 @@ Returns the node."
   (unless (ost-node-p node)
     (setq node (ost-tree-node-by-id tree node)))
   (cl-assert (ost-node-p node))
-  (ost-tree-remove tree node)
-  (ost-tree-insert tree new-rank (ost-node-id node)))
+  ;; Extract id first in case node gets swapped
+  (let ((id (ost-node-id node)))
+    (ost-tree-remove tree node)
+    (ost-tree-insert tree new-rank id)))
 
 ;;;; Utilities
 
