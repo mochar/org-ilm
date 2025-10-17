@@ -33,6 +33,14 @@ Direct copy from mm-decode.el"
       (setq alist (cdr alist)))
     (nreverse plist)))
 
+(defun mochar-utils--list-shuffle (list)
+  "Return a new list with the elements of LIST randomly shuffled."
+  (let ((vec (vconcat list)))       ; convert to vector for easy swapping
+    (cl-loop for i from (1- (length vec)) downto 1
+             do (cl-rotatef (aref vec i)
+                            (aref vec (random (1+ i)))))
+    (append vec nil)))
+
 ;;;; Emacs
 
 (cl-defun mochar-utils--add-hook-once (hook function &optional depth (local t))

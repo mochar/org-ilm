@@ -786,28 +786,18 @@ The collections are stored in `org-ilm-collections'."
   (ost-tree-insert (org-ilm-pqueue--ost pqueue) rank id)
   (org-ilm-pqueue--write pqueue))
 
+;; TODO Keep copy of ost to restore in case of error midway?
 (defun org-ilm-pqueue--move (pqueue id new-rank)
   "Move element ID in PQUEUE to NEW-RANK."
   (ost-tree-move (org-ilm-pqueue--ost pqueue) id new-rank)
   (org-ilm-pqueue--write pqueue))
 
-(defun org-ilm-pqueue--move-many (pqueue id->new-rank &optional dont-sort)
+(defun org-ilm-pqueue--move-many (pqueue new-ranks-alist)
   "Move many elements in PQUEUE to a new rank.
 
-Alist ID->NEW-RANK maps element id to new rank.
-
-DONT-SORT turns off sorting by rank, which is necessary to preserve
-requested ranks, as moving around previous elements will shift elements
-in queue.
-
-Note that if the same new rank is specified for different elements, only
-the last element with the same rank will have the new rank."
-  (unless dont-sort
-    (setq id->new-rank (sort id->new-rank :lessp #'> :key #'cdr)))
-  (let ((ost (org-ilm-pqueue--ost pqueue)))
-    (dolist (id-newrank id->new-rank)
-      (ost-tree-move ost (car id-newrank) (cdr id-newrank)))
-    (org-ilm-pqueue--write pqueue)))
+NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
+  (ost-tree-move-many (org-ilm-pqueue--ost pqueue) new-ranks-alist)
+  (org-ilm-pqueue--write pqueue))
 
 (defun org-ilm-pqueue--count (pqueue)
   "Return number of elements in PQUEUE."
@@ -3419,7 +3409,7 @@ If the queue has a query, run it again. Else re-parse elements."
 
 (defun org-ilm--queue-sort (key reversed &optional buffer)
   (org-ilm-with-queue-buffer buffer
-    (unless (string= (org-ilm-queue-key org-ilm-queue) key)
+    (unless (string= (org-ilm-queue--key org-ilm-queue) key)
       (setf (org-ilm-queue--ost org-ilm-queue) (make-ost-tree)
             (org-ilm-queue--key org-ilm-queue) key)
       (dolist (element (hash-table-values (org-ilm-queue--elements org-ilm-queue)))
@@ -3967,11 +3957,11 @@ A lot of formatting code from org-ql."
   (lambda ()
     (org-ilm-with-queue-buffer org-ilm--queue-transient-buffer
       (append
-       (let ((key (org-ilm-queue-key org-ilm-queue)))
+       (let ((key (org-ilm-queue--key org-ilm-queue)))
          (pcase key
            ("prank" '("--key=priority"))
            ("sched" '("--key=schedule"))))
-       (when (org-ilm-queue-reversed org-ilm-queue)
+       (when (org-ilm-queue--reversed org-ilm-queue)
          '("--reversed"))
        )))
 
@@ -4062,6 +4052,7 @@ A lot of formatting code from org-ql."
     (lambda () (or (org-ilm--queue-pspread-transient-format "max") ""))
     :if
     (lambda () (org-ilm--queue-pspread-transient-format "max")))
+   ("r" "Random" "--random")
    ]
 
   [
@@ -4072,13 +4063,17 @@ A lot of formatting code from org-ql."
              (min-rank (1- (string-to-number (transient-arg-value "--min=" args))))
              (max-rank (1- (string-to-number (transient-arg-value "--max=" args))))
              (marked org-ilm--queue-marked-objects)
-             (size (length marked)))
+             (size (length marked))
+             (random-p (transient-arg-value "--random" args))
+             (order (number-sequence (1- size) 0 -1)))
+        (when random-p
+          (setq order (mochar-utils--list-shuffle order)))
         (org-ilm-pqueue--move-many
          (org-ilm-pqueue)
          (mapcar 
           (lambda (i)
             (let* ((id (nth i marked))
-                   (j (- size i 1))
+                   (j (nth i order))
                    (new-rank (round (+ min-rank
                                        (* (/ (float j) (max 1 (1- size)))
                                           (- max-rank min-rank))))))

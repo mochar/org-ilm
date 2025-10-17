@@ -177,6 +177,45 @@ returned."
     ;; Returns new node (useful in case of swap)
     (ost-tree-insert tree new-rank id)))
 
+(defun ost-tree-move-many (tree new-ranks-alist)
+  "Atomically move multiple nodes to new ranks in TREE.
+
+NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
+  (cl-assert (ost-tree-dynamic tree))
+
+  (when new-ranks-alist
+    (let ((tree-size (ost-tree-size tree))
+          (nodes (ost-tree-nodes tree))
+          (ids (mapcar #'car new-ranks-alist))
+          (new-ranks (mapcar #'cdr new-ranks-alist)))
+
+      ;; Ensure there are no duplicate destination ranks
+      (when (> (length new-ranks)
+               (length (seq-uniq new-ranks)))
+        (error "Duplicate new-ranks found in NEW-RANKS-ALIST, which is ambiguous"))
+
+      (dolist (pair new-ranks-alist)
+        (let ((id (car pair))
+              (rank (cdr pair)))
+          ;; Ensure id exists
+          (unless (gethash id nodes)
+            (error "Node with ID %S not found in tree" id))
+          ;; Ensure new rank is within bound
+          (when (or (< rank 0) (>= rank tree-size))
+            (error "New rank %d is out of bounds for tree of size %d"
+                   rank tree-size))))
+
+      ;; Remove all the nodes that need to be moved.
+      (dolist (id ids)
+        (ost-tree-remove tree id))
+
+      ;; Sort the moves by their target rank to ensure orderly insertion.
+      (let ((sorted-moves (sort (copy-alist new-ranks-alist) :lessp #'< :key #'cdr)))
+        (dolist (pair sorted-moves)
+          (let ((id (car pair))
+                (new-rank (cdr pair)))
+            (ost-insert-rank tree new-rank id)))))))
+
 ;;;; Utilities
 
 (defun ost--opposite (direction)
