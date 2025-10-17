@@ -653,6 +653,12 @@ the priority, or error if there is no priority."
 (defun org-ilm--ost-count (obj)
   (ost-size (org-ilm--ost-ost obj)))
 
+(defun org-ilm--ost-move (obj id new-rank)
+  (ost-tree-move (org-ilm--ost-ost obj) id new-rank))
+
+(defun org-ilm--ost-move-many (obj new-ranks-alist)
+  (ost-tree-move-many (org-ilm--ost-ost obj) new-ranks-alist))
+
 (defun org-ilm--ost-rank-to-quantile (obj rank)
   (let ((size (org-ilm--ost-count obj)))
     (if (= 1 size) 0 (/ (float rank) (1- size)))))
@@ -3309,20 +3315,24 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   (elements (make-hash-table :test #'equal))
   key reversed)
 
-(defun org-ilm-queue--element-value (queue element)
+(defun org-ilm-queue--element-value (queue element &optional no-key)
   "Return the value of ELEMENT by which it is sorted in QUEUE."
   (cond-let*
+    ;; First check the node key in the ost: A custom value might have been set
+    ;; for an element even though the queue sort is based on a key.
+    ([_ (not no-key)]
+     [node (ost-tree-node-by-id
+            (org-ilm-queue--ost queue)
+            (org-ilm-element-id element))]
+     [key (ost-node-key node)]
+     key)
     ([key (org-ilm-queue--key queue)]
      [getter (intern (concat "org-ilm-element-" key))]
      (cl-assert (functionp getter))
      (when-let ((value (funcall getter element)))
        (cl-typecase value
          (ts (ts-unix value))
-         (t value))))
-    ([node (ost-tree-node-by-id
-            (org-ilm-queue--ost queue)
-            (org-ilm-element-id element))]
-     (ost-node-key node))))
+         (t value))))))
 
 (defun org-ilm-queue--count (queue)
   "Return the number of elements in QUEUE."
@@ -3338,7 +3348,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
     (puthash id element (org-ilm-queue--elements queue))
     (ost-tree-insert (org-ilm-queue--ost queue)
                      (or value
-                         (org-ilm-queue--element-value queue element))
+                         (org-ilm-queue--element-value queue element 'no-key))
                      id)))
 
 ;; TODO Some type of caching so that repeated selects doesnt search tree again
@@ -3370,11 +3380,15 @@ ELEMENT may be an `org-ilm-element' or its id."
               element)))
     (gethash id (org-ilm-queue--elements queue))))
 
+(defun org-ilm-queue--element (queue element-or-id)
+  (if (org-ilm-element-p element-or-id)
+      element-or-id
+    (gethash element-or-id (org-ilm-queue--elements queue))))
+
 (defun org-ilm-queue--remove (queue element)
   "Remove ELEMENT from QUEUE.
 ELEMENT may be an `org-ilm-element' or its id."
-  (unless (org-ilm-element-p element)
-    (setq element (gethash element (org-ilm-queue--elements queue))))
+  (setq element (org-ilm-queue--element queue element))
   (cl-assert (org-ilm-element-p element))
   (ost-tree-remove (org-ilm-queue--ost org-ilm-queue) id)
   (remhash id (org-ilm-queue--elements org-ilm-queue))
@@ -3386,6 +3400,19 @@ ELEMENT may be an `org-ilm-element' or its id."
     (error "Tried popping an empty queue \"%s\"" (org-ilm-queue--name queue)))
   (let ((head (org-ilm-queue-head)))
     (org-ilm-queue-remove (org-ilm-element-id head))))
+
+(defun org-ilm-queue--move (queue element new-rank)
+  "Move ELEMENT in QUEUE to NEW-RANK."
+  (setq element (org-ilm-queue--element queue element))
+  (cl-assert (org-ilm-element-p element))
+  (ost-tree-move (org-ilm-queue--ost queue) (org-ilm-element-id id) new-rank))
+
+(defun org-ilm-queue--move-many (queue new-ranks-alist)
+  "Move many elements in QUEUE to a new rank.
+
+NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
+  (ost-tree-move-many (org-ilm-queue--ost queue) new-ranks-alist))
+
 
 ;;;;; Building a queue 
 
@@ -3692,6 +3719,7 @@ If point on subject, add all headlines of subject."
   "RET" #'org-ilm-queue-open-attachment
   "SPC" #'org-ilm-queue-open-element
   "P" #'org-ilm-queue-set-priority
+  "N" #'org-ilm-queue-set-position
   "M j" #'org-ilm-queue-mark-by-subject
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
@@ -3985,6 +4013,16 @@ A lot of formatting code from org-ql."
     (org-ilm-element-set-priority (org-ilm-element-from-context)))
   (org-ilm-queue-revert))
 
+(defun org-ilm-queue-set-position ()
+  (interactive)
+  (if org-ilm--queue-marked-objects
+      (org-ilm-queue-spread-position)
+    (org-ilm--ost-move
+     org-ilm-queue
+     (org-ilm-element-id (org-ilm-element-from-context))
+     (car (org-ilm--queue-select-read org-ilm-queue))))
+  (org-ilm-queue-revert))
+
 ;;;;; Sort transient
 
 (transient-define-prefix org-ilm--queue-sort-transient ()
@@ -4027,21 +4065,24 @@ A lot of formatting code from org-ql."
   (setq org-ilm--queue-transient-buffer (current-buffer))
   (org-ilm--queue-sort-transient))
 
-;;;;;; Priority spread transient
+;;;;;; Priority and position spread transient
 
 (defun org-ilm--queue-pspread-transient-format (extremum)
-  (when-let* ((args (transient-get-value))
+  (when-let* ((queue (or (transient-scope) (org-ilm-pqueue)))
+              (args (transient-get-value))
               (rank (transient-arg-value (concat "--" extremum "=") args)))
     (propertize
      (org-ilm--ost-format-position
-      (org-ilm-pqueue) (1- (string-to-number rank)))
+      queue (1- (string-to-number rank)))
      'face 'italic)))
 
 (defun org-ilm--queue-pspread-transient-read (extremum)
   (cl-assert (member extremum '("a" "b")))
   (let* ((minimum-p (string= extremum "a"))
-         ;; (rank-this (org-ilm-pqueue-read-rank))
-         (rank-this (car (org-ilm-pqueue-select)))
+         (queue (transient-scope))
+         (rank-this (car (if queue
+                             (org-ilm--queue-select-read queue)
+                           (org-ilm-pqueue-select))))
          (rank-other (transient-arg-value
                       (concat "--" (if minimum-p "max" "min") "=")
                       (transient-args transient-current-command)))
@@ -4055,16 +4096,21 @@ A lot of formatting code from org-ql."
         (mochar-utils--transiet-set-target-value (if minimum-p "b" "a") nil)))
      (minimum-p
       (mochar-utils--transiet-set-target-value
-       "b" (number-to-string (+ 1 rank-this n-marked))))
+       "b" (number-to-string (+ rank-this n-marked))))
      ((not minimum-p)
       (mochar-utils--transiet-set-target-value
-       "a" (number-to-string (1+ (- rank-this n-marked))))))
+       "a" (number-to-string (- rank-this n-marked)))))
     (number-to-string (1+ rank-this))))
 
-(transient-define-prefix org-ilm--queue-pspread-transient ()
+(transient-define-prefix org-ilm--queue-pspread-transient (&optional queue)
+  "This transient will set prioritiy if QUEUE is nil. Otherwise an
+ org-ilm-queue can be passed so that the priority/order within that
+ queue is changed."
   :refresh-suffixes t
 
-  ["Priority spread"
+  [:description
+   (lambda ()
+     (if (transient-scope) "Position spread" "Priority spread"))
    (:info
     (lambda ()
       (let ((n-incrs 0)
@@ -4099,7 +4145,8 @@ A lot of formatting code from org-ql."
    ("RET" "Spread"
     (lambda ()
       (interactive)
-      (let* ((args (transient-args transient-current-command))
+      (let* ((queue (or (transient-scope) (org-ilm-pqueue)))
+             (args (transient-args transient-current-command))
              (min-rank (1- (string-to-number (transient-arg-value "--min=" args))))
              (max-rank (1- (string-to-number (transient-arg-value "--max=" args))))
              (marked org-ilm--queue-marked-objects)
@@ -4108,8 +4155,8 @@ A lot of formatting code from org-ql."
              (order (number-sequence (1- size) 0 -1)))
         (when random-p
           (setq order (mochar-utils--list-shuffle order)))
-        (org-ilm-pqueue--move-many
-         (org-ilm-pqueue)
+        (org-ilm--ost-move-many
+         queue
          (mapcar 
           (lambda (i)
             (let* ((id (nth i marked))
@@ -4126,14 +4173,29 @@ A lot of formatting code from org-ql."
         (and (transient-arg-value "--min=" args)
              (transient-arg-value "--max=" args)))))
    ]
-  )
 
-(defun org-ilm-queue-spread-priority ()
   (interactive)
+  (transient-setup 'org-ilm--queue-pspread-transient nil nil :scope queue))
+
+(defun org-ilm--queue-spread-position (&optional priority-queue-p)
   (unless org-ilm--queue-marked-objects
     (user-error "No elements marked!"))
   (setq org-ilm--queue-transient-buffer (current-buffer))
-  (org-ilm--queue-pspread-transient))
+  (org-ilm--queue-pspread-transient
+   (unless priority-queue-p org-ilm-queue)))
+
+(defun org-ilm-queue-spread-position ()
+  (interactive)
+  (org-ilm--queue-spread-position))
+
+(defun org-ilm-queue-spread-priority ()
+  (interactive)
+  (org-ilm--queue-spread-position 'priority-queue-p))
+
+;;;;;; Position spread transient
+
+
+
 
 ;;;; Queue select
 

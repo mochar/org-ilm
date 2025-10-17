@@ -164,25 +164,25 @@ returned."
     swapped))
 
 (defun ost-tree-move (tree node new-rank)
-  "Move NODE in dynamic TREE to NEW-RANK."
-  (cl-assert (and (ost-tree-dynamic tree)
-                  ;; Size cannot increase when moving
-                  (<= 0 new-rank (1- (ost-tree-size tree)))))
+  "Move NODE in TREE to NEW-RANK."
+  ;; Size cannot increase when moving
+  (cl-assert (<= 0 new-rank (1- (ost-tree-size tree))))
   (unless (ost-node-p node)
     (setq node (ost-tree-node-by-id tree node)))
   (cl-assert (ost-node-p node))
   ;; Extract id first in case node gets swapped
   (let ((id (ost-node-id node))
-        (swap-p (ost-tree-remove tree node)))
+        (swap-p (ost-tree-remove tree node))
+        (key-or-rank new-rank))
+    (unless (ost-tree-dynamic tree)
+      (setq key-or-rank (ost--key-for-rank tree new-rank)))
     ;; Returns new node (useful in case of swap)
-    (ost-tree-insert tree new-rank id)))
+    (ost-tree-insert tree key-or-rank id)))
 
 (defun ost-tree-move-many (tree new-ranks-alist)
   "Atomically move multiple nodes to new ranks in TREE.
 
 NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
-  (cl-assert (ost-tree-dynamic tree))
-
   (when new-ranks-alist
     (let ((tree-size (ost-tree-size tree))
           (nodes (ost-tree-nodes tree))
@@ -212,9 +212,12 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
       ;; Sort the moves by their target rank to ensure orderly insertion.
       (let ((sorted-moves (sort (copy-alist new-ranks-alist) :lessp #'< :key #'cdr)))
         (dolist (pair sorted-moves)
-          (let ((id (car pair))
-                (new-rank (cdr pair)))
-            (ost-insert-rank tree new-rank id)))))))
+          (let* ((id (car pair))
+                 (new-rank (cdr pair))
+                 (key-or-rank new-rank))
+            (unless (ost-tree-dynamic tree)
+              (setq key-or-rank (ost--key-for-rank tree new-rank)))
+            (ost-tree-insert tree key-or-rank id)))))))
 
 ;;;; Utilities
 
@@ -247,6 +250,31 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 
 (defun ost-size (tree-or-node)
   (ost--node-size (ost--node-from tree-or-node)))
+
+(defun ost--key-for-rank (tree rank)
+  "Calculate a key that would place a node at RANK in TREE.
+This is a helper for move/set-rank operations. It assumes the tree is in
+an intermediate state and we are about to insert a new node. RANK is the
+rank in the final, larger tree."
+  (let ((current-size (ost-tree-size tree)))
+    (cond
+     ;; Inserting at the very beginning
+     ((= rank 0)
+      (if (zerop current-size)
+          0.0 ; Tree is empty, any key is fine.
+        (- (ost-node-key (ost-select tree 0)) 1.0)))
+
+     ;; Inserting at the very end
+     ((= rank current-size)
+      (+ (ost-node-key (ost-select tree (1- current-size))) 1.0))
+
+     ;; Inserting in the middle: Use midpoint
+     (t
+      (let* ((pred-node (ost-select tree (1- rank)))
+             (succ-node (ost-select tree rank))
+             (pred-key (ost-node-key pred-node))
+             (succ-key (ost-node-key succ-node)))
+        (/ (+ (float pred-key) succ-key) 2.0))))))
 
 ;;;; Operations
 
