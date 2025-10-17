@@ -4046,16 +4046,19 @@ A lot of formatting code from org-ql."
                       (concat "--" (if minimum-p "max" "min") "=")
                       (transient-args transient-current-command)))
          (rank-other (when rank-other
-                       (1- (string-to-number rank-other)))))
+                       (1- (string-to-number rank-other))))
+         (n-marked (length org-ilm--queue-marked-objects)))
     (cond
      (rank-other
-      (when (or (< (1+ (abs (- rank-other rank-this )))
-                   (length org-ilm--queue-marked-objects))
+      (when (or (< (1+ (abs (- rank-other rank-this ))) n-marked)
                 (funcall (if minimum-p #'<= #'>=) rank-other rank-this))
         (mochar-utils--transiet-set-target-value (if minimum-p "b" "a") nil)))
      (minimum-p
-      ;; TODO Auto fill based on length
-      ))
+      (mochar-utils--transiet-set-target-value
+       "b" (number-to-string (+ 1 rank-this n-marked))))
+     ((not minimum-p)
+      (mochar-utils--transiet-set-target-value
+       "a" (number-to-string (1+ (- rank-this n-marked))))))
     (number-to-string (1+ rank-this))))
 
 (transient-define-prefix org-ilm--queue-pspread-transient ()
