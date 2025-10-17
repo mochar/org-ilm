@@ -272,6 +272,8 @@
   
 ;;;; Utilities
 
+;;;;; Ilm
+
 (defun org-ilm--debug (&optional fmt &rest args)
   "Print stuff to message buffer when `org-ilm-debug' non-nil."
   (let ((fmt (cond
@@ -289,9 +291,38 @@
   (dolist (val vals)
     (apply #'org-ilm--debug fmt (funcall args-func val))))
 
+(defun org-ilm--where-am-i ()
+  "Returns one of ('collection collection), ('attachment (org-id collection)),
+('queue collection org-id), nil."
+  (cond-let*
+    ([attachment (org-ilm--attachment-data)]
+     (cons 'attachment attachment))
+    ([collection (org-ilm--collection-file (org-ilm--buffer-file-name))]
+     (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
+         (cons 'registry collection)
+       (cons 'collection collection)))
+    ((bound-and-true-p org-ilm-queue)
+     (let* ((el (org-ilm--vtable-get-object))
+            (id (when el (org-ilm-element-id el))))
+       (list 'queue (plist-get org-ilm-queue :collection) id)))))
+
+;;;;; Time and date
+
 (defun org-ilm--ts-today ()
   (let ((now (ts-now)))
     (make-ts :year (ts-year now) :month (ts-month now) :day (ts-day now))))
+
+(defun org-ilm--current-date-utc ()
+  "Current date in UTC as string."
+  (format-time-string "%Y-%m-%d" (current-time) t))
+
+(defun org-ilm--interval-to-schedule-string (interval)
+  "Turn INTERVAL (days) into a date string used in in org headline SCHEDULED."
+  (org-format-time-string
+   (org-time-stamp-format)
+   (ts-unix (ts-adjust 'day interval (ts-now)))))
+
+;;;;; Elisp
 
 (defun org-ilm--select-alist (alist &optional prompt formatter)
   "Prompt user for element in alist to select from.
@@ -326,9 +357,24 @@ If empty return nil, and if only one, return it."
             (item (cdr (assoc choice choices))))
        item))))
 
-(defun org-ilm--current-date-utc ()
-  "Current date in UTC as string."
-  (format-time-string "%Y-%m-%d" (current-time) t))
+(defun org-ilm--invert-alist (alist)
+  "Turn car into cdr and vice versa for each cons in ALIST."
+  (mapcar (lambda (pair)
+            (cons (cdr pair) (car pair)))
+          alist))
+
+(cl-defun org-ilm--add-hook-once (hook function &optional depth (local t))
+  "Add FUNCTION to HOOK and remove it after its first execution.
+
+HOOK is the hook to which FUNCTION will be added.
+FUNCTION is the function to run once in the hook.
+DEPTH controls where FUNCTION is placed in HOOK and defaults to 0.
+LOCAL controls whether to add HOOK buffer-locally and defaults to t.
+
+The returned function can be used to call `remove-hook' if needed."
+  (letrec ((hook-function (lambda () (remove-hook hook hook-function local) (funcall function))))
+    (add-hook hook hook-function depth local)
+    hook-function))
 
 (defun org-ilm--buffer-text-process (&optional region-begin region-end keep-clozes remove-footnotes)
   "Prepare buffer text for new extract or card element."
@@ -377,46 +423,19 @@ If empty return nil, and if only one, return it."
          (text (string-trim text))) ;; Trim whitespace
     (substring text 0 (min 50 (length text)))))
 
+(defun org-ilm--buffer-file-name ()
+  "Like `buffer-file-name' but support indirect buffers."
+  (or buffer-file-name (buffer-file-name (buffer-base-buffer))))
+
+
+;;;;; Org
+
 (defun org-ilm--org-narrow-to-header ()
   "Narrow to headline and content up to next heading or end of buffer."
   (org-narrow-to-subtree)
   (save-excursion
     (org-next-visible-heading 1)
     (narrow-to-region (point-min) (point))))
-
-(defun org-ilm--buffer-file-name ()
-  "Like `buffer-file-name' but support indirect buffers."
-  (or buffer-file-name (buffer-file-name (buffer-base-buffer))))
-
-(defun org-ilm--where-am-i ()
-  "Returns one of ('collection collection), ('attachment (org-id collection)),
-('queue collection org-id), nil."
-  (cond-let*
-    ([attachment (org-ilm--attachment-data)]
-     (cons 'attachment attachment))
-    ([collection (org-ilm--collection-file (org-ilm--buffer-file-name))]
-     (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
-         (cons 'registry collection)
-       (cons 'collection collection)))
-    ((bound-and-true-p org-ilm-queue)
-     (let* ((el (org-ilm--vtable-get-object))
-            (id (when el (org-ilm-element-id el))))
-       (list 'queue (plist-get org-ilm-queue :collection) id)))))
-
-(defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
-  "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
-  (let* ((states-list (if (stringp states) (list states) states))
-         (choice
-          (completing-read (or prompt "Node: ")
-                           (if blank-ok #'org-node-collection-main
-                             #'org-node-collection-basic)
-                           (lambda (name node)
-                             (member (org-mem-todo-state node) states-list))
-                           ()
-                           initial-input
-                           (if org-node-alter-candidates 'org-node-hist-altered
-                             'org-node-hist))))
-    (gethash choice org-node--candidate<>entry)))
 
 (defun org-ilm--org-id-p (string)
   "Is STRING an org-id? Return org-mem entry, else nil."
@@ -553,43 +572,21 @@ With non-nil ASSERT, assert headline must be found, else return nil."
     (when assert (cl-assert headline))
     headline))
 
-(defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
-  "Return org ids of ancestors of entry."
-  (when-let ((entry (if (stringp entry-or-id)
-                        (org-mem-entry-by-id entry-or-id)
-                      entry-or-id)))
-    (let ((ancestry
-           (delq nil ;; Delete nils returned when no org-id
-                 (mapcar (lambda (x)
-                           (car (last x)))
-                         ;; cdr to skip itself
-                         (cdr (org-mem-entry-crumbs entry))))))
-      (if with-root-str (cons "ROOT" ancestry) ancestry))))
-
-(defun org-ilm--interval-to-schedule-string (interval)
-  "Turn INTERVAL (days) into a date string used in in org headline SCHEDULED."
-  (org-format-time-string
-   (org-time-stamp-format)
-   (ts-unix (ts-adjust 'day interval (ts-now)))))
-
-(defun org-ilm--invert-alist (alist)
-  "Turn car into cdr and vice versa for each cons in ALIST."
-  (mapcar (lambda (pair)
-            (cons (cdr pair) (car pair)))
-          alist))
-
-(cl-defun org-ilm--add-hook-once (hook function &optional depth (local t))
-  "Add FUNCTION to HOOK and remove it after its first execution.
-
-HOOK is the hook to which FUNCTION will be added.
-FUNCTION is the function to run once in the hook.
-DEPTH controls where FUNCTION is placed in HOOK and defaults to 0.
-LOCAL controls whether to add HOOK buffer-locally and defaults to t.
-
-The returned function can be used to call `remove-hook' if needed."
-  (letrec ((hook-function (lambda () (remove-hook hook hook-function local) (funcall function))))
-    (add-hook hook hook-function depth local)
-    hook-function))
+(defun org-ilm--clock-in-continue-last ()
+  "Edit out the clock-out time of the last entry and continue as if never clocked out."
+  (when (org-clocking-p)
+    (org-clock-out))
+  (save-excursion
+    (org-back-to-heading 'invisble-ok)
+    (save-restriction
+      (org-ilm--org-narrow-to-header)
+      (when (and
+             (re-search-forward org-clock-line-re nil 'noerror)
+             (re-search-forward (org-re-timestamp 'inactive) (line-end-position) 'noerror))
+        (delete-region (point) (line-end-position))
+        (let ((org-clock-in-resume t)
+              (org-clock-idle-time nil))
+          (org-clock-in))))))
 
 (defun org-ilm--org-priority-set (value)
   "Set the priority of element at point to VALUE.
@@ -612,41 +609,114 @@ the priority, or error if there is no priority."
       (insert "[#" value "] "))
     (message "Priority set to %s" value)))
 
-(defun org-ilm--clock-in-continue-last ()
-  "Edit out the clock-out time of the last entry and continue as if never clocked out."
-  (when (org-clocking-p)
-    (org-clock-out))
-  (save-excursion
-    (org-back-to-heading 'invisble-ok)
-    (save-restriction
-      (org-ilm--org-narrow-to-header)
-      (when (and
-             (re-search-forward org-clock-line-re nil 'noerror)
-             (re-search-forward (org-re-timestamp 'inactive) (line-end-position) 'noerror))
-        (delete-region (point) (line-end-position))
-        (let ((org-clock-in-resume t)
-              (org-clock-idle-time nil))
-          (org-clock-in))))))
+;;;;; Org-node / org-mem
 
-(defun org-ilm--entry-media-sources (&optional entry)
-  "Return all sources of media of ENTRY or entry at point."
-  (setq entry (or entry (org-node-at-point)))
-  (cl-assert (org-mem-entry-p entry))
-  (let* ((url (org-mem-entry-property "URL" entry))
-         (path (org-mem-entry-property "PATH" entry))
-         (refs (mochar-utils--org-mem-website-refs entry))
-         (attachments
-          (org-ilm--org-with-point-at (org-mem-entry-id entry)
-            (when-let ((attach-dir (org-attach-dir)))
-              (seq-filter
-               (lambda (attachment)
-                 (member (file-name-extension attachment)
-                         (append org-media-note--video-types
-                                 org-media-note--audio-types)))
-               (org-attach-file-list attach-dir))))))
-    (cl-remove-duplicates
-     (delq nil (append (list url path) refs attachments))
-     :test #'string=)))
+(defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
+  "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
+  (let* ((states-list (if (stringp states) (list states) states))
+         (choice
+          (completing-read (or prompt "Node: ")
+                           (if blank-ok #'org-node-collection-main
+                             #'org-node-collection-basic)
+                           (lambda (name node)
+                             (member (org-mem-todo-state node) states-list))
+                           ()
+                           initial-input
+                           (if org-node-alter-candidates 'org-node-hist-altered
+                             'org-node-hist))))
+    (gethash choice org-node--candidate<>entry)))
+
+(defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
+  "Return org ids of ancestors of entry."
+  (when-let ((entry (if (stringp entry-or-id)
+                        (org-mem-entry-by-id entry-or-id)
+                      entry-or-id)))
+    (let ((ancestry
+           (delq nil ;; Delete nils returned when no org-id
+                 (mapcar (lambda (x)
+                           (car (last x)))
+                         ;; cdr to skip itself
+                         (cdr (org-mem-entry-crumbs entry))))))
+      (if with-root-str (cons "ROOT" ancestry) ancestry))))
+
+;;;;; Ost
+
+;; Shared code for structs that hold an ost.
+
+(defun org-ilm--ost-ost (obj)
+  (cond
+   ((ost-tree-p obj) obj)
+   ((cl-struct-p obj)
+    (let ((type (type-of obj)))
+      (cl-struct-slot-value type 'ost obj)))))
+
+(defun org-ilm--ost-count (obj)
+  (ost-size (org-ilm--ost-ost obj)))
+
+(defun org-ilm--ost-rank-to-quantile (obj rank)
+  (let ((size (org-ilm--ost-count obj)))
+    (if (= 1 size) 0 (/ (float rank) (1- size)))))
+
+(defun org-ilm--ost-quantile-to-rank (obj quantile)
+  (cl-assert (<= 0 quantile 1))
+  (let ((size (org-ilm--ost-count obj)))
+    (round (* quantile (1- size)))))
+
+(defun org-ilm--ost-contains-p (obj id)
+  (when (ost-tree-node-by-id (org-ilm--ost-ost obj) id)
+    id))
+
+(defun org-ilm--ost-parse-position (obj position &optional sizebuf)
+  "Return (RANK . QUANTILE) given rank or quantile POSITION."
+  (setq sizebuf (or sizebuf 0))
+  (let ((ost-size (org-ilm--ost-count obj)))
+    (cond
+     ;; Already correct
+     ((and (listp position) (numberp (car position)) (floatp (cdr position)))
+      position)
+     ;; Inputted quantile
+     ((and (floatp position) (<= 0.0 position 1.0))
+      (let ((rank (+ (org-ilm--ost-quantile-to-rank obj position) sizebuf)))
+        (cons rank position)))
+     ;; Inputted rank
+     ((and (numberp position) (<= 0 position (+ (1- ost-size) sizebuf)))
+      (let ((quantile (org-ilm--ost-rank-to-quantile obj position)))
+        (cons position quantile))))))
+
+(defun org-ilm--ost-read-position (obj &optional numnew-or-id)
+  (let* ((ost-size (org-ilm--ost-count obj))
+         (numnew (cond
+                  ((null numnew-or-id) 0)
+                  ((numberp numnew-or-id) numnew-or-id)
+                  ((stringp numnew-or-id)
+                   ;; If element not yet in queue, max position is queue size + 1
+                   (if (org-ilm--ost-contains-p obj numnew-or-id) 0 1))
+                  (t (error "Invalid value for NUMNEW-OR-ID"))))
+         (min 1)
+         (max (+ ost-size numnew))
+         position)
+    (while (not position)
+      (let* ((number (read-number
+                      (format "Priority (#%s-%s / 0.0-1.0): " min max)))
+             (number (if (integerp number) (1- number) number)))
+        (setq position (org-ilm--ost-parse-position obj number numnew))))
+    position))
+
+(defun org-ilm--ost-format-position (obj position)
+  (setq position (org-ilm--ost-parse-position obj position))
+  (let ((rank (car position))
+        (quantile (cdr position)))
+    (cl-assert (or rank quantile))
+    (unless quantile
+      (setq quantile (org-ilm--ost-rank-to-quantile obj rank)))
+    (unless rank
+      (setq rank (org-ilm--ost-quantile-to-rank obj quantile)))
+    (format "#%s/%s (%.2f%s)"
+            (1+ rank)
+            (org-ilm--ost-count obj)
+            (* 100 quantile)
+            "%")))
+
 
 ;;;; Collection
 
@@ -805,56 +875,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 
 (defun org-ilm-pqueue--contains-p (pqueue id)
   "Return ID if it is in QUEUE."
-  (when (ost-tree-node-by-id (org-ilm-pqueue--ost pqueue) id)
-    id))
-
-(defun org-ilm-pqueue--rank-to-quantile (pqueue rank)
-  (let ((size (org-ilm-pqueue--count pqueue)))
-    (if (= 1 size) 0 (/ (float rank) (1- size)))))
-
-(defun org-ilm-pqueue--quantile-to-rank (pqueue quantile)
-  (cl-assert (<= 0 quantile 1))
-  (let ((size (org-ilm-pqueue--count pqueue)))
-    (round (* quantile (1- size)))))
-
-(defun org-ilm-pqueue--read-rank (pqueue &optional numnew-or-id)
-  (let* ((pqueue-size (org-ilm-pqueue--count pqueue))
-         (numnew (cond
-                  ((null numnew-or-id) 0)
-                  ((numberp numnew-or-id) numnew-or-id)
-                  ((stringp numnew-or-id)
-                   ;; If element not yet in queue, max position is queue size + 1
-                   (if (org-ilm-pqueue--contains-p pqueue numnew-or-id)
-                       0 1))
-                  (t (error "Invalid value for NUMNEW-OR-ID"))))
-         (min 1)
-         (max (+ pqueue-size numnew))
-         rank)
-    (while (not rank)
-      (let ((number (read-number
-                     (format "Priority (#%s-%s / 0.0-1.0): " min max))))
-        (cond
-         ;; Inputted quantile
-         ((and (floatp number) (<= 0.0 number 1.0))
-          (setq rank (+ (org-ilm-pqueue--quantile-to-rank pqueue number) numnew)))
-         ;; Inputted rank
-         ((<= min number max)
-          (setq rank (1- number))))))
-    rank))
-
-(defun org-ilm-pqueue--format-priority (pqueue priority)
-  (let ((rank (car priority))
-        (quantile (cdr priority)))
-    (cl-assert (or rank quantile))
-    (unless quantile
-      (setq quantile (org-ilm-pqueue--rank-to-quantile pqueue rank)))
-    (unless rank
-      (setq rank (org-ilm-pqueue--quantile-to-rank pqueue quantile)))
-    (format "#%s/%s (%.2f%s)"
-            (1+ rank)
-            (org-ilm-pqueue--count pqueue)
-            (* 100 quantile)
-            "%")))
+  (org-ilm--ost-contains-p pqueue id))
 
 ;;;;; Create
 
@@ -892,7 +913,12 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (org-ilm-pqueue--count (org-ilm-pqueue collection)))
 
 (defun org-ilm-pqueue-read-rank (&optional numnew-or-id collection)
-  (org-ilm-pqueue--read-rank (org-ilm-pqueue collection) numnew-or-id))
+  (car (org-ilm--ost-read-position (org-ilm-pqueue collection) numnew-or-id)))
+
+(defun org-ilm-pqueue-select (&optional initial)
+  (org-ilm--queue-select-read
+   (org-ilm--queue-build (org-ilm--active-collection) 'All)
+   initial))
 
 (cl-defun org-ilm-pqueue-priority (id &key pqueue collection rank quantile nil-if-absent)
   "Position of the ID in PQUEUE as a cons (rank . quantile).
@@ -907,14 +933,14 @@ With RANK or QUANTILE, set the new position in the queue, or insert there if not
      ;; Position specified: Move or add the element 
      ((or rank quantile)
       (unless rank
-        (setq rank (org-ilm-pqueue--quantile-to-rank pqueue quantile)))
+        (setq rank (org-ilm--ost-quantile-to-rank pqueue quantile)))
       (if node
           (org-ilm-pqueue--move pqueue id rank)
         (org-ilm-pqueue--insert pqueue id rank)))
      ;; Retrieve position
      (node
       (let* ((rank (ost-rank ost id))
-             (quantile (org-ilm-pqueue--rank-to-quantile pqueue rank)))
+             (quantile (org-ilm--ost-rank-to-quantile pqueue rank)))
         (cons rank quantile)))
      ;; Element not found in priority queue
      (t
@@ -1109,7 +1135,7 @@ With RANK or QUANTILE, set the new position in the queue."
   (cdr (org-ilm-element-priority element)))
 
 (defun org-ilm-element-priority-formatted (element)
-  (org-ilm-pqueue--format-priority
+  (org-ilm--ost-format-position
    (org-ilm-element-pqueue element)
    (org-ilm-element-priority element)))
 
@@ -3794,7 +3820,7 @@ DAYS can be specified as numeric prefix arg."
       (propertize string 'face '(:inherit default :slant italic :underline t))
     string))
   
-(defun org-ilm--queue-make-vtable ()
+(cl-defun org-ilm--queue-make-vtable (&key keymap)
   "Build queue vtable.
 
 A lot of formatting code from org-ql."
@@ -3894,7 +3920,7 @@ A lot of formatting code from org-ql."
                 (org-ilm--vtable-format-marked
                  (org-add-props (s-join "," names) nil 'face 'org-tag)
                  marked))
-                "")))))
+            "")))))
    :objects-function
    (lambda ()
      (unless (org-ilm-queue-empty-p)
@@ -3919,7 +3945,7 @@ A lot of formatting code from org-ql."
                 (when (nth 0 subjects)
                   (mapcar (lambda (s) (org-mem-entry-by-id (car s)))
                           (last (nth 0 subjects) (nth 1 subjects)))))))))
-   :keymap org-ilm-queue-map))
+   :keymap (or keymap org-ilm-queue-map)))
 
 (defun org-ilm--queue-eldoc-show-info ()
   "Return info about the element at point in the queue buffer."
@@ -3927,7 +3953,7 @@ A lot of formatting code from org-ql."
     (propertize (format "[#%s]" (org-ilm-element-pcookie element))
                 'face 'org-priority)))
 
-(cl-defun org-ilm--queue-buffer-build (&key buffer switch-p)
+(cl-defun org-ilm--queue-buffer-build (&key buffer switch-p keymap)
   "Build the contents of the queue buffer, and optionally switch to it."
   (org-ilm-with-queue-buffer buffer
     (setq-local buffer-read-only nil)
@@ -3936,8 +3962,8 @@ A lot of formatting code from org-ql."
     (if (org-ilm-queue-empty-p)
         (progn
           (insert (propertize "Queue empty..." 'face 'italic))
-          (use-local-map org-ilm-queue-base-map))
-      (vtable-insert (org-ilm--queue-make-vtable)))
+          (use-local-map (or keymap org-ilm-queue-base-map)))
+      (vtable-insert (org-ilm--queue-make-vtable :keymap keymap)))
     (org-ilm-queue--set-header)
     (setq-local buffer-read-only t)
     (hl-line-mode 1)
@@ -3993,18 +4019,19 @@ A lot of formatting code from org-ql."
 
 ;;;;;; Priority spread transient
 
-(defun org-ilm--queue-pspread-transient-format (arg)
+(defun org-ilm--queue-pspread-transient-format (extremum)
   (when-let* ((args (transient-get-value))
-              (min (transient-arg-value (concat "--" arg "=") args)))
+              (rank (transient-arg-value (concat "--" extremum "=") args)))
     (propertize
-     (org-ilm-pqueue--format-priority
-      (org-ilm-pqueue) (cons (1- (string-to-number min)) nil))
+     (org-ilm--ost-format-position
+      (org-ilm-pqueue) (1- (string-to-number rank)))
      'face 'italic)))
 
 (defun org-ilm--queue-pspread-transient-read (extremum)
   (cl-assert (member extremum '("a" "b")))
   (let* ((minimum-p (string= extremum "a"))
-         (rank-this (org-ilm-pqueue-read-rank))
+         ;; (rank-this (org-ilm-pqueue-read-rank))
+         (rank-this (car (org-ilm-pqueue-select)))
          (rank-other (transient-arg-value
                       (concat "--" (if minimum-p "max" "min") "=")
                       (transient-args transient-current-command)))
@@ -4093,7 +4120,109 @@ A lot of formatting code from org-ql."
     (user-error "No elements marked!"))
   (setq org-ilm--queue-transient-buffer (current-buffer))
   (org-ilm--queue-pspread-transient))
-  
+
+;;;; Queue select
+
+(defvar org-ilm--queue-select-timer nil)
+(defvar org-ilm--queue-select-buffer nil)
+(defvar-local org-ilm--queue-select-point 1)
+(defvar-local org-ilm--queue-select-minibuffer-window nil)
+
+(defvar-keymap org-ilm-queue-select-map
+  :doc "Keymap of queue select buffer."
+  "n" (lambda ()
+        (interactive)
+        (next-line)
+        (when (eobp) (previous-line)))
+  "p" #'previous-line
+  "b" #'backward-char
+  "f" #'forward-char
+  "RET" (lambda ()
+          (interactive)
+          (org-ilm--queue-select-accept-minibuffer)))
+
+(defun org-ilm--queue-select-update (rank)
+  "Update preview buffer based on minibuffer INPUT."
+  (with-current-buffer org-ilm--queue-select-buffer
+    (setq header-line-format
+          (org-ilm--ost-format-position org-ilm-queue rank))
+    (with-selected-window (get-buffer-window)
+      (goto-line (1+ rank))
+      (hl-line-highlight)
+      (recenter-top-bottom))))
+
+(defun org-ilm--queue-select-update-minibuffer ()
+  (with-current-buffer org-ilm--queue-select-buffer
+    (when (and org-ilm--queue-select-minibuffer-window
+               (window-live-p org-ilm--queue-select-minibuffer-window))
+      (when-let* ((element (org-ilm--vtable-get-object))
+                  (rank (org-ilm-queue--element-value org-ilm-queue element)))
+        (with-selected-window org-ilm--queue-select-minibuffer-window
+          (delete-minibuffer-contents)
+          (insert (number-to-string (1+ rank))))))))
+
+(defun org-ilm--queue-select-accept-minibuffer ()
+  (with-current-buffer org-ilm--queue-select-buffer
+    (when (and org-ilm--queue-select-minibuffer-window
+               (window-live-p org-ilm--queue-select-minibuffer-window))
+      (with-selected-window org-ilm--queue-select-minibuffer-window
+        (exit-minibuffer)))))
+
+(defun org-ilm--queue-select-read (queue &optional init-position)
+  "Show only the preview buffer above the minibuffer during completion."
+  (let* ((saved-config (current-window-configuration))
+         (preview-buf (setq org-ilm--queue-select-buffer
+                            (org-ilm--queue-buffer-create queue)))
+         position)
+
+    ;; Setup buffer
+    (org-ilm--queue-buffer-build :buffer preview-buf :keymap org-ilm-queue-select-map)
+    (with-current-buffer preview-buf
+      (add-hook 'post-command-hook
+                (lambda ()
+                  (when (not (= (point) org-ilm--queue-select-point))
+                    (setq org-ilm--queue-select-point (point))
+                    (org-ilm--queue-select-update-minibuffer)))
+                nil 'local))
+    
+    (unwind-protect
+        (progn
+          ;; Replace all windows with our preview buffer
+          (delete-other-windows)
+          (switch-to-buffer preview-buf)
+          (org-ilm--queue-select-update
+           (car (org-ilm--ost-parse-position queue (or init-position 0))))
+
+          ;; now set up minibuffer hook
+          (minibuffer-with-setup-hook
+              (lambda ()
+                (with-current-buffer preview-buf
+                  (setq org-ilm--queue-select-minibuffer-window
+                        (active-minibuffer-window)))
+                (add-hook 'post-command-hook
+                          (lambda ()
+                            (when org-ilm--queue-select-timer
+                              (cancel-timer org-ilm--queue-select-timer))
+                            (setq org-ilm--queue-select-timer
+                                  (run-with-idle-timer
+                                   0.3 nil
+                                   (lambda ()
+                                     (when-let* ((input (string-to-number
+                                                         (minibuffer-contents-no-properties)))
+                                                 (input (if (= input 0) nil (1- input)))
+                                                 (pos (org-ilm--ost-parse-position
+                                                       queue input)))
+                                       (setq position pos)
+                                       (org-ilm--queue-select-update (car pos)))))))
+                          nil t))
+            (setq position (org-ilm--ost-read-position queue))))
+      ;; restore old window setup
+      (set-window-configuration saved-config)
+      (kill-buffer preview-buf)
+      (setq org-ilm--queue-select-buffer nil)
+      )
+    position))
+
 
 ;;;; Import
 
