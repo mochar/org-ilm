@@ -106,6 +106,7 @@
   :doc "Keymap for `org-ilm-global-minor-mode'."
   "i" #'org-ilm-import
   "e" #'org-ilm-element-actions
+  "s" #'org-ilm-schedule
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract-dwim
   "z" #'org-ilm-cloze
@@ -117,11 +118,15 @@
   "+" #'org-ilm-queue-add-dwim
   "g" #'org-ilm-registry)
 
+;; TODO This autoload doesnt work. Problem because i need this var in dir-locals.
+;;;###autoload
+(defconst org-ilm-log-drawer-name "ILM")
+
 ;;;; Minor mode
 
 ;; TODO This hook is called not just after file save but on a timer as well. Do we want the timer to reset cache?
 (defun org-ilm--org-mem-hook (&rest _)
-  (org-ilm-priority-subject-cache-reset))
+  (org-ilm-subject-cache-reset))
 
 ;;;###autoload
 (define-minor-mode org-ilm-global-minor-mode
@@ -304,7 +309,7 @@
     ((bound-and-true-p org-ilm-queue)
      (let* ((el (org-ilm--vtable-get-object))
             (id (when el (org-ilm-element-id el))))
-       (list 'queue (plist-get org-ilm-queue :collection) id)))))
+       (list 'queue (org-ilm-queue--collection org-ilm-queue) id)))))
 
 ;;;;; Time and date
 
@@ -508,7 +513,10 @@ Alternatively org-id-goto could be used, but does not seem to respect
 save-excursion."
   (declare (debug (body)) (indent 1))
   `(cond
-    ((null ,thing)
+    ;; If id is that of headline at point, dont jump, for performance but also
+    ;; so that org-mem is not required to have parsed the headline (useful in
+    ;; capture).
+    ((or (null ,thing) (string= ,thing (org-id-get)))
      ;; Reveal entry contents, otherwise run into problems parsing the metadata,
      ;; such as with org-srs drawer.
      (org-ilm--org-with-headline-contents-visible ,@body))
@@ -609,6 +617,29 @@ the priority, or error if there is no priority."
       (insert "[#" value "] "))
     (message "Priority set to %s" value)))
 
+(cl-defun org-ilm--org-schedule (&key timestamp interval-minutes interval-days ignore-time)
+  "Call org-schedule with TIMESTAMP."
+  (cond
+   ((not timestamp)
+    (when interval-days
+      (setq interval-minutes (* 60 24 interval-days)
+            ignore-time t))
+    (if (not interval-minutes)
+        (error "need timestamp or interval")
+      (cl-assert (and (numberp interval-minutes) (>= interval-minutes 0)))
+      (setq timestamp (ts-adjust 'minute interval-minutes (ts-now)))))
+   ((stringp timestamp)
+    (setq timestamp (ts-parse timestamp)))
+   ((ts-p timestamp))
+   (t (error "timestamp invalid format")))
+
+  (org-schedule
+   nil
+   (if (or ignore-time
+           (and (= (ts-hour timestamp) 0) (= (ts-minute timestamp) 0)))
+       (ts-format "%Y-%m-%d" timestamp)
+     (ts-format "%Y-%m-%d %H:%M" timestamp))))
+
 ;;;;; Org-node / org-mem
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
@@ -639,7 +670,7 @@ the priority, or error if there is no priority."
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
-;;;;; Ost
+;;;; Ost
 
 ;; Shared code for structs that hold an ost.
 
@@ -710,18 +741,19 @@ the priority, or error if there is no priority."
 
 (defun org-ilm--ost-format-position (obj position)
   (setq position (org-ilm--ost-parse-position obj position))
-  (let ((rank (car position))
-        (quantile (cdr position)))
-    (cl-assert (or rank quantile))
-    (unless quantile
-      (setq quantile (org-ilm--ost-rank-to-quantile obj rank)))
-    (unless rank
-      (setq rank (org-ilm--ost-quantile-to-rank obj quantile)))
-    (format "#%s/%s (%.2f%s)"
-            (1+ rank)
-            (org-ilm--ost-count obj)
-            (* 100 quantile)
-            "%")))
+  (when position
+    (let ((rank (car position))
+          (quantile (cdr position)))
+      (cl-assert (or rank quantile))
+      (unless quantile
+        (setq quantile (org-ilm--ost-rank-to-quantile obj rank)))
+      (unless rank
+        (setq rank (org-ilm--ost-quantile-to-rank obj quantile)))
+      (format "#%s/%s (%.2f%s)"
+              (1+ rank)
+              (org-ilm--ost-count obj)
+              (* 100 quantile)
+              "%"))))
 
 
 ;;;; Collection
@@ -738,6 +770,8 @@ the priority, or error if there is no priority."
 
 (defun org-ilm--active-collection ()
   (or org-ilm--active-collection
+      (when-let ((collection (org-ilm--collection-from-context)))
+        (setq org-ilm--active-collection collection))
       (let ((collection (org-ilm--select-collection)))
         (setq org-ilm--active-collection (car collection)))))
 
@@ -752,7 +786,7 @@ the priority, or error if there is no priority."
   "Return collection of which file belongs to.
 A collection symbol COLLECTION can be passed to test if file belongs to
  that collection."
-  (when-let ((file (or file buffer-file-name))
+  (when-let ((file (or file (buffer-file-name (buffer-base-buffer))))
              (path (expand-file-name file))
              (test (lambda (f place)
                      (if (f-directory-p place)
@@ -857,10 +891,20 @@ The collections are stored in `org-ilm-collections'."
   ;; Return nil prevent printing
   nil)
 
+(defun org-ilm-pqueue--contains-p (pqueue id)
+  "Return ID if it is in QUEUE."
+  (org-ilm--ost-contains-p pqueue id))
+
 (defun org-ilm-pqueue--insert (pqueue id rank)
   "Insert element with ID in PQUEUE with RANK."
   (ost-tree-insert (org-ilm-pqueue--ost pqueue) rank id)
   (org-ilm-pqueue--write pqueue))
+
+(defun org-ilm-pqueue--remove (pqueue id)
+  "Remove element with ID from PQUEUE."
+  (when (org-ilm-pqueue--contains-p pqueue id)
+    (ost-tree-remove (org-ilm-pqueue--ost pqueue) id)
+    (org-ilm-pqueue--write pqueue)))
 
 ;; TODO Keep copy of ost to restore in case of error midway?
 (defun org-ilm-pqueue--move (pqueue id new-rank)
@@ -878,10 +922,6 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 (defun org-ilm-pqueue--count (pqueue)
   "Return number of elements in PQUEUE."
   (ost-size (org-ilm-pqueue--ost pqueue)))
-
-(defun org-ilm-pqueue--contains-p (pqueue id)
-  "Return ID if it is in QUEUE."
-  (org-ilm--ost-contains-p pqueue id))
 
 ;;;;; Create
 
@@ -907,7 +947,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
     (t
      (when (yes-or-no-p (format "No priority queue found for collection \"%s\". Create a new one?" collection))
        (let* ((pqueue (org-ilm--pqueue-new collection)))
-         (org-ilm-pqueue-write pqueue)
+         (org-ilm-pqueue--write pqueue)
          (setf (alist-get collection org-ilm--pqueues) pqueue))))))
 
 (defun org-ilm-pqueue (&optional collection)
@@ -918,12 +958,50 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 (defun org-ilm-pqueue-count (&optional collection)
   (org-ilm-pqueue--count (org-ilm-pqueue collection)))
 
+(defun org-ilm-pqueue-insert (id priority &optional collection)
+  (let* ((pqueue (org-ilm-pqueue collection))
+         (rank (car (org-ilm--ost-parse-position pqueue priority 1))))
+    (org-ilm-pqueue--insert pqueue id rank)))
+
+(defun org-ilm-pqueue-remove (id &optional collection)
+  (org-ilm-pqueue--remove (org-ilm-pqueue collection) id))
+
+(defun org-ilm-pqueue-select (priority &optional collection)
+  (let* ((pqueue (org-ilm-pqueue collection))
+         (rank (car (org-ilm--ost-parse-position pqueue priority))))
+    (ost-node-id
+     (ost-select (org-ilm-pqueue--ost (org-ilm-pqueue collection)) rank))))
+
 (defun org-ilm-pqueue-read-rank (&optional numnew-or-id collection)
   (car (org-ilm--ost-read-position (org-ilm-pqueue collection) numnew-or-id)))
 
-(defun org-ilm-pqueue-select (&optional initial)
+(defun org-ilm-pqueue-queue (&optional collection)
+  "Return `org-ilm-queue' from all elements in the priority queue."
+  (let* ((pqueue (org-ilm-pqueue collection))
+         (collection (org-ilm-pqueue--collection pqueue))
+         (queue (make-org-ilm-queue
+                 :name (format "Priority queue (%s)" 
+                               (symbol-name collection))
+                 :collection collection))
+         (elements (org-ilm-query-collection collection #'org-ilm-query-all)))
+    (dolist (element elements)
+      (org-ilm-queue--insert
+       queue element
+       (car (org-ilm-pqueue-priority (org-ilm-element-id element) :pqueue pqueue))))
+    
+    (dolist (id (hash-table-keys (ost-tree-nodes (org-ilm-pqueue--ost pqueue))))
+      (unless (gethash id (org-ilm-queue--elements queue))
+        (puthash id id (org-ilm-queue--elements queue))
+        (ost-tree-insert (org-ilm-queue--ost queue)
+                         (car (org-ilm-pqueue-priority id :pqueue pqueue))
+                         id)))
+    
+    queue))
+
+(defun org-ilm-pqueue-select-rank (&optional initial)
   (org-ilm--queue-select-read
-   (org-ilm--queue-build (org-ilm--active-collection) 'All)
+   ;; (org-ilm--queue-build (org-ilm--active-collection) 'All)
+   (org-ilm-pqueue-queue)
    initial))
 
 (cl-defun org-ilm-pqueue-priority (id &key pqueue collection rank quantile nil-if-absent)
@@ -985,8 +1063,13 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
 
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
-  id collection state level pcookie rawval title tags sched schedrel
-  type subjects prelative psample pbeta registry media)
+  id collection state level pcookie rawval title tags sched
+  type subjects registry media)
+
+(defun org-ilm-element-schedrel (element)
+  (when-let ((scheduled (org-ilm-element-sched element)))
+    ;; convert from sec to days
+    (/ (ts-diff (ts-now) scheduled) 86400)))
 
 (defun org-ilm-element-at-point ()
   "Parse org-ilm data of headline at point.
@@ -1003,21 +1086,18 @@ wasteful if headline does not match query."
            ;; properties. Alternatively we can just resolve the deferred
            ;; properties by accessing them all in
            ;; `org-ilm--org-headline-at-point'.
-           (priority (org-ilm--get-priority headline))
            (id (org-element-property :ID headline))
            (todo-keyword (org-element-property :todo-keyword headline))
            (type (org-ilm-type todo-keyword))
            (is-card (eq type 'card))
-           (logbook (unless is-card (org-ilm--logbook-read headline)))
-           (subjects (org-ilm--priority-subject-gather headline))
-           (beta (org-ilm--priority-beta-compile (cdr priority) subjects logbook))
-           (psample (org-ilm--priority-sample beta id))
-           (scheduled (if is-card
-                          ;; TODO Move this out to srs section
-                          (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
-                        (when-let ((s (org-element-property :scheduled headline)))
-                          (ts-parse-org-element s))))
-           (now (ts-now))
+           (subject-data (org-ilm--subject-cache-gather headline))
+           ;; (scheduled (if is-card
+           ;;                ;; TODO Move this out to srs section
+           ;;                (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
+           ;;              (when-let ((s (org-element-property :scheduled headline)))
+           ;;                (ts-parse-org-element s))))
+           (scheduled (when-let ((s (org-element-property :scheduled headline)))
+                        (ts-parse-org-element s)))
            (entry (org-node-at-point)))
       
       (when type ; non-nil only when org-ilm type
@@ -1026,7 +1106,7 @@ wasteful if headline does not match query."
          :id id
          :state todo-keyword
          :level (org-element-property :level headline)
-         :pcookie (car priority)
+         :pcookie (org-element-property :priority headline)
          :rawval (org-element-property :raw-value headline)
          :tags (org-element-property :tags headline)
          :title (org-no-properties ; Remove text properties from title
@@ -1035,16 +1115,11 @@ wasteful if headline does not match query."
          ;; Ilm stuff
          :collection (car (org-ilm--collection-file (buffer-file-name (buffer-base-buffer))))
          :sched scheduled
-         :schedrel (when scheduled ; convert from sec to days
-                     (/ (ts-diff now scheduled) 86400))
          :type type
          :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
          :media (org-ilm--media-compile entry)
          ;; cdr to get rid of headline priority in the car - redundant
-         :subjects (cdr subjects)
-         :prelative (cdr priority)
-         :pbeta beta
-         :psample psample)))))
+         :subjects subject-data)))))
 
 (defun org-ilm-element-from-id (id)
   (org-ilm--org-with-point-at id
@@ -1224,7 +1299,7 @@ If `HEADLINE' is passed, read it as org-property."
   "Set the priority of an ilm element."
   (interactive
    (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (let ((position (org-ilm-pqueue-select (org-ilm-element-priority element))))
+  (let ((position (org-ilm-pqueue-select-rank (org-ilm-element-priority element))))
     (org-ilm-element-priority element :rank (car position))))
 
 ;;;;; Transient
@@ -1476,8 +1551,10 @@ The callback ON-ABORT is called when capture is cancelled."
             ;; after-finalize hook with the `org-note-abort' flag set to t in
             ;; `org-capture-kill'.
             (if org-note-abort
-                (when on-abort
-                  (funcall on-abort))
+                (progn
+                  (org-ilm-pqueue-remove id)
+                  (when on-abort
+                    (funcall on-abort)))
               (when org-ilm-update-org-mem-after-capture
                 (mochar-utils--org-mem-update-cache-after-capture 'entry))
               (when on-success
@@ -1490,6 +1567,10 @@ The callback ON-ABORT is called when capture is cancelled."
     (setq target
           (cond
            ((stringp target)
+            ;; First: Calculate priority based on parent
+            (unless priority
+              (setq priority (org-ilm-pqueue-priority target :nil-if-absent t)))
+            
             ;; Originally used the built-in 'id target, however for some reason
             ;; it sometimes finds the wrong location which messes everything
             ;; up. I noticed this behavior also with org-id-find and such. I
@@ -1527,9 +1608,8 @@ The callback ON-ABORT is called when capture is cancelled."
 
     (unless template
       (setq template
-            (format "* %s%s%s %s"
+            (format "* %s%s %s"
                     state
-                    (if priority (format " [#%s]" priority) "")
                     (if title (concat " " title) "")
                     "%?")))
 
@@ -1554,7 +1634,13 @@ The callback ON-ABORT is called when capture is cancelled."
                     ;; Regardless of type, every headline will have an id.
                     (org-entry-put nil "ID" id)
                     ;; Also trigger org-mem to update cache
+                    ;; (save-buffer)
                     (org-node-nodeify-entry)
+                    ;; (org-mem-updater-ensure-id-node-at-point-known)
+
+                    ;; Add id to priority queue. An abort is detected in
+                    ;; `after-finalize' to remove the id.
+                    (org-ilm-pqueue-insert id (or priority .5))
 
                     ;; Attachment extension if specified
                     (when ext
@@ -1566,24 +1652,7 @@ The callback ON-ABORT is called when capture is cancelled."
                                do (org-entry-put nil (if (stringp p) p
                                                        (substring (symbol-name p) 1)) v)))
 
-                    ;; Scheduling. We do not add a schedule for cards, as that
-                    ;; info is parsed with
-                    ;; `org-ilm--srs-earliest-due-timestamp'.
-                    (unless (eq type 'card)
-                      ;; Set initial schedule data based on priortiy
-                      (org-ilm--set-schedule-from-priority)
-
-                      ;; Add advice around priority change to automatically
-                      ;; update schedule, but remove advice as soon as capture
-                      ;; is finished.
-                      (advice-add 'org-priority
-                                  :around #'org-ilm--update-from-priority-change)
-                      (add-hook 'kill-buffer-hook
-                                (lambda ()
-                                  (advice-remove 'org-priority
-                                                 #'org-ilm--update-from-priority-change))
-                                nil t))
-
+                    
                     ;; For cards, need to transclude the contents in order for
                     ;; org-srs to detect the clozes.
                     ;; TODO `org-transclusion-add' super slow!!
@@ -1593,8 +1662,33 @@ The callback ON-ABORT is called when capture is cancelled."
                       (save-excursion
                         (org-ilm--transclusion-goto file 'create)
                         (org-transclusion-add)
-                        (org-srs-item-new 'ilm-cloze)
-                        (org-ilm--transclusion-goto file 'delete))))
+                        (let ((org-srs-log-drawer-name org-ilm-log-drawer-name)) 
+                          (org-srs-item-new 'ilm-cloze))
+                        (org-ilm--transclusion-goto file 'delete)))
+
+                    ;; Scheduling. For cards too rely on the headline schedule,
+                    ;; but make sure it gets matched with the org-srs table.
+                    (let ((card-interval (org-ilm-srs-first-interval)))
+                      (cond
+                       ((or (not (eq type 'card))
+                            (eq card-interval 'priority))
+                        ;; Set initial schedule data based on priortiy
+                        (org-ilm--set-schedule-from-priority)
+
+                        ;; Add advice around priority change to automatically
+                        ;; update schedule, but remove advice as soon as capture
+                        ;; is finished.
+                        (advice-add 'org-priority
+                                    :around #'org-ilm--update-from-priority-change)
+                        (add-hook 'kill-buffer-hook
+                                  (lambda ()
+                                    (advice-remove 'org-priority
+                                                   #'org-ilm--update-from-priority-change))
+                                  nil t))
+                       ((numberp card-interval)
+                        (org-ilm--schedule :interval-minutes card-interval))))
+
+                    )
                   :before-finalize before-finalize
                   :after-finalize after-finalize)
                  capture-args))))
@@ -1672,7 +1766,9 @@ Will become an attachment Org file that is the child heading of current entry."
          (unless dont-update-priority
            (org-ilm--attachment-priority-update 'extract)))
        nil
-       :immediate-finish (not capture-p)))))
+       ;; :immediate-finish (not capture-p)
+       :immediate-finish nil
+       ))))
 
 (defun org-ilm-cloze ()
   "Create a cloze card.
@@ -2866,8 +2962,8 @@ This is used to keep track of changes in priority and scheduling.")
              ;; TODO porbably remove and just use `org-ilm-element-from-id' to
              ;; get most recent
              :element element
-             :beta (org-ilm--priority-to-beta
-                    (org-ilm-element-prelative element))
+             ;; :beta (org-ilm--priority-to-beta
+             ;;        (org-ilm-element-prelative element))
              ;; Manual accumalating change in the priority
              :a 0
              :b 0
@@ -3443,6 +3539,16 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
     (org-ilm--queue-create
      collection :elements elements :query query)))
 
+(defun org-ilm-queue-build (&optional collection)
+  (let* ((collection (or collection
+                         (org-ilm--collection-from-context)
+                         (car (org-ilm--select-collection))))
+         (queues (cons (cons "Priority queue" "Full queue") org-ilm-queries))
+         (choice (org-ilm--select-alist queues "Query: ")))
+    (if (string= (car choice) "Priority queue")
+        (org-ilm-pqueue-queue collection)
+      (org-ilm--queue-build collection (car choice)))))
+
 (defun org-ilm--queue-rebuild (&optional buffer)
   "Replace the queue object by a rebuild one.
 If the queue has a query, run it again. Else re-parse elements."
@@ -3555,7 +3661,7 @@ queue buffer."
   (interactive "P")
   (if new
       (org-ilm--queue-buffer-create
-       (org-ilm--queue-build) :switch-p (not dont-switch))
+       (org-ilm-queue-build) :switch-p (not dont-switch))
     (cond
      ;; If current buffer is queue buffer, switch to active queue buffer, or ask
      ;; to make this the active queue buffer.
@@ -3578,14 +3684,14 @@ queue buffer."
                  (choice (completing-read "Queue: " candidates)))
             (if (string-empty-p choice)
                 (org-ilm--queue-buffer-create
-                 (org-ilm--queue-build)
+                 (org-ilm-queue-build)
                  :active-p t :switch-p (not dont-switch))
               (with-current-buffer (switch-to-buffer choice)
                 (org-ilm-queue--set-active-buffer (current-buffer)))))
         ;; If outside a queue buffer and there are no active or inactive queue
         ;; buffers, make one and make it active.
         (org-ilm--queue-buffer-create
-         (org-ilm--queue-build)
+         (org-ilm-queue-build)
          :active-p t :switch-p (not dont-switch)))))))
 
 ;;;;; Queue operations
@@ -3783,7 +3889,7 @@ If point on subject, add all headlines of subject."
   ;; descendancy, but this would require a list-to-list comparison eg with
   ;; `seq-some' per object, instead of just an `assoc'.
   (dolist (object (org-ilm-queue-elements))
-    (let ((ancestor-ids (mapcar #'car (car (org-ilm-element-subjects object)))))
+    (let ((ancestor-ids (car (org-ilm-element-subjects object))))
       (when (member subject-id ancestor-ids)
         (org-ilm-queue-object-mark object)))))
 
@@ -3862,30 +3968,36 @@ A lot of formatting code from org-ql."
       :align 'right
       :formatter
       (lambda (data)
-        (pcase-let* ((`(,marked ,index) data)
-                     ;; (index-str (format "%d" index)))
-                     (index-str (format "%4d" (1+ index))))
-          (org-ilm--vtable-format-marked index-str marked))))
+        (if (stringp data)
+            (propertize "NA" 'face 'Info-quoted)
+          (pcase-let* ((`(,marked ,index) data)
+                       ;; (index-str (format "%d" index)))
+                       (index-str (format "%4d" (1+ index))))
+            (org-ilm--vtable-format-marked index-str marked)))))
      (:name
       "Priority"
       :width 6
       :formatter
       (lambda (data)
-        (pcase-let ((`(,marked ,rank ,quantile) data))
-          (when (and rank quantile)
-            (org-ilm--vtable-format-marked
-             (propertize (format "%.2f" (* 100 quantile))
-                         'face 'shadow)
-             marked)))))
+        (if (stringp data)
+            (propertize "NA" 'face 'Info-quoted)
+          (pcase-let ((`(,marked ,rank ,quantile) data))
+            (when (and rank quantile)
+              (org-ilm--vtable-format-marked
+               (propertize (format "%.2f" (* 100 quantile))
+                           'face 'shadow)
+               marked))))))
      (:name
       "Type"
       :width 4
       :formatter
       (lambda (data)
-        (pcase-let ((`(,marked ,type) data))
-          (org-ilm--vtable-format-marked
-           (org-ql-view--add-todo-face (upcase (symbol-name type)))
-           marked))))
+        (if (stringp data)
+            (propertize "NA" 'face 'Info-quoted)
+          (pcase-let ((`(,marked ,type) data))
+            (org-ilm--vtable-format-marked
+             (org-ql-view--add-todo-face (upcase (symbol-name type)))
+             marked)))))
      ;; (:name
      ;;  "Cookie"
      ;;  :width 4
@@ -3901,22 +4013,26 @@ A lot of formatting code from org-ql."
       :max-width "55%"
       :formatter
       (lambda (data)
-        (pcase-let* ((`(,marked ,title) data))
-          (org-ilm--vtable-format-marked title marked))))
+        (if (stringp data)
+            (propertize data 'face 'Info-quoted)
+          (pcase-let* ((`(,marked ,title) data))
+            (org-ilm--vtable-format-marked title marked)))))
      (:name
       "Due"
       :max-width 8
       ;; :align 'right
       :formatter
       (lambda (data)
-        (pcase-let* ((`(,marked ,due) data))
-          (let ((due-str (if due
-                             (org-add-props
-                                 (org-ql-view--format-relative-date
-                                  (round due))
-                                 nil 'face 'org-ql-view-due-date)
-                           "")))
-            (org-ilm--vtable-format-marked due-str marked)))))
+        (if (stringp data)
+            (propertize "NA" 'face 'Info-quoted)
+          (pcase-let* ((`(,marked ,due) data))
+            (let ((due-str (if due
+                               (org-add-props
+                                   (org-ql-view--format-relative-date
+                                    (round due))
+                                   nil 'face 'org-ql-view-due-date)
+                             "")))
+              (org-ilm--vtable-format-marked due-str marked))))))
      ;; (:name
      ;;  "Tags"
      ;;  :formatter
@@ -3935,53 +4051,62 @@ A lot of formatting code from org-ql."
       :max-width 15
       :formatter
       (lambda (data)
-        (pcase-let ((`(,marked ,subjects) data))
-          (if subjects
-              (let ((names
-                     (mapcar
-                      (lambda (subject)
-                        (let ((title (or
-                                      (car (last (org-mem-entry-roam-aliases subject)))
-                                      (org-mem-entry-title subject))))
-                          (substring title 0 (min (length title)
-                                                  org-ilm-queue-subject-nchar))))
-                      subjects)))
-                (org-ilm--vtable-format-marked
-                 (org-add-props (s-join "," names) nil 'face 'org-tag)
-                 marked))
-            "")))))
+        (if (stringp data)
+            (propertize "NA" 'face 'Info-quoted)
+          (pcase-let ((`(,marked ,subjects) data))
+            (if subjects
+                (let ((names
+                       (mapcar
+                        (lambda (subject)
+                          (let ((title (or
+                                        (car (last (org-mem-entry-roam-aliases subject)))
+                                        (org-mem-entry-title subject))))
+                            (substring title 0 (min (length title)
+                                                    org-ilm-queue-subject-nchar))))
+                        subjects)))
+                  (org-ilm--vtable-format-marked
+                   (org-add-props (s-join "," names) nil 'face 'org-tag)
+                   marked))
+              ""))))))
    :objects-function
    (lambda ()
      (unless (org-ilm-queue-empty-p)
        (number-sequence 0 (1- (org-ilm-queue-count)))))
    :getter
    (lambda (row column vtable)
-     (let* ((object (org-ilm--vtable-get-object row))
-            (id (org-ilm-element-id object))
-            (marked (member id org-ilm--queue-marked-objects))
-            (subjects (org-ilm-element-subjects object))
-            (priority (org-ilm-element-priority object)))
-       (pcase (vtable-column vtable column)
-         ("Index" (list marked row))
-         ("Type" (list marked (org-ilm-element-type object)))
-         ("Priority" (list marked (car priority) (cdr priority)))
-         ;; ("Cookie" (list marked (org-ilm-element-pcookie object)))
-         ("Title" (list marked (org-ilm-element-title object)))
-         ("Due" (list marked (org-ilm-element-schedrel object)))
-         ;; ("Tags" (list marked (org-ilm-element-tags object)))
-         ("Subjects"
-          (list marked
-                (when (nth 0 subjects)
-                  (mapcar (lambda (s) (org-mem-entry-by-id (car s)))
-                          (last (nth 0 subjects) (nth 1 subjects)))))))))
+     (let ((object (org-ilm--vtable-get-object row)))
+       (cond
+        ((org-ilm-element-p object)
+         (let* ((id (org-ilm-element-id object))
+                (marked (member id org-ilm--queue-marked-objects))
+                (subjects (org-ilm-element-subjects object))
+                (priority (org-ilm-element-priority object)))
+           (pcase (vtable-column vtable column)
+             ("Index" (list marked row))
+             ("Type" (list marked (org-ilm-element-type object)))
+             ("Priority" (list marked (car priority) (cdr priority)))
+             ;; ("Cookie" (list marked (org-ilm-element-pcookie object)))
+             ("Title" (list marked (org-ilm-element-title object)))
+             ("Due" (list marked (org-ilm-element-schedrel object)))
+             ;; ("Tags" (list marked (org-ilm-element-tags object)))
+             ("Subjects"
+              (list marked
+                    (mapcar #'org-mem-entry-by-id
+                            ;; Only direct subjects
+                            (last (car subjects) (cdr subjects))))))))
+        ((stringp object)
+         object)
+        (t (error "wrong object value in table row")))))
+         
    :keymap (or keymap org-ilm-queue-map)
    :actions '("S" ignore)))
 
 (defun org-ilm--queue-eldoc-show-info ()
   "Return info about the element at point in the queue buffer."
   (when-let* ((element (org-ilm--vtable-get-object)))
-    (propertize (format "[#%s]" (org-ilm-element-pcookie element))
-                'face 'org-priority)))
+    (when (org-ilm-element-p element)
+      (propertize (format "[#%s]" (org-ilm-element-pcookie element))
+                  'face 'org-priority))))
 
 (cl-defun org-ilm--queue-buffer-build (&key buffer switch-p keymap)
   "Build the contents of the queue buffer, and optionally switch to it."
@@ -4112,7 +4237,7 @@ A lot of formatting code from org-ql."
          (queue (transient-scope))
          (rank-this (car (if queue
                              (org-ilm--queue-select-read queue)
-                           (org-ilm-pqueue-select))))
+                           (org-ilm-pqueue-select-rank))))
          (rank-other (transient-arg-value
                       (concat "--" (if minimum-p "max" "min") "=")
                       (transient-args transient-current-command)))
@@ -4222,10 +4347,6 @@ A lot of formatting code from org-ql."
   (interactive)
   (org-ilm--queue-spread-position 'priority-queue-p))
 
-;;;;;; Position spread transient
-
-
-
 
 ;;;; Queue select
 
@@ -4249,7 +4370,7 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm--queue-select-update (rank)
   "Update preview buffer based on minibuffer INPUT."
-  (when (buffer-live-p org-ilm--queue-select-buffer)
+  (when (and rank (buffer-live-p org-ilm--queue-select-buffer))
     (with-current-buffer org-ilm--queue-select-buffer
       (setq header-line-format
             (concat "Select position: "
@@ -4719,9 +4840,9 @@ Uses Marsaglia and Tsang's method for shape >= 1, and Ahrens-Dieter for shape < 
     (* (sqrt (* -2.0 (log u1)))
        (cos (* 2.0 pi u2)))))
 
-(defun org-ilm--random-poisson (lambda)
+(defun org-ilm--random-poisson (lambd)
   "Generate a Poission random variable using Knuth's algorithm."
-  (let ((l (exp (- lambda)))
+  (let ((l (exp (- lambd)))
         (k 0)
         (p 1.0))
     (while (> p l)
@@ -4857,7 +4978,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   "Calculate the beta parameters of the heading at point."
   (let ((priority (cdr (org-ilm--get-priority headline)))
         (logbook (org-ilm--logbook-read headline))
-        (subjects (org-ilm--priority-subject-gather headline)))
+        (subjects (org-ilm--subject-cache-gather headline)))
     (org-ilm--priority-beta-compile priority subjects logbook)))
 
 (defun org-ilm--priority-sample (beta &optional seed)
@@ -4902,66 +5023,6 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   (cl-assert (>= count 0 ))
   (min count 5))
 
-;;;;; Subject priorities
-
-;; I don't know if we want to add anything to this but we can always just extend
-;; the value list.
-;; TODO Add sum of ancestor priorities?
-(defvar org-ilm-priority-subject-cache (make-hash-table :test 'equal)
-  "Map subject org-id -> (priority '((ancestor-subject-id . priority)) num-direct-parents)
-
-The direct parent ids are the last num-direct-parents ids in ancestor-subject-ids.
-
-Gets reset after org-mem refreshes.")
-
-(defun org-ilm-priority-subject-cache-reset ()
-  (setq org-ilm-priority-subject-cache (make-hash-table :test 'equal)))
-
-(defun org-ilm--priority-subject-gather (headline-or-id)
-  "Gather recursively headline's priority and parent subject priorities.
-Headline can be a subject or not."
-  (let ((id (if (stringp headline-or-id)
-                headline-or-id
-              (org-element-property :ID headline-or-id))))
-    ;; (org-ilm--debug "Gathering subjects for:" id)
-    
-    (or (gethash id org-ilm-priority-subject-cache)
-        (let* ((parents-data
-                ;; Non-recursively, just direct parents in DAG
-                (org-ilm--subjects-get-parent-subjects headline-or-id))
-               (headline (car parents-data))
-               (type (org-ilm-type headline))
-               (is-subject (eq type 'subj))
-               (parent-ids (cdr parents-data))
-               (entry (org-mem-entry-by-id id))
-               ;; Using entry is much faster, there is no need to parse the headline
-               (priority (cdr (org-ilm--get-priority entry)))
-               (ancestor-data
-                (mapcar
-                 (lambda (parent-id)
-                   (cons parent-id
-                         (cdr (org-ilm--get-priority
-                               (org-mem-entry-by-id parent-id)))))
-                 parent-ids)))
-
-          ;; Recursively call this function on all direct parent subjects to get
-          ;; their priority data.
-          (dolist (parent-id parent-ids)
-            (let ((parent-data (org-ilm--priority-subject-gather parent-id)))
-              ;; Add parent's ancestors to list of ancestors
-              (dolist (parent-ancestor (nth 1 parent-data))
-                (unless (assoc parent-ancestor ancestor-data)
-                  (push parent-ancestor ancestor-data)))))
-
-          ;; Compile data in a list. If this headline is also a subject, add it
-          ;; to the cache as well.
-          (let ((priority-data (list priority ancestor-data (length parent-ids))))
-            (when is-subject
-              ;; (org-ilm--debug "Adding to hash:" id)
-              (puthash id priority-data org-ilm-priority-subject-cache))
-            ;; Return data
-            priority-data)))))
-
 ;;;; Scheduling
 
 (defun org-ilm--days-from-now (days)
@@ -4970,23 +5031,39 @@ Headline can be a subject or not."
 
 (defun org-ilm--schedule-interval-from-priority (priority)
   "Calculate a schedule interval from the normalized priority value."
-  (cl-assert (<= 0 priority 1))
-  (let* ((priority-bounded (min (max (- 1 priority) 0.05) 0.95))
-         (rate (* 25 (- 1 priority-bounded)))
+  (cl-assert (and (floatp priority) (<= 0 priority 1)))
+  (let* ((rate (* 25 priority))
          (interval (+ (org-ilm--random-poisson rate) 1)))
     interval))
 
+(cl-defun org-ilm--schedule (&key org-id timestamp interval-minutes interval-days ignore-time)
+  (unless (setq org-id (or org-id (org-id-get)))
+    (error "No headline with id given or at point."))
+  (message "lol: %s" org-id)
+  (org-ilm--org-with-point-at org-id
+    (message "kek: %s" org-id)
+    (org-ilm--org-schedule :timestamp timestamp
+                           :interval-minutes interval-minutes
+                           :interval-days interval-days
+                           :ignore-time ignore-time)
+    ;; If card, make sure srs table matches
+    (when (eq 'card (org-ilm-type (org-get-todo-state)))
+      (org-ilm--srs-match-timestamp-to-schedule))))
+
 (defun org-ilm--set-schedule-from-priority ()
   "Set the schedule based on the priority."
-  (when-let ((interval (org-ilm--schedule-interval-from-priority (cdr (org-ilm--get-priority)))))
-    (org-schedule nil (format "+%sd" interval))))
+  (when-let* ((id (org-id-get))
+              (collection (car (org-ilm--collection-file)))
+              (priority (org-ilm-pqueue-priority
+                         id :collection collection))
+              (interval-days (org-ilm--schedule-interval-from-priority
+                              (cdr priority))))
+    (org-ilm--schedule :interval-days interval-days)))
 
 (defun org-ilm--update-from-priority-change (func &rest args)
   "Advice around `org-priority' to detect priority changes to update schedule."
-  (let ((old-priority (org-ilm--get-priority)))
-    (apply func args)
-    (let ((new-priority (org-ilm--get-priority)))
-      (org-ilm--set-schedule-from-priority))))
+  (apply func args)
+  (org-ilm--set-schedule-from-priority))
 
 ;; TODO Better scheduling algorithm:
 ;; Early review, etc.
@@ -4998,7 +5075,7 @@ Headline can be a subject or not."
 
 (defun org-ilm--element-schedule-interval-calculate (element)
   (let ((last-interval (org-ilm-element-last-interval element))
-        (priority (org-ilm-element-prelative element))
+        (priority (cdr (org-ilm-element-priority element)))
         (scheduled (org-ilm-element-sched element)))
     (org-ilm--schedule-interval-calculate priority scheduled last-interval)))
 
@@ -5014,29 +5091,44 @@ due or not."
          (scheduled (org-ilm-element-sched element)))
     (cl-assert scheduled)
     (cl-assert (eq (org-ilm-element-type element) 'incr))
-    (let* ((interval (org-ilm--element-schedule-interval-calculate element))
-           (timestamp (ts-adjust 'day interval (org-ilm--ts-today))))
+    (let ((interval-days (org-ilm--element-schedule-interval-calculate element)))
       (cl-assert (> interval 0))
-      (org-schedule nil (ts-format "%Y-%m-%d" timestamp)))))
+      (org-ilm--schedule :org-id (org-ilm-element-id element)
+                         :interval-days interval-days
+                         :ignore-time t))))
 
-(defun org-ilm-schedule (element date)
+;; TODO remove rely on element - just parse id
+(defun org-ilm-schedule (element timestamp)
   "Set or update the schedule of the element at point."
   (interactive
    (list (org-ilm-element-at-point)
-         (org-read-date nil nil nil "Schedule: ")))
+         (org-read-date 'with-time nil nil "Schedule: ")))
   (unless element (user-error "No ilm element at point"))
-
-  ;; Only read the date
-  (pcase (org-ilm-element-type element)
-    ('incr (org-schedule nil date))
-    ;; Convert to ISO8601
-    ('card (org-ilm--srs-set-timestamp (concat date "T09:00:00Z")))))
-    
-
+  (org-ilm--schedule :timestamp timestamp))
 
 ;;;; SRS
 
 ;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
+
+(defcustom org-ilm-srs-first-interval 'fsrs
+  "The first interval for cards."
+  :type '(choice (const :tag "FSRS computed interval" 'fsrs)
+                 (const :tag "Priority based interval" 'priority)
+                 (string :tag "Custom interval as %H:%S format")
+                 (number :tag "Custom interval in minutes"))
+  :group 'org-ilm)
+
+(defun org-ilm-srs-first-interval ()
+  (let ((interval org-ilm-srs-first-interval))
+    (cond
+     ((member interval '(fsrs priority))
+      interval)
+     ((and (numberp interval) (>= interval 0))
+      interval)
+     ((stringp interval)
+      (ignore-errors (org-duration-to-minutes interval)))
+     (t nil))))
+      
 
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
@@ -5109,6 +5201,39 @@ From: `org-srs-review-postpone'"
                                                          (org-srs-item-due-timestamp)
                                                          (org-srs-timestamp-now))
                                                         time-or-duration)))))))
+
+(defun org-ilm--srs-match-schedule-to-timestamp ()
+  "Set the headeline scheduled date to the due timestamp of the org-srs table."
+  (save-excursion
+    (org-back-to-heading)
+    (when-let* ((srs-ts (org-ilm--srs-earliest-due-timestamp)))
+      (org-schedule nil (ts-format "%Y-%m-%d %H:%M" srs-ts)))))
+
+(defun org-ilm--srs-match-timestamp-to-schedule ()
+  "Set the timestamp of the org-srs table to be the same date as the
+scheduel of the org headline."
+  (save-excursion
+    (org-back-to-heading)
+    (when-let* ((headline (org-ilm--org-headline-at-point))
+                (sched-element (org-element-property :scheduled headline))
+                (sched-ts (ts-parse-org-element sched-element))
+                (srs-ts (org-ilm--srs-earliest-due-timestamp)))
+      (setf (ts-second srs-ts) 0) ;; Seconds don't contribute
+      
+      ;; Headline schedule can omit time, in which case we only match on date.
+      ;; ts lib returns 0 when hour absent which is ambigous
+      (unless (org-element-property :hour-start sched-element)
+        (setf (ts-hour srs-ts) 0
+              (ts-minute srs-ts) 0))
+
+      ;; Cannot use `ts=' as it uses unix timestamp which can differ in less than
+      ;; a second.
+      (unless (string= (ts-format "%Y-%m-%d %H:%M" sched-ts)
+                       (ts-format "%Y-%m-%d %H:%M" srs-ts))
+        (org-ilm--srs-set-timestamp
+         ;; ts-format does not accept timezone
+         (format-time-string "%FT%TZ" (ts-unix sched-ts) "UTC"))))))
+    
 ;; TODO Only works for first item
 (defun org-ilm--srs-table ()
   "Return the table rows of the first srs item of the current heading."
@@ -5290,7 +5415,7 @@ Descendants can be directly in outline or indirectly through property linking."
   (let ((id (plist-get subject :id)))
     (seq-filter
      (lambda (subj)
-       (let ((ancestory (nth 2 (org-ilm--priority-subject-gather (plist-get subj :id)))))
+       (let ((ancestory (nth 2 (org-ilm--subject-cache-gather (plist-get subj :id)))))
          (member id ancestory)))
      (org-ilm--query-subjects))))
 
@@ -5416,6 +5541,52 @@ TODO Skip if self or descendant."
                             (concat "id:" subject-id) subject-desc)))
         (org-entry-put nil "SUBJECTS+"
                        (concat cur-subjects " " subject-link))))))
+
+;;;; Subject cache
+
+(defvar org-ilm-subject-cache (make-hash-table :test 'equal)
+  "Map subject org-id -> ('(ancestor-subject-ids..) . num-direct-parents)
+
+The direct parent ids are the last num-direct-parents ids in ancestor-subject-ids.
+
+Gets reset after org-mem refreshes.")
+
+(defun org-ilm-subject-cache-reset ()
+  (setq org-ilm-subject-cache (make-hash-table :test 'equal)))
+
+(defun org-ilm--subject-cache-gather (headline-or-id)
+  "Gather recursively headline's priority and parent subject priorities.
+Headline can be a subject or not."
+  (let ((id (if (stringp headline-or-id)
+                headline-or-id
+              (org-element-property :ID headline-or-id))))
+    ;; (org-ilm--debug "Gathering subjects for:" id)
+    
+    (or (gethash id org-ilm-subject-cache)
+        (let* ((parents-data
+                ;; Non-recursively, just direct parents in DAG
+                (org-ilm--subjects-get-parent-subjects headline-or-id))
+               (headline (car parents-data))
+               (type (org-ilm-type headline))
+               (is-subject (eq type 'subj))
+               (parent-ids (cdr parents-data))
+               (entry (org-mem-entry-by-id id))
+               (ancestor-ids (copy-sequence parent-ids)))
+
+          ;; Recursively call this function on all direct parent subjects to get
+          ;; entire ancestory.
+          (dolist (parent-id parent-ids)
+            (let ((parent-data (org-ilm--subject-cache-gather parent-id)))
+              (dolist (parent-ancestor (car parent-data))
+                (cl-pushnew parent-ancestor ancestor-ids :test #'equal))))
+
+          ;; Compile data in a list. If this headline is also a subject, add it
+          ;; to the cache as well.
+          (let ((data (when ancestor-ids (cons ancestor-ids (length parent-ids)))))
+            (when is-subject
+              (puthash id data org-ilm-subject-cache))
+            ;; Return data
+            data)))))
 
 ;;;; Review
 
@@ -5669,7 +5840,12 @@ a whole other problem, since we can only deal with one card (type?) now."
     (org-ilm--org-with-point-at id
       (when (org-ilm-element-is-card element)
         (setq card-type
-              (org-ilm--srs-headline-item-type)))
+              (org-ilm--srs-headline-item-type))
+
+        ;; Make sure the due date in the org-srs table matches the heading
+        ;; schedule.
+        (when card-type
+          (org-ilm--srs-match-timestamp-to-schedule)))
       
       (setq attachment-buffer
             ;; dont yet switch to the buffer, just return it so we can do some
