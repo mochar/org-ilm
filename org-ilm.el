@@ -343,6 +343,18 @@
   "Check if string TIMESTAMP is ISO 8601 formatted calendar date (YYYY-MM-DD)."
   (org-ilm--timestamp-is-format-p timestamp "%Y-%m-%d"))
 
+(defun org-ilm--ts-format-utc (ts)
+  (if (ts-p ts)
+      (format-time-string "%FT%TZ" (ts-unix ts) "UTC0")
+    (cl-assert (org-ilm--timestamp-is-utc-iso8601-p ts))
+    ts))
+
+(defun org-ilm--ts-format-utc-date (ts)
+  (if (ts-p ts)
+      (ts-format "%Y-%m-%d" ts)
+    (cl-assert (org-ilm--timestamp-is-iso8601-date-p ts))
+    ts))
+
 ;;;;; Elisp
 
 (defun org-ilm--select-alist (alist &optional prompt formatter)
@@ -1069,8 +1081,7 @@ With RANK or QUANTILE, set the new position in the queue, or insert there if not
 ;;;; Logging
 
 ;; Logging stuff to the ilm drawer table.
-;; Fields of the log table:
-;;   [All elements]
+;; Fields of the log table in all elements:
 ;; - timestamp: when it was reviewed (or created)
 ;; - delay: num days between timestamp and scheduled date
 ;; - priority: "rank-size" when it was reviewed
@@ -1113,7 +1124,9 @@ Difficulty is between 1 and 10. Want a bit more precision here."
          (value (funcall getter review)))
     (cond
      ((null value) "")
-     ((member field '(delay rating))
+     ((eq field 'delay)
+      (if (= 0 value) "" (format "%s" value)))
+     ((eq field 'rating)
       (format "%s" value))
      ((eq field 'state)
       (format "%s" (pcase value
@@ -1124,6 +1137,8 @@ Difficulty is between 1 and 10. Want a bit more precision here."
       (format (concat "%." (number-to-string org-ilm-log-card-parameter-precision) "f") value))
      ((eq field 'priority)
       (format "%s-%s" (car value) (cdr value)))
+     ((eq field 'due)
+      (org-ilm--ts-format-utc-date (ts-parse value)))
      (t value))))
 
 (defun org-ilm-log-review-from-alist (alist &optional type)
@@ -1156,18 +1171,23 @@ Difficulty is between 1 and 10. Want a bit more precision here."
       (setq delay (string-to-number delay))
       (cl-assert (numberp delay)))
     (when state (setq state (intern state)))
-    (when rating (setq rating (intern rating)))
     (pcase type
       ('card
        (setq state (pcase state
-                      (:learn :learning)
-                      (:relearn :relearning)))
+                     (:learn :learning)
+                     (:relearn :relearning)
+                     (_ state)))
        (cl-assert (member state '(:done :learning :review :relearning)))
-       (cl-assert (member rating '(:again :hard :good :easy)))
-       (setq stability (string-to-number stability)
-             difficulty (string-to-number difficulty))
-       (cl-assert (floatp stability))
-       (cl-assert (floatp difficulty)))
+       (when rating
+         (setq rating (intern rating))
+         (cl-assert (member rating '(:again :hard :good :easy))))
+       ;; Both are absent (new card) or both are present
+       (cl-assert (eq (not stability) (not difficulty)))
+       (when (and stability difficulty)
+         (setq stability (string-to-number stability)
+               difficulty (string-to-number difficulty))
+         (cl-assert (floatp stability))
+         (cl-assert (floatp difficulty))))
       ('incr
        (cl-assert (or (not state) (member state '(:done))))
        (cl-assert (null rating))))
@@ -1223,7 +1243,7 @@ If found, return start and end positions as cons."
     ('card org-ilm-log-card-fields)
     (_ (error "Not an ilm element"))))
 
-(defun org-ilm--log-insert (data)
+(defun org-ilm--log-append (data)
   "Insert DATA at the end of an org table.
 
 DATA can be an alist for one row, or a list of alists for multiple
@@ -1245,7 +1265,7 @@ rows. The alist maps column name to entry value."
   "Go to the beginning of the log drawer table. Return pos.
 
 With optional INIT-DATA, create a new table with this data. See
-`org-ilm--log-insert'."
+`org-ilm--log-append'."
   (when-let ((bounds (org-ilm--log-beginning-of-drawer init-data)))
     (let ((table-pos (save-excursion
                        (re-search-forward org-table-line-regexp (cdr bounds) t))))
@@ -1263,14 +1283,20 @@ With optional INIT-DATA, create a new table with this data. See
           (dolist (field (org-ilm--log-fields))
             (insert (org-ilm-log-review-format-field field) "|"))
           (org-table-insert-hline)
-          (org-ilm--log-insert init-data)
+          (org-ilm--log-append init-data)
           (org-ilm--log-beginning-of-table)))))))
+
+(defun org-ilm--log-insert (data)
+  "Insert DATA into the log table, creating one if missing."
+  (if (org-ilm--log-beginning-of-table)
+      (org-ilm--log-append data)
+    (org-ilm--log-beginning-of-table data)))
 
 (defun org-ilm--log-read (&optional init-data)
   "Return the data of the log drawer table as an alist.
 
 With optional INIT-DATA, create a new table with this data. See
-`org-ilm--log-insert'."
+`org-ilm--log-append'."
   (save-excursion
     (when (org-ilm--log-beginning-of-table init-data)
       (let ((table (org-table-to-lisp)))
@@ -1286,7 +1312,6 @@ With optional INIT-DATA, create a new table with this data. See
                          (number-sequence 0 (1- (length columns)))) )
                       (cl-subseq table 2))))
           (org-ilm--log-data-ensure data))))))
-
 
 
 ;;;; Types
@@ -5400,24 +5425,77 @@ due or not."
 
 ;;;;; Logging
 
-(defun org-ilm--card-log-read ()
-  (let ((log (org-ilm--log-read)))
-    (dolist (review log)
-      (cl-assert (member (cl-callf #'intern (alist-get 'state review))
-                         '(:learning :review :relearning)))
-      (cl-assert (member (cl-callf #'intern (alist-get 'rating review))
-                         '(:good :easy :hard :again)))
-      (cl-callf #'string-to-number (alist-get 'stability review))
-      (cl-callf #'string-to-number (alist-get 'difficulty review))
-      (cl-callf #'ts-parse (alist-get 'timestamp review))
-      (cl-callf #'ts-parse (alist-get 'due review))))
-  )
+;; TODO This can be optimized by truncating based on latest :review state
+(defun org-ilm--card-step-from-log (scheduler review-log)
+  "Calculate the current step based on a REVIEW-LOG.
 
-(defun org-ilm--card-log (rating &optional timestamp duration)
-  (let ((review-log (org-ilm--log-read)) 
-        (card (fsrs-make-card)))
+Returns the current step (integer) or nil if the card is in :review state.
+An empty log implies a new card, so step is 0."
+  ;; We could also run the simulation with fsrs-scheduler-review-card but that
+  ;; calculates also the model parameters which is unnecessary work. So just
+  ;; reimplement the step logic.
+  (let ((learn-steps (length (fsrs-scheduler-learning-steps scheduler)))
+        (relearn-steps (length (fsrs-scheduler-relearning-steps scheduler)))
+        (current-step 0))
+    (dolist (review review-log)
+      (let ((state (org-ilm-log-review-state review))
+            (rating (org-ilm-log-review-rating review)))
+        ;; Note, :hard rating does not increment step
+        (cond
+         ((eq state :review)
+          (setq current-step nil))
+         ((eq rating :again)
+          (setq current-step 0))
+         ((eq rating :good)
+          (if (= current-step (1- (pcase state
+                                    (:learning learn-steps)
+                                    (:relearning relearn-steps))))
+              (setq current-step nil)
+            (cl-incf current-step))))))
+    current-step))
+
+(defun org-ilm--card-log (scheduled priority-rank &optional scheduler rating timestamp duration)
+  "Log the creation or review of a fsrs card in the ilm drawer table.
+
+If new item, SCHEDULED should be now."
+  (let* ((review-log (org-ilm--log-read))
+         (last-review (car (last review-log)))
+         (scheduled (org-ilm--ts-format-utc scheduled))
+         (timestamp (org-ilm--ts-format-utc (or timestamp (ts-now))))
+         (delay (plist-get
+                 (ts-human-duration
+                  (ts-difference (ts-parse timestamp) (ts-parse scheduled)))
+                 :days))
+         card)
     
-  )
+    (setq card
+          (if (not last-review)
+              (fsrs-make-card :due scheduled)
+            (cl-assert (and scheduler rating))
+            (car
+             (fsrs-scheduler-review-card
+              scheduler
+              (fsrs-make-card
+               :state (org-ilm-log-review-state last-review)
+               :step (org-ilm--card-step-from-log scheduler review-log)
+               :stability (org-ilm-log-review-stability last-review)
+               :difficulty (org-ilm-log-review-difficulty last-review)
+               :last-review (org-ilm-log-review-timestamp last-review)
+               ;; Due date should be "artificial" one (potentially manually
+               ;; edited), not the true date as scheduled in previous review, as
+               ;; the algorithm does the calculation based on expected next
+               ;; review. Having said that i cannot find this field being accessed
+               ;; in `fsrs-scheduler-review-card'.
+               :due scheduled)
+              rating timestamp duration))))
+
+    (org-ilm--log-insert
+     (make-org-ilm-log-review
+      :type 'card :timestamp timestamp :rating rating :delay delay
+      :priority (cons priority-rank (org-ilm-pqueue-count))
+      :due (fsrs-card-due card) :state (fsrs-card-state card)
+      :stability (fsrs-card-stability card)
+      :difficulty (fsrs-card-difficulty card)))))
 
 
 
@@ -5925,6 +6003,18 @@ out."
   "<f7>" #'org-ilm-review-rate-hard
   "<f8>" #'org-ilm-review-rate-again
   "<f9>" #'org-ilm-review-next)
+
+;;;;; Logging
+
+;; Logic for logging review data in the ilm drawer.
+;; Mostly replicates behavior from `org-srs'.
+
+(defun org-ilm--review-log-incr (timestamp duration interval priority action)
+  ;; Priority: Priority at time of review (rank . queue-size)
+  ;; Interval: NEW interval, so that we can compare with next timestamp to calculate delay
+  ;; Duration: 
+  )
+
 
 ;;;;; Review logic
 
