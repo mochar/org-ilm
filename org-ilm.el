@@ -21,10 +21,12 @@
 (require 'org-element)
 (require 'org-ql)
 (require 'org-ql-view)
+(require 'fsrs)
 (require 'org-srs)
 (require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
+(require 'rx)
 (require 'ts)
 (require 'vtable)
 (require 'eldoc)
@@ -327,6 +329,20 @@
    (org-time-stamp-format)
    (ts-unix (ts-adjust 'day interval (ts-now)))))
 
+(defun org-ilm--timestamp-is-format-p (timestamp format &optional timezone)
+  "Check if string TIMESTAMP has the required FORMAT with optional TIMEZONE."
+  (cl-assert (and (stringp timestamp) (stringp format)))
+  (let ((ts (ts-parse timestamp)))
+    (string= timestamp (format-time-string format (ts-unix ts) timezone))))
+
+(defun org-ilm--timestamp-is-utc-iso8601-p (timestamp)
+  "Check if string TIMESTAMP is formatted according to ISO 8601 with UTC timezone."
+  (org-ilm--timestamp-is-format-p timestamp "%FT%TZ" "UTC0"))
+
+(defun org-ilm--timestamp-is-iso8601-date-p (timestamp)
+  "Check if string TIMESTAMP is ISO 8601 formatted calendar date (YYYY-MM-DD)."
+  (org-ilm--timestamp-is-format-p timestamp "%Y-%m-%d"))
+
 ;;;;; Elisp
 
 (defun org-ilm--select-alist (alist &optional prompt formatter)
@@ -434,6 +450,16 @@ The returned function can be used to call `remove-hook' if needed."
 
 
 ;;;;; Org
+
+(defun org-ilm--org-headline-bounds ()
+  "Return (start . end) char that constitutes the headline at point,
+ excluding child headlines."
+  (save-excursion
+    (let ((start (org-back-to-heading))
+          (end (progn
+                 (org-next-visible-heading 1)
+                 (point))))
+      (cons start end))))
 
 (defun org-ilm--org-narrow-to-header ()
   "Narrow to headline and content up to next heading or end of buffer."
@@ -1040,12 +1066,234 @@ With RANK or QUANTILE, set the new position in the queue, or insert there if not
               (error "Element \"%s\" not part of collection \"%s\"" id pqueue-collectoin))
           (error "Org heading \"%s\" not an ilm element." id)))))))
 
+;;;; Logging
+
+;; Logging stuff to the ilm drawer table.
+;; Fields of the log table:
+;;   [All elements]
+;; - timestamp: when it was reviewed (or created)
+;; - delay: num days between timestamp and scheduled date
+;; - priority: "rank-size" when it was reviewed
+;; - due: the next scheduled review (date without time)
+;; - state: new state after review
+;; Notes:
+;; - The creation of an element is also logged.
+;; - The timestamp can be compared with the delay field to calculate delay or how
+;; - much earlier it was reviewed.
+;; - The delay+timestamp fields can be compared with the previous log's due
+;;   field to calculate how much it was postponed.
+
+(defconst org-ilm-log-element-fields '(timestamp delay priority due state))
+(defconst org-ilm-log-incr-fields org-ilm-log-element-fields)
+(defconst org-ilm-log-card-fields (append
+                                   org-ilm-log-element-fields
+                                   '(rating stability difficulty)))
+
+(defcustom org-ilm-log-card-parameter-precision 3
+  "The number of decimals to store for the stability and difficulty card parameters.
+
+Stability is measured as number of days. Negligible difference.
+Difficulty is between 1 and 10. Want a bit more precision here."
+  :type 'number
+  :group 'org-ilm-card)
+
+(cl-defstruct org-ilm-log-review
+  "A review entry in an ilm element log drawer table."
+  type timestamp delay priority due state rating stability difficulty)
+
+(defun org-ilm-log-review-format-field (field)
+  (pcase field
+    ('stability "S")
+    ('difficulty "D")
+    ('priority "prior")
+    (_ (format "%s" field))))
+
+(defun org-ilm-log-review-format-value (review field)
+  (let* ((getter (intern (concat "org-ilm-log-review-" (symbol-name field))))
+         (value (funcall getter review)))
+    (cond
+     ((null value) "")
+     ((member field '(delay rating))
+      (format "%s" value))
+     ((eq field 'state)
+      (format "%s" (pcase value
+                     (:learning :learn)
+                     (:relearning :relearn)
+                     (_ value))))
+     ((member field '(stability difficulty))
+      (format (concat "%." (number-to-string org-ilm-log-card-parameter-precision) "f") value))
+     ((eq field 'priority)
+      (format "%s-%s" (car value) (cdr value)))
+     (t value))))
+
+(defun org-ilm-log-review-from-alist (alist &optional type)
+  (unless type (setq type (org-ilm-type)))
+  (cl-assert (member type '(incr card)))
+  ;; Empty values are parsed as "" so turn them to nil
+  (dolist (pair alist)
+    (when (and (stringp (cdr pair)) (string= (cdr pair) ""))
+      (setcdr pair nil)))
+  (let ((timestamp (alist-get 'timestamp alist))
+        (delay (alist-get 'delay alist))
+        (priority (or (alist-get 'priority alist)
+                      (alist-get 'prior alist)))
+        (due (alist-get 'due alist))
+        (state (alist-get 'state alist))
+        (rating (alist-get 'rating alist))
+        (stability (or (alist-get 'stability alist)
+                       (alist-get 'S alist)))
+        (difficulty (or (alist-get 'difficulty alist)
+                        (alist-get 'D alist))))
+    (cl-assert (org-ilm--timestamp-is-utc-iso8601-p timestamp))
+    (cl-assert (org-ilm--timestamp-is-iso8601-date-p due))
+    (let* ((parts (string-split priority "-"))
+           (rank (string-to-number (car parts)))
+           (size (string-to-number (cadr parts))))
+      (cl-assert (or (string= (car parts) "0") (> rank 0)))
+      (cl-assert (or (string= (cadr parts) "0") (> size 0)))
+      (setq priority (cons rank size)))
+    (when delay
+      (setq delay (string-to-number delay))
+      (cl-assert (numberp delay)))
+    (when state (setq state (intern state)))
+    (when rating (setq rating (intern rating)))
+    (pcase type
+      ('card
+       (setq state (pcase state
+                      (:learn :learning)
+                      (:relearn :relearning)))
+       (cl-assert (member state '(:done :learning :review :relearning)))
+       (cl-assert (member rating '(:again :hard :good :easy)))
+       (setq stability (string-to-number stability)
+             difficulty (string-to-number difficulty))
+       (cl-assert (floatp stability))
+       (cl-assert (floatp difficulty)))
+      ('incr
+       (cl-assert (or (not state) (member state '(:done))))
+       (cl-assert (null rating))))
+    
+    (make-org-ilm-log-review
+     :type type :timestamp timestamp :delay delay :priority priority
+     :due due :state state :rating rating :stability stability
+     :difficulty difficulty)))
+
+(defun org-ilm-log-review-ensure (data)
+  (if (org-ilm-log-review-p data)
+      data
+    (org-ilm-log-review-from-alist data)))
+
+(defun org-ilm--log-data-ensure (data)
+  ;; If alist of one row, put it in a list
+  (when (or (org-ilm-log-review-p data) (not (listp (car (car data)))))
+    (setq data (list data)))
+  (mapcar #'org-ilm-log-review-ensure data))
+
+(defun org-ilm--log-beginning-of-drawer (&optional create-if-missing)
+  "Move point to the beginning of the ilm drawer.
+If found, return start and end positions as cons."
+  (let ((bound (cdr (org-ilm--org-headline-bounds)))
+        (drawer-begin-regex (rx bol (* blank) ":" (literal org-ilm-log-drawer-name) ":" (* blank) eol))
+        (drawer-end-reg (rx bol (* blank) ":END:" (* blank) eol))
+        (point (point)))
+    (org-back-to-heading)
+    (if (re-search-forward drawer-begin-regex bound 'noerror)
+        (let ((begin (progn (beginning-of-line) (point)))
+              (end (if-let ((p (save-excursion
+                                 (re-search-forward drawer-end-reg bound 'noerror))))
+                       p
+                     (goto-char point)
+                     (error "End of drawer missing"))))
+          (cons begin end))
+      (goto-char point)
+      (when create-if-missing
+        (org-end-of-meta-data) ; 'full)
+        (unless (eolp)
+          (newline)
+          (forward-line -1))
+        (save-excursion
+          (insert ":" org-ilm-log-drawer-name ":")
+          (newline)
+          (insert ":END:"))
+        (org-ilm--log-beginning-of-drawer)))))
+
+(defun org-ilm--log-fields ()
+  "Return the log table fields of the element at point."
+  (pcase (org-ilm-type)
+    ('incr org-ilm-log-incr-fields)
+    ('card org-ilm-log-card-fields)
+    (_ (error "Not an ilm element"))))
+
+(defun org-ilm--log-insert (data)
+  "Insert DATA at the end of an org table.
+
+DATA can be an alist for one row, or a list of alists for multiple
+rows. The alist maps column name to entry value."
+  (cl-assert (org-table-p))
+  (setq data (org-ilm--log-data-ensure data))
+  (atomic-change-group
+    (goto-char (org-table-end))
+    (forward-line -1)
+    (end-of-line)
+    (dolist (review data 2)
+      (newline)
+      (insert "|")
+      (dolist (field (org-ilm--log-fields))
+        (insert (org-ilm-log-review-format-value review field) "|")))
+    (org-table-align)))
+
+(defun org-ilm--log-beginning-of-table (&optional init-data)
+  "Go to the beginning of the log drawer table. Return pos.
+
+With optional INIT-DATA, create a new table with this data. See
+`org-ilm--log-insert'."
+  (when-let ((bounds (org-ilm--log-beginning-of-drawer init-data)))
+    (let ((table-pos (save-excursion
+                       (re-search-forward org-table-line-regexp (cdr bounds) t))))
+      (cond
+       (table-pos
+        (goto-char table-pos)
+        (beginning-of-line)
+        (point))
+       (init-data
+        (atomic-change-group
+          (forward-line 1)
+          (newline)
+          (forward-line -1)
+          (insert "|")
+          (dolist (field (org-ilm--log-fields))
+            (insert (org-ilm-log-review-format-field field) "|"))
+          (org-table-insert-hline)
+          (org-ilm--log-insert init-data)
+          (org-ilm--log-beginning-of-table)))))))
+
+(defun org-ilm--log-read (&optional init-data)
+  "Return the data of the log drawer table as an alist.
+
+With optional INIT-DATA, create a new table with this data. See
+`org-ilm--log-insert'."
+  (save-excursion
+    (when (org-ilm--log-beginning-of-table init-data)
+      (let ((table (org-table-to-lisp)))
+        (cl-assert (>= (length table) 3))
+        (cl-assert (eq (nth 1 table) 'hline))
+        (let* ((columns (mapcar #'intern (car table)))
+               (data (mapcar
+                      (lambda (row)
+                        (mapcar
+                         (lambda (i)
+                           (cons (nth i columns)
+                                 (substring-no-properties (nth i row))))
+                         (number-sequence 0 (1- (length columns)))) )
+                      (cl-subseq table 2))))
+          (org-ilm--log-data-ensure data))))))
+
+
 
 ;;;; Types
 
 ;; There are three headline types: Subjects, Incrs, and Cards.
 
-(defun org-ilm-type (headline-or-state)
+(defun org-ilm-type (&optional headline-or-state)
   "Return ilm type from an org headline or its todo state.
 
 See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
@@ -1053,7 +1301,10 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
                      ((org-element-type-p headline-or-state 'headline)
                       (org-element-property :todo-keyword headline-or-state))
                      ((stringp headline-or-state)
-                      headline-or-state))))
+                      headline-or-state)
+                     ((not headline-or-state)
+                      (org-get-todo-state))
+                     (t (error "Unrecognized arg")))))
     (cond
      ((member state org-ilm-card-states) 'card)
      ((member state org-ilm-incr-states) 'incr)
@@ -1668,7 +1919,7 @@ The callback ON-ABORT is called when capture is cancelled."
 
                     ;; Scheduling. For cards too rely on the headline schedule,
                     ;; but make sure it gets matched with the org-srs table.
-                    (let ((card-interval (org-ilm-srs-first-interval)))
+                    (let ((card-interval (org-ilm-card-first-interval)))
                       (cond
                        ((or (not (eq type 'card))
                             (eq card-interval 'priority))
@@ -5106,30 +5357,74 @@ due or not."
   (unless element (user-error "No ilm element at point"))
   (org-ilm--schedule :timestamp timestamp))
 
-;;;; SRS
+;;;; Cards
 
-;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
-
-(defcustom org-ilm-srs-first-interval 'fsrs
+(defcustom org-ilm-card-first-interval 'priority
   "The first interval for cards."
-  :type '(choice (const :tag "FSRS computed interval" 'fsrs)
-                 (const :tag "Priority based interval" 'priority)
+  :type '(choice (const :tag "Immediate" nil)
+                 (const :tag "Priority based interval" priority)
                  (string :tag "Custom interval as %H:%S format")
                  (number :tag "Custom interval in minutes"))
-  :group 'org-ilm)
+  :group 'org-ilm-card)
 
-(defun org-ilm-srs-first-interval ()
-  (let ((interval org-ilm-srs-first-interval))
+(defun org-ilm-card-first-interval ()
+  (let ((interval org-ilm-card-first-interval))
     (cond
-     ((member interval '(fsrs priority))
+     ((eq interval priority)
       interval)
      ((and (numberp interval) (>= interval 0))
       interval)
      ((stringp interval)
       (ignore-errors (org-duration-to-minutes interval)))
      (t nil))))
-      
 
+;;;;; Logic
+
+;; (cl-defstruct
+;;  (fsrs-scheduler (:copier fsrs-copy-scheduler)
+;;   (:constructor fsrs--make-scheduler))
+;;  "Container for FSRS scheduling configuration and parameters.
+
+;; PARAMETERS is the array of FSRS algorithm weights and coefficients.
+;; DESIRED-RETENTION is the target probability of successful recall (0.0-1.0).
+;; LEARNING-STEPS is the list of time intervals for initial learning phase.
+;; RELEARNING-STEPS is the list of time intervals for relearning phase.
+;; MAXIMUM-INTERVAL is the upper bound for scheduling intervals.
+;; ENABLE-FUZZING-P is the flag to randomize intervals within bounds."
+;;  (parameters fsrs-default-parameters :type fsrs-parameters)
+;;  (desired-retention 0.9 :type float)
+;;  (learning-steps '((1 :minute) (10 :minute)) :type list)
+;;  (relearning-steps '((10 :minute)) :type list)
+;;  (maximum-interval '(36500 :day) :type fsrs-timespan)
+;;  (enable-fuzzing-p t :type boolean))
+
+;;;;; Logging
+
+(defun org-ilm--card-log-read ()
+  (let ((log (org-ilm--log-read)))
+    (dolist (review log)
+      (cl-assert (member (cl-callf #'intern (alist-get 'state review))
+                         '(:learning :review :relearning)))
+      (cl-assert (member (cl-callf #'intern (alist-get 'rating review))
+                         '(:good :easy :hard :again)))
+      (cl-callf #'string-to-number (alist-get 'stability review))
+      (cl-callf #'string-to-number (alist-get 'difficulty review))
+      (cl-callf #'ts-parse (alist-get 'timestamp review))
+      (cl-callf #'ts-parse (alist-get 'due review))))
+  )
+
+(defun org-ilm--card-log (rating &optional timestamp duration)
+  (let ((review-log (org-ilm--log-read)) 
+        (card (fsrs-make-card)))
+    
+  )
+
+
+
+;;;; SRS (org-srs)
+
+;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
+      
 (defun org-ilm--srs-in-cloze-p ()
   "Is point on a cloze?
 
