@@ -1812,7 +1812,7 @@ Arguments are: extract id, collection")
   "Data for a capture (extract or card)."
   type target title id ext content props file method
   priority scheduled template collection state
-  on-success on-abort capture-args)
+  on-success on-abort capture-kwargs)
 
 (defun org-ilm-capture-ensure (&rest data)
   "Parse plist DATA as org-ilm-capture object, or return if it already is one.
@@ -1837,7 +1837,7 @@ The callback ON-ABORT is called when capture is cancelled."
     (cl-destructuring-bind
         (&key target type title id ext content props file method
               priority scheduled template state on-success on-abort
-              collection capture-args) data
+              collection capture-kwargs) data
       
       (cl-assert (member type '(extract card source)))
       (unless id (setq id (org-id-new)))
@@ -1930,13 +1930,17 @@ The callback ON-ABORT is called when capture is cancelled."
        :content content :props props :file file :method method
        :priority priority :scheduled scheduled :template template
        :state state :on-success on-success :on-abort on-abort
-       :capture-args capture-args))))
+       :capture-kwargs capture-kwargs))))
 
 (defun org-ilm--capture (&rest data)
   "Make an org capture to make a new source heading, extract, or card.
 
 For type of arguments DATA, see `org-ilm-capture-ensure'"
   (let* ((capture (apply #'org-ilm-capture-ensure data))
+         (id (org-ilm-capture-id capture))
+         (type (org-ilm-capture-type capture))
+         (collection (org-ilm-capture-collection capture))
+         capture-kwargs
          attach-dir) ; Will be set in :hook, and passed to on-success
 
     (cl-assert (org-ilm-capture-p capture))
@@ -1946,132 +1950,130 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
     (when-let ((content (org-ilm-capture-content capture)))
       (write-region content nil (org-ilm-capture-file capture)))
 
-    (let ((id (org-ilm-capture-id capture))
-          (type (org-ilm-capture-type capture))
-          (collection (org-ilm-capture-collection capture)))
-      (cl-letf (((symbol-value 'org-capture-templates)
+    (setq capture-kwargs
+          (list
+           :hook
+           (lambda ()
+             ;; Set attach dir which will be passed to on-success
+             ;; callback. Has to be done in the hook so that point is on
+             ;; the headline, and respects file-local or .dir-locals
+             ;; `org-attach-id-dir'.
+             (setq attach-dir
+                   ;; If extract/card need to use inherited attach dir. If
+                   ;; new source, make new one from id.
+                   (if-let ((d (org-attach-dir)))
+                       (expand-file-name d)
+                     (org-attach-dir-from-id id)))
+             
+             ;; Regardless of type, every headline will have an id.
+             (org-entry-put nil "ID" id)
+             ;; Also trigger org-mem to update cache
+             ;; (save-buffer)
+             (org-node-nodeify-entry)
+             ;; (org-mem-updater-ensure-id-node-at-point-known)
+
+             ;; Add id to priority queue. An abort is detected in
+             ;; `after-finalize' to remove the id.
+             (org-ilm-pqueue-insert id (org-ilm-capture-priority capture))
+
+             ;; Attachment extension if specified
+             (when-let ((ext (org-ilm-capture-ext capture)))
+               (org-entry-put nil "ILM_EXT" ext))
+
+             ;; Additional properties
+             (when-let ((props (org-ilm-capture-props capture)))
+               (cl-loop for (p v) on props by #'cddr
+                        do (org-entry-put nil (if (stringp p) p
+                                                (substring (symbol-name p) 1)) v)))
+
+             ;; Schedule
+             (when-let ((scheduled (org-ilm-capture-scheduled capture)))
+               (org-schedule nil (org-ilm--ts-format-utc-date-maybe-time scheduled)))
+             
+             ;; For cards, need to transclude the contents in order for
+             ;; org-srs to detect the clozes.
+             ;; TODO `org-transclusion-add' super slow!!
+             ;; (when (eq type 'card)
+             ;;   ;; TODO this can be a nice macro
+             ;;   ;; `org-ilm-with-attachment-transcluded'
+             ;;   (save-excursion
+             ;;     (org-ilm--transclusion-goto file 'create)
+             ;;     (org-transclusion-add)
+             ;;     (let ((org-srs-log-drawer-name org-ilm-log-drawer-name)) 
+             ;;       (org-srs-item-new 'ilm-cloze))
+             ;;     (org-ilm--transclusion-goto file 'delete)))
+
+             )
+           :before-finalize
+           (lambda ()
+             ;; If this is a source header where the attachments will
+             ;; live, we need to set the DIR property, otherwise for
+             ;; some reason org-attach on children doesn't detect that
+             ;; there is a parent attachment header, even with a non-nil
+             ;; `org-attach-use-inheritance'.
+             (when (eq type 'source)
+               (org-entry-put
+                nil "DIR"
+                (abbreviate-file-name (org-attach-dir-get-create))))
+             
+             (when-let ((file (org-ilm-capture-file capture))
+                        (method (org-ilm-capture-method capture)))
+               ;; Attach the file. Turn of auto tagging if not import source.
+               (let ((org-attach-auto-tag (if (eq type 'source)
+                                              org-attach-auto-tag
+                                            nil)))
+                 (org-attach-attach file nil method)
+
+                 ;; Make sure the file name is the org-id
+                 (rename-file
+                  (expand-file-name (file-name-nondirectory file) attach-dir)
+                  (expand-file-name (concat id "." (file-name-extension file))
+                                    attach-dir)
+                  'ok-if-already-exists))))
+           :after-finalize
+           (lambda ()
+             ;; Deal with success and aborted capture. This can be detected in
+             ;; after-finalize hook with the `org-note-abort' flag set to t in
+             ;; `org-capture-kill'.
+             (if org-note-abort
+                 (progn
+                   (org-ilm-pqueue-remove id)
+                   (when-let ((on-abort (org-ilm-capture-on-abort capture)))
+                     (funcall on-abort)))
+               (when org-ilm-update-org-mem-after-capture
+                 (mochar-utils--org-mem-update-cache-after-capture 'entry))
+               (pcase type
+                 ('extract
+                  (run-hook-with-args 'org-ilm-extract-hook id collection))
+                 ('card
+                  (run-hook-with-args 'org-ilm-card-hook id collection)))
+               (when-let ((on-success (org-ilm-capture-on-success capture)))
+                 (funcall on-success id attach-dir
+                          (org-ilm-capture-collection capture)))))
+           :immediate-finish t))
+
+    (cl-letf (((symbol-value 'org-capture-templates)
+               (list
+                (append
                  (list
-                  (append
-                   (list
-                    "i" "Import" 'entry
-                    (org-ilm-capture-target capture)
-                    (org-ilm-capture-template capture)
-                    :hook
-                    (lambda ()
-                      ;; Set attach dir which will be passed to on-success
-                      ;; callback. Has to be done in the hook so that point is on
-                      ;; the headline, and respects file-local or .dir-locals
-                      ;; `org-attach-id-dir'.
-                      (setq attach-dir
-                            ;; If extract/card need to use inherited attach dir. If
-                            ;; new source, make new one from id.
-                            (if-let ((d (org-attach-dir)))
-                                (expand-file-name d)
-                              (org-attach-dir-from-id id)))
-                      
-                      ;; Regardless of type, every headline will have an id.
-                      (org-entry-put nil "ID" id)
-                      ;; Also trigger org-mem to update cache
-                      ;; (save-buffer)
-                      (org-node-nodeify-entry)
-                      ;; (org-mem-updater-ensure-id-node-at-point-known)
-
-                      ;; Add id to priority queue. An abort is detected in
-                      ;; `after-finalize' to remove the id.
-                      (org-ilm-pqueue-insert id (org-ilm-capture-priority capture))
-
-                      ;; Attachment extension if specified
-                      (when-let ((ext (org-ilm-capture-ext capture)))
-                        (org-entry-put nil "ILM_EXT" ext))
-
-                      ;; Additional properties
-                      (when-let ((props (org-ilm-capture-props capture)))
-                        (cl-loop for (p v) on props by #'cddr
-                                 do (org-entry-put nil (if (stringp p) p
-                                                         (substring (symbol-name p) 1)) v)))
-
-                      ;; Schedule
-                      (when-let ((scheduled (org-ilm-capture-scheduled capture)))
-                        (org-schedule nil (org-ilm--ts-format-utc-date-maybe-time scheduled)))
-                      
-                      ;; For cards, need to transclude the contents in order for
-                      ;; org-srs to detect the clozes.
-                      ;; TODO `org-transclusion-add' super slow!!
-                      ;; (when (eq type 'card)
-                      ;;   ;; TODO this can be a nice macro
-                      ;;   ;; `org-ilm-with-attachment-transcluded'
-                      ;;   (save-excursion
-                      ;;     (org-ilm--transclusion-goto file 'create)
-                      ;;     (org-transclusion-add)
-                      ;;     (let ((org-srs-log-drawer-name org-ilm-log-drawer-name)) 
-                      ;;       (org-srs-item-new 'ilm-cloze))
-                      ;;     (org-ilm--transclusion-goto file 'delete)))
-
-                      )
-                    :before-finalize
-                    (lambda ()
-                      ;; If this is a source header where the attachments will
-                      ;; live, we need to set the DIR property, otherwise for
-                      ;; some reason org-attach on children doesn't detect that
-                      ;; there is a parent attachment header, even with a non-nil
-                      ;; `org-attach-use-inheritance'.
-                      (when (eq type 'source)
-                        (org-entry-put
-                         nil "DIR"
-                         (abbreviate-file-name (org-attach-dir-get-create))))
-                      
-                      (when-let ((file (org-ilm-capture-file capture))
-                                 (method (org-ilm-capture-method capture)))
-                        ;; Attach the file. Turn of auto tagging if not import source.
-                        (let ((org-attach-auto-tag (if (eq type 'source)
-                                                       org-attach-auto-tag
-                                                     nil)))
-                          (org-attach-attach file nil method)
-
-                          ;; Make sure the file name is the org-id
-                          (rename-file
-                           (expand-file-name (file-name-nondirectory file) attach-dir)
-                           (expand-file-name (concat id "." (file-name-extension file))
-                                             attach-dir)
-                           'ok-if-already-exists))))
-                    :after-finalize
-                    (lambda ()
-                      ;; Deal with success and aborted capture. This can be detected in
-                      ;; after-finalize hook with the `org-note-abort' flag set to t in
-                      ;; `org-capture-kill'.
-                      (if org-note-abort
-                          (progn
-                            (org-ilm-pqueue-remove id)
-                            (when-let ((on-abort (org-ilm-capture-on-abort capture)))
-                              (funcall on-abort)))
-                        (when org-ilm-update-org-mem-after-capture
-                          (mochar-utils--org-mem-update-cache-after-capture 'entry))
-                        (pcase type
-                          ('extract
-                           (run-hook-with-args 'org-ilm-extract-hook id collection))
-                          ('card
-                           (run-hook-with-args 'org-ilm-card-hook id collection)))
-                        (when-let ((on-success (org-ilm-capture-on-success capture)))
-                          (funcall on-success id attach-dir
-                                   (org-ilm-capture-collection capture))))))
-                   (org-ilm-capture-capture-args capture)))))
-        (org-capture nil "i")))))
+                  "i" "Import" 'entry
+                  (org-ilm-capture-target capture)
+                  (org-ilm-capture-template capture))
+                 (org-combine-plists
+                  capture-kwargs
+                  (org-ilm-capture-capture-kwargs capture))))))
+      (org-capture nil "i"))))
 
 ;;;;; Extract
 
 (defun org-ilm--extract (&rest data)
-  "Make an extract with data in CAPTURE.
-
-For type of arguments DATAm see `org-ilm-capture-ensure'."
+  "Make an extract with DATA, see `org-ilm-capture-ensure'."
   (let* ((immediate-p (if org-ilm-capture-show-menu-by-default
                           current-prefix-arg
                         (not current-prefix-arg)))
          (capture (apply #'org-ilm-capture-ensure
                          (org-combine-plists
                           data (list :type 'extract)))))
-
-    (setf (org-ilm-capture-capture-args capture) (list :immediate-finish t))
-
     (if immediate-p
         (org-ilm--capture capture)
       (org-ilm--extract-transient capture))))
@@ -2081,6 +2083,7 @@ For type of arguments DATAm see `org-ilm-capture-ensure'."
          (args (if transient-current-command
                    (transient-args transient-current-command)
                  (transient-get-value)))
+         (capture (transient-arg-value "--capture" args))
          (rank (transient-arg-value "--priority=" args))
          (scheduled (transient-arg-value "--scheduled=" args)))          
 
@@ -2092,7 +2095,7 @@ For type of arguments DATAm see `org-ilm-capture-ensure'."
         (setq rank (1- (string-to-number rank)))
       (setq rank (org-ilm-capture-priority (transient-scope))))
 
-    (list rank scheduled)))
+    (list rank scheduled capture)))
 
 (transient-define-prefix org-ilm--extract-transient (scope)
   :refresh-suffixes t
@@ -2122,16 +2125,20 @@ For type of arguments DATAm see `org-ilm-capture-ensure'."
     (lambda ()
       (let ((scheduled (cadr (org-ilm--extract-transient-values))))
         (ts-format "%Y-%m-%d %H:%M" scheduled))))
+   ("c" "Capture" "--capture")
+   (:info "Open in capture buffer")
    ]
 
   [
    ("RET" "Extract"
     (lambda ()
       (interactive)
-      (cl-destructuring-bind (rank scheduled) (org-ilm--extract-transient-values)
+      (cl-destructuring-bind (rank scheduled capture-p)
+          (org-ilm--extract-transient-values)
         (let ((capture (transient-scope)))
           (setf (org-ilm-capture-priority capture) rank
-                (org-ilm-capture-scheduled capture) scheduled)
+                (org-ilm-capture-scheduled capture) scheduled
+                (org-ilm-capture-capture-kwargs capture) (list :immediate-finish (not capture-p)))
           (org-ilm--capture capture)))))
    ]
 
