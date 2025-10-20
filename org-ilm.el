@@ -112,7 +112,6 @@
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract-dwim
   "z" #'org-ilm-cloze
-  "c" #'org-ilm-cloze-toggle-this
   "t" #'org-ilm-attachment-transclude
   "j" #'org-ilm-subject-dwim
   "r" #'org-ilm-review
@@ -411,48 +410,42 @@ The returned function can be used to call `remove-hook' if needed."
     (add-hook hook hook-function depth local)
     hook-function))
 
-(defun org-ilm--buffer-text-process (&optional region-begin region-end keep-clozes remove-footnotes)
-  "Prepare buffer text for new extract or card element."
+(cl-defun org-ilm--buffer-text-process (&key keep-clozes no-footnotes (source-buffer (current-buffer)) (begin (point-min)) (end (point-max)))
+  "Process current buffer for extraction or cloze."
+  (replace-regexp org-ilm-target-regexp "" nil begin end)
+  (unless keep-clozes
+    (org-ilm--card-uncloze-buffer begin end))
+  (if no-footnotes
+      (replace-regexp org-footnote-re "" nil begin end)
+    ;; Copy over footnotes 
+    (let ((footnotes '()))
+      (goto-char (point-min))
+      (while (re-search-forward org-footnote-re nil t)
+        (when-let* ((fn (match-string 0))
+                    (label (match-string 1))
+                    (def (with-current-buffer source-buffer
+                           (org-footnote-get-definition label))))
+          (push (concat fn " " (nth 3 def)) footnotes)))
+      (goto-char (point-max))
+      (insert "\n\n")
+      (dolist (fn (delete-dups (nreverse footnotes)))
+        (insert fn "\n")))))
+
+(defun org-ilm--buffer-text-prepare (&optional region-begin region-end keep-clozes remove-footnotes)
+  "Return processed buffer text for new extract or card element."
   (let* ((text (buffer-substring-no-properties (or region-begin (point-min))
                                                (or region-end (point-max))))
-         ;; Remove ilm targets
-         (text (s-replace-regexp org-ilm-target-regexp "" text))
          (buffer (current-buffer)))
-    (when remove-footnotes
-      (setq text (s-replace-regexp org-footnote-re "" text)))
     (with-temp-buffer
       (insert text)
-      
-      ;; Remove clozes by looping until none left
-      (unless keep-clozes
-        (while (let ((clz (org-srs-item-cloze-collect))) clz)
-          (let* ((cloze (car (org-srs-item-cloze-collect)))
-                 (region-begin (nth 1 cloze))
-                 (region-end   (nth 2 cloze))
-                 (inner (substring-no-properties (nth 3 cloze))))
-            (goto-char region-begin)
-            (delete-region region-begin region-end)
-            (insert inner))))
-
-      ;; Copy over footnotes 
-      (unless remove-footnotes
-        (let ((footnotes '()))
-          (goto-char (point-min))
-          (while (re-search-forward org-footnote-re nil t)
-            (when-let* ((fn (match-string 0))
-                        (label (match-string 1))
-                        (def (with-current-buffer buffer
-                               (org-footnote-get-definition label))))
-              (push (concat fn " " (nth 3 def)) footnotes)))
-          (goto-char (point-max))
-          (insert "\n\n")
-          (dolist (fn (delete-dups (nreverse footnotes)))
-            (insert fn "\n"))))
-      
+      (org-ilm--buffer-text-process
+       :source-buffer buffer
+       :keep-clozes keep-clozes
+       :no-footnotes remove-footnotes)
       (buffer-string))))
 
 (defun org-ilm--generate-text-snippet (text)
-  ""
+  "Cleanup TEXT so that it can be used in as an org header."
   (let* ((text (replace-regexp-in-string "\n" " " text))
          (text (org-link-display-format text)) ;; Remove org links
          (text (string-trim text))) ;; Trim whitespace
@@ -1244,9 +1237,12 @@ If found, return start and end positions as cons."
       (goto-char point)
       (when create-if-missing
         (org-end-of-meta-data) ; 'full)
-        (unless (eolp)
+        (cond
+         ((and (eolp) (not (bolp)))
+          (newline))
+         ((not (and (eolp) (bolp)))
           (newline)
-          (forward-line -1))
+          (forward-line -1)))
         (save-excursion
           (insert ":" org-ilm-log-drawer-name ":")
           (newline)
@@ -1940,6 +1936,8 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
          (id (org-ilm-capture-id capture))
          (type (org-ilm-capture-type capture))
          (collection (org-ilm-capture-collection capture))
+         (scheduled (org-ilm-capture-scheduled capture))
+         (priority (org-ilm-capture-priority capture))
          capture-kwargs
          attach-dir) ; Will be set in :hook, and passed to on-success
 
@@ -1974,7 +1972,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
              ;; Add id to priority queue. An abort is detected in
              ;; `after-finalize' to remove the id.
-             (org-ilm-pqueue-insert id (org-ilm-capture-priority capture))
+             (org-ilm-pqueue-insert id priority)
 
              ;; Attachment extension if specified
              (when-let ((ext (org-ilm-capture-ext capture)))
@@ -1987,22 +1985,13 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                                                 (substring (symbol-name p) 1)) v)))
 
              ;; Schedule
-             (when-let ((scheduled (org-ilm-capture-scheduled capture)))
+             (when scheduled
                (org-schedule nil (org-ilm--ts-format-utc-date-maybe-time scheduled)))
-             
-             ;; For cards, need to transclude the contents in order for
-             ;; org-srs to detect the clozes.
-             ;; TODO `org-transclusion-add' super slow!!
-             ;; (when (eq type 'card)
-             ;;   ;; TODO this can be a nice macro
-             ;;   ;; `org-ilm-with-attachment-transcluded'
-             ;;   (save-excursion
-             ;;     (org-ilm--transclusion-goto file 'create)
-             ;;     (org-transclusion-add)
-             ;;     (let ((org-srs-log-drawer-name org-ilm-log-drawer-name)) 
-             ;;       (org-srs-item-new 'ilm-cloze))
-             ;;     (org-ilm--transclusion-goto file 'delete)))
 
+             ;; Log to drawer
+             (when (eq type 'card)
+               (org-ilm--card-log (ts-now) (car priority)))
+             
              )
            :before-finalize
            (lambda ()
@@ -2064,21 +2053,31 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                   (org-ilm-capture-capture-kwargs capture))))))
       (org-capture nil "i"))))
 
-;;;;; Extract
+(defun org-ilm--capture-capture (capture)
+  (let ((immediate-p (if org-ilm-capture-show-menu-by-default
+                         current-prefix-arg
+                       (not current-prefix-arg))))
+    (if immediate-p
+        (org-ilm--capture capture)
+      (org-ilm--capture-transient capture))))
 
 (defun org-ilm--extract (&rest data)
   "Make an extract with DATA, see `org-ilm-capture-ensure'."
-  (let* ((immediate-p (if org-ilm-capture-show-menu-by-default
-                          current-prefix-arg
-                        (not current-prefix-arg)))
-         (capture (apply #'org-ilm-capture-ensure
-                         (org-combine-plists
-                          data (list :type 'extract)))))
-    (if immediate-p
-        (org-ilm--capture capture)
-      (org-ilm--extract-transient capture))))
+  (org-ilm--capture-capture
+   (apply #'org-ilm-capture-ensure
+          (org-combine-plists
+           data (list :type 'extract)))))
 
-(defun org-ilm--extract-transient-values ()
+(defun org-ilm--cloze (&rest data)
+  "Make a cloze with DATA, see `org-ilm-capture-ensure'."
+  (org-ilm--capture-capture
+   (apply #'org-ilm-capture-ensure
+          (org-combine-plists
+           data (list :type 'card)))))
+
+;;;;; Transient
+
+(defun org-ilm--capture-transient-values ()
   (let* ((capture (transient-scope))
          (args (if transient-current-command
                    (transient-args transient-current-command)
@@ -2097,10 +2096,12 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
     (list rank scheduled capture)))
 
-(transient-define-prefix org-ilm--extract-transient (scope)
+(transient-define-prefix org-ilm--capture-transient (scope)
   :refresh-suffixes t
   
-  ["Extract"
+  [:description
+   (lambda () (if (eq (org-ilm-capture-type (transient-scope)) 'card) "Cloze" "Extract"))
+   
    ("p" "Priority" "--priority="
     :transient transient--do-call
     :class transient-option
@@ -2114,7 +2115,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (number-to-string (1+ (car priority))))))
    (:info
     (lambda ()
-      (let ((rank (car (org-ilm--extract-transient-values))))
+      (let ((rank (car (org-ilm--capture-transient-values))))
         (org-ilm--ost-format-position (org-ilm-pqueue) rank))))
    ("s" "Scheduled" "--scheduled="
     :transient transient--do-call
@@ -2123,18 +2124,18 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
       (org-read-date 'with-time nil nil "Schedule: ")))
    (:info
     (lambda ()
-      (let ((scheduled (cadr (org-ilm--extract-transient-values))))
+      (let ((scheduled (cadr (org-ilm--capture-transient-values))))
         (ts-format "%Y-%m-%d %H:%M" scheduled))))
    ("c" "Capture" "--capture")
    (:info "Open in capture buffer")
    ]
 
   [
-   ("RET" "Extract"
+   ("RET" "Capture"
     (lambda ()
       (interactive)
       (cl-destructuring-bind (rank scheduled capture-p)
-          (org-ilm--extract-transient-values)
+          (org-ilm--capture-transient-values)
         (let ((capture (transient-scope)))
           (setf (org-ilm-capture-priority capture) rank
                 (org-ilm-capture-scheduled capture) scheduled
@@ -2143,7 +2144,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
    ]
 
   (interactive)
-  (transient-setup 'org-ilm--extract-transient nil nil :scope scope))
+  (transient-setup 'org-ilm--capture-transient nil nil :scope scope))
 
 
 
@@ -2176,7 +2177,7 @@ Will become an attachment Org file that is the child heading of current entry."
            (region-end (if (save-excursion (goto-char region-end) (bolp))
                            (max (- region-end 1) 0)
                          region-end))
-           (region-text (org-ilm--buffer-text-process region-begin region-end))
+           (region-text (org-ilm--buffer-text-prepare region-begin region-end))
            (extract-org-id (org-id-new))
            (entry (org-mem-entry-by-id attach-org-id))
            props)
@@ -2198,12 +2199,12 @@ Will become an attachment Org file that is the child heading of current entry."
          ;; Wrap region with targets.
          (with-current-buffer file-buf
            (save-excursion
-             (let* ((target-template (format "<<extract:%s:%s>>" "%s" extract-org-id))
+             (let* ((target-template (format "<<extr:%s:%s>>" "%s" extract-org-id))
                     (begin-is-bolp (save-excursion
                                      (goto-char region-begin)
                                      (bolp)))
                     (target-begin (concat
-                                   (format target-template "begin")
+                                   (format target-template "beg")
                                    ;; Region starts at beginning of line: insert
                                    ;; on new line above
                                    (when begin-is-bolp "\n")))
@@ -2225,67 +2226,49 @@ Will become an attachment Org file that is the child heading of current entry."
 
 (defun org-ilm-cloze ()
   "Create a cloze card.
-
-A cloze is made automatically of the element at point or active
-region. If instead a grouped set of clozes must be made, you can first
-call `org-ilm-cloze-toggle-this' a couple times before calling this
-command."
+A cloze is made automatically of the element at point or active region."
   (interactive)
 
-  (let* ((file-buf (current-buffer))
+  (let* ((attachment (org-ilm--attachment-data))
+         (file-org-id (car attachment))
+         (file-buf (current-buffer))
          (card-org-id (org-id-new))
-         (file-org-id (file-name-sans-extension
-                       (file-name-nondirectory
-                        buffer-file-name)))
-         (clozes (org-srs-item-cloze-collect))
-         buffer-text snippet auto-clozed)
+         (cloze-bounds (org-ilm--card-cloze-bounds))
+         (buffer-text (buffer-string))
+         (point (point))
+         snippet)
 
-    ;; When no clozes have been made, make cloze of element at point or active
-    ;; region. We set the flag auto-clozed to t, so that when capture is
-    ;; aborted, we can toggle it back.
-    (unless clozes
-      (org-srs-item-cloze-dwim)
-      (setq clozes (org-srs-item-cloze-collect))
-      (setq auto-clozed t))
-    (cl-assert clozes)
+    (cl-assert cloze-bounds)
 
-    ;; The buffer text we export should be cleaned of targets but not of clozes.
-    ;; The text we use to make a snippet should not contain clozes as well.
-    ;; TODO Inefficient, snippet should be cleaned afterwards
-    (setq buffer-text (org-ilm--buffer-text-process nil nil t)
-          snippet (org-ilm--generate-text-snippet (org-ilm--buffer-text-process)))
-
-    (org-ilm--capture
-     'card
-     file-org-id
-     (list :id card-org-id :content buffer-text :title snippet)
+    ;; Prepare card buffer text
+    (with-temp-buffer
+      (insert buffer-text)
+      (goto-char point)
+      (let ((marker (point-marker))
+            (content (buffer-substring (car cloze-bounds) (cdr cloze-bounds))))
+        (delete-region (car cloze-bounds) (cdr cloze-bounds))
+        (org-ilm--buffer-text-process :source-buffer file-buf)
+        (setq snippet (org-ilm--generate-text-snippet (buffer-string)))
+        (goto-char marker)
+        (org-ilm--card-cloze-region (prog1 (point) (insert content)) (point))
+        (setq buffer-text (buffer-string))))
+        
+    (org-ilm--cloze
+     :type 'card
+     :target file-org-id
+     :id card-org-id
+     :content buffer-text
+     :title snippet
+     :on-success
      (lambda (&rest _)
-       ;; Success callback. Go through each cloze in the source file and replace
-       ;; it with our target tags. Render them by recreating overlays.
        (with-current-buffer file-buf
          (save-excursion
-           ;; TODO similar functionality `org-ilm--buffer-text-process', extract
-           ;; to own function.
-           (while (let ((clz (org-srs-item-cloze-collect))) clz)
-             (let* ((cloze (car (org-srs-item-cloze-collect)))
-                    (region-begin (nth 1 cloze))
-                    (region-end   (nth 2 cloze))
-                    (inner (substring-no-properties (nth 3 cloze)))
-                    (target-template (format "<<card:%s:%s>>" "%s" card-org-id))
-                    (target-begin (format target-template "begin"))
-                    (target-end (format target-template "end")))
-               (goto-char region-begin)
-               (delete-region region-begin region-end)
-               (insert target-begin inner target-end))))
+           (goto-char (cdr cloze-bounds))
+           (insert "<<card:end:" card-org-id ">>")
+           (goto-char (car cloze-bounds))
+           (insert "<<card:beg:" card-org-id ">>"))
          (save-buffer)
-         (org-ilm-recreate-overlays)
-
-         (org-ilm--attachment-priority-update 'card)))
-     (lambda ()
-       ;; Abort callback. Undo cloze if made automatically by this function.
-       (when auto-clozed
-         (with-current-buffer file-buf
-           (org-srs-item-uncloze-dwim)))))))
+         (org-ilm-recreate-overlays))))))
 
 (defun org-ilm-org-split (&optional level)
   "Split org document by heading level."
@@ -3549,8 +3532,8 @@ See `org-ilm-attachment-transclude'."
 
 ;; Targets refer to the anchor points used to highlight extracted or clozed
 ;; sections of text in org attachments. It looks like this:
-;; <<{type}:begin:{id}>>bla bla<<{type}:end:{id}>>
-;; Type can be 'card' or 'extract'.
+;; <<{type}:beg:{id}>>bla bla<<{type}:end:{id}>>
+;; Type can be 'card' or 'extr'.
 ;; They are called targets because that's what Org mode calls them. Targets are
 ;; part of the Org mode spec and are therefore parse by 'org-element'.
 
@@ -3559,7 +3542,7 @@ See `org-ilm-attachment-transclude'."
 ;; one for each target element to hide it, and one that encapsulates the whole
 ;; target region to visually indicate it with a color.
 
-(defvar org-ilm-target-value-regexp "\\(extract\\|card\\):\\(begin\\|end\\):\\([^>]+\\)"
+(defvar org-ilm-target-value-regexp "\\(extr\\|card\\):\\(beg\\|end\\):\\([^>]+\\)"
   "Regexp to match values of targets enclosing extracts and clozes.")
 
 (defvar org-ilm-target-regexp (format "<<%s>>" org-ilm-target-value-regexp)
@@ -3610,7 +3593,7 @@ See `org-ilm-attachment-transclude'."
   (cl-assert (memq pos '(begin end)))
   (let* ((find-begin (eq pos 'begin))
          (re-func (if find-begin #'re-search-backward #'re-search-forward))
-         (pos-string (if find-begin "begin" "end")))
+         (pos-string (if find-begin "beg" "end")))
     (save-excursion
       (when (funcall re-func org-ilm-target-regexp nil t)
         (let ((target (org-ilm--target-parse-match)))
@@ -3653,7 +3636,7 @@ See `org-ilm-attachment-transclude'."
   (dolist (target (list target-begin target-end))
     (let ((begin (plist-get target :begin))
           (end (plist-get target :end))
-          (begin-p (string= "begin" (plist-get target :pos))))
+          (begin-p (string= "beg" (plist-get target :pos))))
       (let ((ov (make-overlay
                  begin
                  ;; If next character is newline, include it.  Otherwise hitting
@@ -3685,7 +3668,7 @@ See `org-ilm-attachment-transclude'."
   (let* ((id (plist-get target-begin :id))
          (type (plist-get target-begin :type))
          (face (pcase type
-                 ("extract" 'org-ilm-face-extract)
+                 ("extr" 'org-ilm-face-extract)
                  ("card" 'org-ilm-face-card)))
          (begin (plist-get target-begin :begin))
          (end (plist-get target-end :end))
@@ -3724,9 +3707,9 @@ See `org-ilm-attachment-transclude'."
                  (id (match-string-no-properties 3))
                  (target (list :end end :begin begin :string string
                                :type type :pos pos :id id)))
-       (when (member type '("extract" "card"))
+       (when (member type '("extr" "card"))
          (pcase pos
-           ("begin" (puthash id target begin-targets))
+           ("beg" (puthash id target begin-targets))
            ("end"
             (when-let ((begin-target (gethash id begin-targets)))
               (org-ilm--create-overlay begin-target target no-face)
@@ -5614,6 +5597,7 @@ FSRS default: t"
    :maximum-interval org-ilm-card-fsrs-maximum-interval
    :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p))
 
+
 ;;;;; Logging
 
 ;; TODO This can be optimized by truncating based on latest :review state
@@ -5646,9 +5630,7 @@ An empty log implies a new card, so step is 0."
     current-step))
 
 (defun org-ilm--card-log (scheduled priority-rank &optional scheduler rating timestamp duration)
-  "Log the creation or review of a fsrs card in the ilm drawer table.
-
-If new item, SCHEDULED should be now."
+  "Log the creation or review of a fsrs card in the ilm drawer table."
   (let* ((review-log (org-ilm--log-read))
          (last-review (car (last review-log)))
          (scheduled (org-ilm--ts-format-utc scheduled))
@@ -5687,6 +5669,88 @@ If new item, SCHEDULED should be now."
       :due (fsrs-card-due card) :state (fsrs-card-state card)
       :stability (fsrs-card-stability card)
       :difficulty (fsrs-card-difficulty card)))))
+
+;;;;; Cloze
+
+(defconst org-ilm-card-cloze-regexp "{{c:\\([^|}]+\\)\\(?:|\\([^}]+\\)\\)?}}")
+
+(defun org-ilm-cloze-toggle ()
+  "Toggle cloze at point, without creating the card."
+  (interactive)
+  (if (org-ilm--card-cloze-p)
+      (org-ilm--card-uncloze)
+    (org-ilm--card-cloze-dwim)))
+
+(defun org-ilm--card-cloze-dwim (&optional hint)
+  "Cloze the region or word at point."
+  (let ((bounds (org-ilm--card-cloze-bounds)))
+    (if (not bounds)
+        (error "No active region or word at point")
+      (org-ilm--card-cloze-region (car begin) (cdr end))
+      bounds)))
+
+(defun org-ilm--card-cloze-bounds ()
+  "Return (beg . end) of what will be clozed."
+  (let (begin end)
+    (if (region-active-p)
+        (setq begin (region-beginning)
+              end (region-end))
+      (if-let ((bounds (bounds-of-thing-at-point 'word)))
+          (setq begin (car bounds)
+                end (cdr bounds))))
+    (cons begin end)))
+
+(defun org-ilm--card-cloze-region (begin end &optional hint)
+  "Coze the region between BEGIN and END."
+  (save-excursion
+    (goto-char end)
+    (when hint
+      (insert "|" hint))
+    (insert "}}")
+    (goto-char begin)
+    (insert "{{c:")))
+
+(defun org-ilm--card-cloze-match-at-point ()
+  "Match cloze at point."
+  (let ((point (point))
+        (begin (point))
+        (found (looking-at org-ilm-card-cloze-regexp)))
+    (save-excursion
+      (while (and (not found) (re-search-backward "{" nil t))
+        (setq found (looking-at org-ilm-card-cloze-regexp)))
+      (when (and found
+                 (setq begin (point))
+                 (<= point (re-search-forward org-ilm-card-cloze-regexp)))
+        (list (match-string-no-properties 1)
+              (match-string-no-properties 2)
+              begin (point))))))
+
+(defun org-ilm--card-cloze-p ()
+  "Return t if point on cloze."
+  (if (org-ilm--card-cloze-match-at-point) t nil))
+
+(defun org-ilm--card-cloze-gather (&optional begin end)
+  "Return all clozes found in buffer."
+  (let (clozes)
+    (save-excursion
+      (goto-char (or begin (point-min)))
+      (while (re-search-forward org-ilm-card-cloze-regexp end t)
+        (push (org-ilm--card-cloze-match-at-point) clozes)))
+    (nreverse clozes)))
+
+(defun org-ilm--card-uncloze ()
+  "Remove cloze at point."
+  (when-let ((match (org-ilm--card-cloze-match-at-point))
+             (content (match-string 1)))
+    (delete-region (nth 2 match) (nth 3 match))
+    (insert (string-trim content))))
+
+(defun org-ilm--card-uncloze-buffer (&optional begin end)
+  "Remove clozes in buffer."
+  (save-excursion
+    (goto-char (or begin (point-min)))
+    (while (re-search-forward org-ilm-card-cloze-regexp end t)
+      (org-ilm--card-uncloze))))
 
 
 
