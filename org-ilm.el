@@ -167,35 +167,30 @@
 (defun org-ilm-open-attachment ()
   "Open attachment of item at point."
   (interactive)
-  (condition-case err
-      (org-ilm--attachment-open)
-    (error
-     (pcase (read-char-choice "No attachments. (n)ew, (r)egistry, (s)elect: " '("n" "r" "s"))
-       (?n 
-        (let* ((attach-dir (org-attach-dir-get-create))
-               (file-path (expand-file-name (concat (org-id-get) ".org") attach-dir)))
-          (find-file file-path)))
-       (?s
-        (if-let* ((attach-dir (org-attach-dir))
-                  (attachments (org-attach-file-list attach-dir))
-                  (attachment (completing-read "Attachment to dedicate as element's: "
-                                               attachments nil t))
-                  (attachment (expand-file-name attachment attach-dir))
-                  (attachment-new (expand-file-name
-                                   (format "%s.%s" (org-id-get)
-                                           (file-name-extension attachment))
-                                   (file-name-directory attachment))))
-            (progn
-              (rename-file attachment attachment-new)
-              (find-file attachment-new))
-          (user-error "No attachment found")))
-       (?r
-        (if-let* ((registry-id (org-entry-get nil "REGISTRY")))
-            (user-error "Not implemented!") ;; TODO
-          (user-error "No registry entry")))
-            
-       ))))
-    ;; (error (user-error "%s" (error-message-string err)))))
+  (unless (org-ilm--attachment-open)
+    (pcase (read-char-choice "No attachments. (n)ew, (r)egistry, (s)elect: " '("n" "r" "s"))
+      (?n 
+       (let* ((attach-dir (org-attach-dir-get-create))
+              (file-path (expand-file-name (concat (org-id-get) ".org") attach-dir)))
+         (find-file file-path)))
+      (?s
+       (if-let* ((attach-dir (org-attach-dir))
+                 (attachments (org-attach-file-list attach-dir))
+                 (attachment (completing-read "Attachment to dedicate as element's: "
+                                              attachments nil t))
+                 (attachment (expand-file-name attachment attach-dir))
+                 (attachment-new (expand-file-name
+                                  (format "%s.%s" (org-id-get)
+                                          (file-name-extension attachment))
+                                  (file-name-directory attachment))))
+           (progn
+             (rename-file attachment attachment-new)
+             (find-file attachment-new))
+         (user-error "No attachment found")))
+      (?r
+       (if-let* ((registry-id (org-entry-get nil "REGISTRY")))
+           (user-error "Not implemented!") ;; TODO
+         (user-error "No registry entry"))))))
 
 (defun org-ilm-open-highlight ()
   "Open element associated with highlight at point."
@@ -354,6 +349,13 @@
       (ts-format "%Y-%m-%d" ts)
     (cl-assert (org-ilm--timestamp-is-iso8601-date-p ts))
     ts))
+
+(defun org-ilm--ts-format-utc-date-maybe-time (ts &optional ignore-time)
+  (cl-assert (ts-p ts))
+  (if (or ignore-time
+          (and (= (ts-hour ts) 0) (= (ts-minute ts) 0)))
+      (ts-format "%Y-%m-%d" ts)
+    (ts-format "%Y-%m-%d %H:%M" ts)))
 
 ;;;;; Elisp
 
@@ -898,6 +900,13 @@ The collections are stored in `org-ilm-collections'."
   :type 'directory
   :group 'org-ilm)
 
+(defvar org-ilm-pqueue-priority-changed-hook nil
+  "Hook called when the priority of an element was actively changed.
+
+Hook arg is (id . priority-rank) or an alist of such cons's if many moved at once.
+
+Note that priority may change frequently due to the nature of a queue. Therefore not all changes are logged, only when explicitely set (`org-ilm-pqueue--move' and `org-ilm-pqueue--move-many'.")
+
 ;;;;; Object
 
 (cl-defstruct (org-ilm-pqueue (:conc-name org-ilm-pqueue--))
@@ -948,6 +957,7 @@ The collections are stored in `org-ilm-collections'."
 (defun org-ilm-pqueue--move (pqueue id new-rank)
   "Move element ID in PQUEUE to NEW-RANK."
   (ost-tree-move (org-ilm-pqueue--ost pqueue) id new-rank)
+  (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook (cons id new-rank))
   (org-ilm-pqueue--write pqueue))
 
 (defun org-ilm-pqueue--move-many (pqueue new-ranks-alist)
@@ -955,6 +965,7 @@ The collections are stored in `org-ilm-collections'."
 
 NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (ost-tree-move-many (org-ilm-pqueue--ost pqueue) new-ranks-alist)
+  (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook new-ranks-alist)
   (org-ilm-pqueue--write pqueue))
 
 (defun org-ilm-pqueue--count (pqueue)
@@ -992,6 +1003,14 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   "Return the priority queue of COLLECTION, or active collection."
   (setq collection (or collection (org-ilm--active-collection)))
   (org-ilm--pqueue collection))
+
+(defun org-ilm-pqueue-parse-position (position &optional sizebuf collection)
+  (org-ilm--ost-parse-position
+   (org-ilm-pqueue collection)
+   position sizebuf))
+
+(defun org-ilm-pqueue-parse-new-position (position &optional collection)
+  (org-ilm-pqueue-parse-position position 1 collection))
 
 (defun org-ilm-pqueue-count (&optional collection)
   (org-ilm-pqueue--count (org-ilm-pqueue collection)))
@@ -1036,11 +1055,9 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
     
     queue))
 
-(defun org-ilm-pqueue-select-rank (&optional initial)
-  (org-ilm--queue-select-read
-   ;; (org-ilm--queue-build (org-ilm--active-collection) 'All)
-   (org-ilm-pqueue-queue)
-   initial))
+(defun org-ilm-pqueue-select-position (&optional initial)
+  "Select a position in the priority queue interactively."
+  (org-ilm--queue-select-read (org-ilm-pqueue-queue) initial))
 
 (cl-defun org-ilm-pqueue-priority (id &key pqueue collection rank quantile nil-if-absent)
   "Position of the ID in PQUEUE as a cons (rank . quantile).
@@ -1473,8 +1490,11 @@ wasteful if headline does not match query."
 
 (cl-defun org-ilm-element-priority (element &key rank quantile)
   "Return (rank . quantile) of ELEMENT in the priority queue.
-With RANK or QUANTILE, set the new position in the queue."
+With RANK or QUANTILE, set the new position in the queue.
+ELEMENT may be nil, in which case try to read it from point."
   (cl-assert (not (and rank quantile)))
+  (unless element (setq element (org-ilm-element-from-context)))
+  (cl-assert (org-ilm-element-p element))
   (org-ilm-pqueue-priority
    (org-ilm-element-id element)
    :collection (org-ilm-element-collection element)
@@ -1575,7 +1595,7 @@ If `HEADLINE' is passed, read it as org-property."
   "Set the priority of an ilm element."
   (interactive
    (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (let ((position (org-ilm-pqueue-select-rank (org-ilm-element-priority element))))
+  (let ((position (org-ilm-pqueue-select-position (org-ilm-element-priority element))))
     (org-ilm-element-priority element :rank (car position))))
 
 ;;;;; Transient
@@ -1770,8 +1790,33 @@ If `HEADLINE' is passed, read it as org-property."
 
 ;;;; Capture
 
-(defun org-ilm--capture (type target data &optional on-success on-abort &rest capture-args)
-  "Make an org capture to make a new source heading, extract, or card.
+;; Logic related to creating child elements, i.e. extracts and cards.
+
+(defcustom org-ilm-capture-show-menu-by-default t
+  "When creating an extract or card, always show a menu to configure it
+ first, rather than with a prefix argument."
+  :type 'boolean
+  :group 'org-ilm)
+
+(defvar org-ilm-extract-hook nil
+  "Hook run after extract was made.
+Arguments are: extract id, collection")
+
+(defvar org-ilm-card-hook nil
+  "Hook run after card was made.
+Arguments are: extract id, collection")
+
+;;;;; Capture
+
+(cl-defstruct org-ilm-capture
+  "Data for a capture (extract or card)."
+  type target title id ext content props file method
+  priority scheduled template collection state
+  on-success on-abort capture-args)
+
+(defun org-ilm-capture-ensure (&rest data)
+  "Parse plist DATA as org-ilm-capture object, or return if it already is one.
+Alternatively pass just an org-ilm-capture object, which will be returned.
 
 TYPE should be one of 'extract 'card, or 'source.
 
@@ -1785,198 +1830,323 @@ DATA is a plist that contains info about the capture entry.
 
 The callback ON-SUCCESS is called when capture is saved.
 
-The callback ON-ABORT is called when capture is cancelled."
-  (cl-assert (member type '(extract card source)))
-  
-  (let* ((state (car (if (eq type 'card) org-ilm-card-states org-ilm-incr-states)))
-         (title (plist-get data :title))
-         (id (or (plist-get data :id) (org-id-new)))
-         (ext (plist-get data :ext))
-         (content (plist-get data :content))
-         (props (plist-get data :props))
-         (file (plist-get data :file))
-         (method (or (plist-get data :method) 'cp)) ;; org-attach-method
-         (priority (plist-get data :priority))
-         (template (plist-get data :template))
-         attach-dir ; Will be set in :hook, and passed to on-success
-         (before-finalize
-          (lambda ()
-            ;; If this is a source header where the attachments will
-            ;; live, we need to set the DIR property, otherwise for
-            ;; some reason org-attach on children doesn't detect that
-            ;; there is a parent attachment header, even with a non-nil
-            ;; `org-attach-use-inheritance'.
-            (when (eq type 'source)
-              (org-entry-put
-               nil "DIR"
-               (abbreviate-file-name (org-attach-dir-get-create))))
-            
-            (when file
-              ;; Attach the file. Turn of auto tagging if not import source.
-              (let ((org-attach-auto-tag (if (eq type 'source) org-attach-auto-tag nil)))
-                (org-attach-attach file nil method)
+The callback ON-ABORT is called when capture is cancelled."  
+  (if (and (= 1 (length data)) (org-ilm-capture-p (car data)))
+      (car data)
+    
+    (cl-destructuring-bind
+        (&key target type title id ext content props file method
+              priority scheduled template state on-success on-abort
+              collection capture-args) data
+      
+      (cl-assert (member type '(extract card source)))
+      (unless id (setq id (org-id-new)))
+      (unless state
+        (setq state (car (if (eq type 'card) org-ilm-card-states org-ilm-incr-states))))
 
-                ;; Make sure the file name is the org-id
-                (rename-file
-                 (expand-file-name (file-name-nondirectory file) attach-dir)
-                 (expand-file-name (concat id "." (file-name-extension file)) attach-dir)
-                 'ok-if-already-exists)))))
-         (after-finalize
-          (lambda ()
-            ;; Deal with success and aborted capture. This can be detected in
-            ;; after-finalize hook with the `org-note-abort' flag set to t in
-            ;; `org-capture-kill'.
-            (if org-note-abort
-                (progn
-                  (org-ilm-pqueue-remove id)
-                  (when on-abort
-                    (funcall on-abort)))
-              (when org-ilm-update-org-mem-after-capture
-                (mochar-utils--org-mem-update-cache-after-capture 'entry))
-              (when on-success
-                (funcall on-success attach-dir))))))
+      ;; See `org-attach-method'
+      (unless method (setq method 'cp))
+      (cl-assert (member method '(mv cp ln lns)))
 
-    ;; See `org-attach-method'
-    (cl-assert (member method '(mv cp ln lns)))
+      ;; Set the target.
+      (setq target
+            (cond
+             ;; Target is parent org id 
+             ((stringp target)
+              ;; First: Calculate priority based on parent
+              (unless priority
+                (setq priority (org-ilm-pqueue-priority target :nil-if-absent t)))
 
-    ;; Set the target.
-    (setq target
-          (cond
-           ((stringp target)
-            ;; First: Calculate priority based on parent
-            (unless priority
-              (setq priority (org-ilm-pqueue-priority target :nil-if-absent t)))
-            
-            ;; Originally used the built-in 'id target, however for some reason
-            ;; it sometimes finds the wrong location which messes everything
-            ;; up. I noticed this behavior also with org-id-find and such. I
-            ;; should probably find the root cause, but org-node finds location
-            ;; accurately so i rely on it instead to find the location of a
-            ;; heading by id.  `(id ,target)
-            (let ((target-id (copy-sequence target)))
-              (list 'function
-                    (lambda ()
-                      (org-node-goto-id target-id)
-                      (org-back-to-heading)))))
-           ((symbolp target)
-            (list 'file (org-ilm--select-collection-file target)))
-           (t target)))
+              ;; Determine collection
+              (when-let* ((file (org-id-find-id-file target))
+                          (col (org-ilm--collection-file file)))
+                (setq collection (car col)))
+              
+              ;; Originally used the built-in 'id target, however for some reason
+              ;; it sometimes finds the wrong location which messes everything
+              ;; up. I noticed this behavior also with org-id-find and such. I
+              ;; should probably find the root cause, but org-node finds location
+              ;; accurately so i rely on it instead to find the location of a
+              ;; heading by id.  `(id ,target)
+              (let ((target-id (copy-sequence target)))
+                (list 'function
+                      (lambda ()
+                        (org-node-goto-id target-id)
+                        (org-back-to-heading)))))
+             ((symbolp target)
+              (setq collection target)
+              (list 'file (org-ilm--select-collection-file target)))
+             ;; TODO Determine collection based on arbitrary target?
+             ;; Maybe its ok to leave this
+             (t target)))
 
-    ;; Generate title from content if no title provided
-    (when (and (not title) content)
-      (setq title (org-ilm--generate-text-snippet content)))
+      ;; Priority. We always need a priority value.
+      (setq priority
+            (if priority
+                (org-ilm-pqueue-parse-new-position priority)
+              (org-ilm-pqueue-select-position)))
 
-    ;; Set extension from file when set to t
-    (when (eq ext t)
-      (if file
-          (setq ext (file-name-extension file))
-        (error "Cannot infer extension when no file provided (:ext=t)")))
+      ;; Schedule date. Always needed.
+      (setq scheduled
+            (cond
+             ((ts-p scheduled) scheduled)
+             ((stringp scheduled) (ts-parse scheduled))
+             (scheduled (error "scheduled unrecognized"))
+             (t (let ((card-interval (org-ilm-card-first-interval)))
+                  (cond
+                   ((or (not (eq type 'card)) (eq card-interval 'priority))
+                    (org-ilm--initial-schedule-from-priority (cdr priority)))
+                   ((numberp card-interval)
+                    (ts-adjust 'minute card-interval (ts-now)))
+                   (t (error "card-interval unrecognized")))))))
 
-    ;; Save content in a temporary file if no file provided
-    (when (and (not file) content)
-      (setq file (expand-file-name
-                  (format "%s.%s" id (or ext "org"))
-                  temporary-file-directory)
-            method 'cp)
+      ;; Generate title from content if no title provided
+      (when (and (not title) content)
+        (setq title (org-ilm--generate-text-snippet content)))
 
-      ;; TODO set MUSTBENEW to t?
-      (write-region content nil file))
+      ;; Set extension from file when set to t
+      (when (eq ext t)
+        (if file
+            (setq ext (file-name-extension file))
+          (error "Cannot infer extension when no file provided (:ext=t)")))
 
-    (unless template
-      (setq template
-            (format "* %s%s %s"
-                    state
-                    (if title (concat " " title) "")
-                    "%?")))
+      ;; Either file, content, or neither is given.
+      (cl-assert (not (and file content)))
+      (when (and (not file) content)
+        (setq file (expand-file-name
+                    (format "%s.%s" id (or ext "org"))
+                    temporary-file-directory)
+              method 'cp))
 
-    (cl-letf (((symbol-value 'org-capture-templates)
-               (list
-                (append
+      (unless template
+        (setq template
+              (format "* %s%s %s"
+                      state
+                      (if title (concat " " title) "")
+                      "%?")))
+
+      (make-org-ilm-capture
+       :target target :type type :title title :id id :ext ext
+       :content content :props props :file file :method method
+       :priority priority :scheduled scheduled :template template
+       :state state :on-success on-success :on-abort on-abort
+       :capture-args capture-args))))
+
+(defun org-ilm--capture (&rest data)
+  "Make an org capture to make a new source heading, extract, or card.
+
+For type of arguments DATA, see `org-ilm-capture-ensure'"
+  (let* ((capture (apply #'org-ilm-capture-ensure data))
+         attach-dir) ; Will be set in :hook, and passed to on-success
+
+    (cl-assert (org-ilm-capture-p capture))
+    
+    ;; Save content in a  file if provided.
+    ;; TODO set MUSTBENEW to t?
+    (when-let ((content (org-ilm-capture-content capture)))
+      (write-region content nil (org-ilm-capture-file capture)))
+
+    (let ((id (org-ilm-capture-id capture))
+          (type (org-ilm-capture-type capture))
+          (collection (org-ilm-capture-collection capture)))
+      (cl-letf (((symbol-value 'org-capture-templates)
                  (list
-                  "i" "Import" 'entry target template
-                  :hook
-                  (lambda ()
-                    ;; Set attach dir which will be passed to on-success
-                    ;; callback. Has to be done in the hook so that point is on
-                    ;; the headline, and respects file-local or .dir-locals
-                    ;; `org-attach-id-dir'.
-                    (setq attach-dir
-                          ;; If extract/card need to use inherited attach dir. If
-                          ;; new source, make new one from id.
-                          (if-let ((d (org-attach-dir)))
-                              (expand-file-name d)
-                            (org-attach-dir-from-id id)))
-                    
-                    ;; Regardless of type, every headline will have an id.
-                    (org-entry-put nil "ID" id)
-                    ;; Also trigger org-mem to update cache
-                    ;; (save-buffer)
-                    (org-node-nodeify-entry)
-                    ;; (org-mem-updater-ensure-id-node-at-point-known)
+                  (append
+                   (list
+                    "i" "Import" 'entry
+                    (org-ilm-capture-target capture)
+                    (org-ilm-capture-template capture)
+                    :hook
+                    (lambda ()
+                      ;; Set attach dir which will be passed to on-success
+                      ;; callback. Has to be done in the hook so that point is on
+                      ;; the headline, and respects file-local or .dir-locals
+                      ;; `org-attach-id-dir'.
+                      (setq attach-dir
+                            ;; If extract/card need to use inherited attach dir. If
+                            ;; new source, make new one from id.
+                            (if-let ((d (org-attach-dir)))
+                                (expand-file-name d)
+                              (org-attach-dir-from-id id)))
+                      
+                      ;; Regardless of type, every headline will have an id.
+                      (org-entry-put nil "ID" id)
+                      ;; Also trigger org-mem to update cache
+                      ;; (save-buffer)
+                      (org-node-nodeify-entry)
+                      ;; (org-mem-updater-ensure-id-node-at-point-known)
 
-                    ;; Add id to priority queue. An abort is detected in
-                    ;; `after-finalize' to remove the id.
-                    (org-ilm-pqueue-insert id (or priority .5))
+                      ;; Add id to priority queue. An abort is detected in
+                      ;; `after-finalize' to remove the id.
+                      (org-ilm-pqueue-insert id (org-ilm-capture-priority capture))
 
-                    ;; Attachment extension if specified
-                    (when ext
-                      (org-entry-put nil "ILM_EXT" ext))
+                      ;; Attachment extension if specified
+                      (when-let ((ext (org-ilm-capture-ext capture)))
+                        (org-entry-put nil "ILM_EXT" ext))
 
-                    ;; Additional properties
-                    (when props
-                      (cl-loop for (p v) on props by #'cddr
-                               do (org-entry-put nil (if (stringp p) p
-                                                       (substring (symbol-name p) 1)) v)))
+                      ;; Additional properties
+                      (when-let ((props (org-ilm-capture-props capture)))
+                        (cl-loop for (p v) on props by #'cddr
+                                 do (org-entry-put nil (if (stringp p) p
+                                                         (substring (symbol-name p) 1)) v)))
 
-                    
-                    ;; For cards, need to transclude the contents in order for
-                    ;; org-srs to detect the clozes.
-                    ;; TODO `org-transclusion-add' super slow!!
-                    (when (eq type 'card)
-                      ;; TODO this can be a nice macro
-                      ;; `org-ilm-with-attachment-transcluded'
-                      (save-excursion
-                        (org-ilm--transclusion-goto file 'create)
-                        (org-transclusion-add)
-                        (let ((org-srs-log-drawer-name org-ilm-log-drawer-name)) 
-                          (org-srs-item-new 'ilm-cloze))
-                        (org-ilm--transclusion-goto file 'delete)))
+                      ;; Schedule
+                      (when-let ((scheduled (org-ilm-capture-scheduled capture)))
+                        (org-schedule nil (org-ilm--ts-format-utc-date-maybe-time scheduled)))
+                      
+                      ;; For cards, need to transclude the contents in order for
+                      ;; org-srs to detect the clozes.
+                      ;; TODO `org-transclusion-add' super slow!!
+                      ;; (when (eq type 'card)
+                      ;;   ;; TODO this can be a nice macro
+                      ;;   ;; `org-ilm-with-attachment-transcluded'
+                      ;;   (save-excursion
+                      ;;     (org-ilm--transclusion-goto file 'create)
+                      ;;     (org-transclusion-add)
+                      ;;     (let ((org-srs-log-drawer-name org-ilm-log-drawer-name)) 
+                      ;;       (org-srs-item-new 'ilm-cloze))
+                      ;;     (org-ilm--transclusion-goto file 'delete)))
 
-                    ;; Scheduling. For cards too rely on the headline schedule,
-                    ;; but make sure it gets matched with the org-srs table.
-                    (let ((card-interval (org-ilm-card-first-interval)))
-                      (cond
-                       ((or (not (eq type 'card))
-                            (eq card-interval 'priority))
-                        ;; Set initial schedule data based on priortiy
-                        (org-ilm--set-schedule-from-priority)
+                      )
+                    :before-finalize
+                    (lambda ()
+                      ;; If this is a source header where the attachments will
+                      ;; live, we need to set the DIR property, otherwise for
+                      ;; some reason org-attach on children doesn't detect that
+                      ;; there is a parent attachment header, even with a non-nil
+                      ;; `org-attach-use-inheritance'.
+                      (when (eq type 'source)
+                        (org-entry-put
+                         nil "DIR"
+                         (abbreviate-file-name (org-attach-dir-get-create))))
+                      
+                      (when-let ((file (org-ilm-capture-file capture))
+                                 (method (org-ilm-capture-method capture)))
+                        ;; Attach the file. Turn of auto tagging if not import source.
+                        (let ((org-attach-auto-tag (if (eq type 'source)
+                                                       org-attach-auto-tag
+                                                     nil)))
+                          (org-attach-attach file nil method)
 
-                        ;; Add advice around priority change to automatically
-                        ;; update schedule, but remove advice as soon as capture
-                        ;; is finished.
-                        (advice-add 'org-priority
-                                    :around #'org-ilm--update-from-priority-change)
-                        (add-hook 'kill-buffer-hook
-                                  (lambda ()
-                                    (advice-remove 'org-priority
-                                                   #'org-ilm--update-from-priority-change))
-                                  nil t))
-                       ((numberp card-interval)
-                        (org-ilm--schedule :interval-minutes card-interval))))
+                          ;; Make sure the file name is the org-id
+                          (rename-file
+                           (expand-file-name (file-name-nondirectory file) attach-dir)
+                           (expand-file-name (concat id "." (file-name-extension file))
+                                             attach-dir)
+                           'ok-if-already-exists))))
+                    :after-finalize
+                    (lambda ()
+                      ;; Deal with success and aborted capture. This can be detected in
+                      ;; after-finalize hook with the `org-note-abort' flag set to t in
+                      ;; `org-capture-kill'.
+                      (if org-note-abort
+                          (progn
+                            (org-ilm-pqueue-remove id)
+                            (when-let ((on-abort (org-ilm-capture-on-abort capture)))
+                              (funcall on-abort)))
+                        (when org-ilm-update-org-mem-after-capture
+                          (mochar-utils--org-mem-update-cache-after-capture 'entry))
+                        (pcase type
+                          ('extract
+                           (run-hook-with-args 'org-ilm-extract-hook id collection))
+                          ('card
+                           (run-hook-with-args 'org-ilm-card-hook id collection)))
+                        (when-let ((on-success (org-ilm-capture-on-success capture)))
+                          (funcall on-success id attach-dir
+                                   (org-ilm-capture-collection capture))))))
+                   (org-ilm-capture-capture-args capture)))))
+        (org-capture nil "i")))))
 
-                    )
-                  :before-finalize before-finalize
-                  :after-finalize after-finalize)
-                 capture-args))))
-      (org-capture nil "i"))))
+;;;;; Extract
+
+(defun org-ilm--extract (&rest data)
+  "Make an extract with data in CAPTURE.
+
+For type of arguments DATAm see `org-ilm-capture-ensure'."
+  (let* ((immediate-p (if org-ilm-capture-show-menu-by-default
+                          current-prefix-arg
+                        (not current-prefix-arg)))
+         (capture (apply #'org-ilm-capture-ensure
+                         (org-combine-plists
+                          data (list :type 'extract)))))
+
+    (setf (org-ilm-capture-capture-args capture) (list :immediate-finish t))
+
+    (if immediate-p
+        (org-ilm--capture capture)
+      (org-ilm--extract-transient capture))))
+
+(defun org-ilm--extract-transient-values ()
+  (let* ((capture (transient-scope))
+         (args (if transient-current-command
+                   (transient-args transient-current-command)
+                 (transient-get-value)))
+         (rank (transient-arg-value "--priority=" args))
+         (scheduled (transient-arg-value "--scheduled=" args)))          
+
+    (if scheduled
+        (setq scheduled (ts-parse scheduled))
+      (setq scheduled (org-ilm-capture-scheduled (transient-scope))))
+    
+    (if rank
+        (setq rank (1- (string-to-number rank)))
+      (setq rank (org-ilm-capture-priority (transient-scope))))
+
+    (list rank scheduled)))
+
+(transient-define-prefix org-ilm--extract-transient (scope)
+  :refresh-suffixes t
+  
+  ["Extract"
+   ("p" "Priority" "--priority="
+    :transient transient--do-call
+    :class transient-option
+    :reader
+    (lambda (&rest _)
+      (let ((priority (org-ilm-pqueue-select-position)))
+        (unless (transient-arg-value "--scheduled=" (transient-args transient-current-command))
+          (mochar-utils--transiet-set-target-value
+           "s" (org-ilm--ts-format-utc-date
+                (org-ilm--initial-schedule-from-priority (cdr priority)))))
+        (number-to-string (1+ (car priority))))))
+   (:info
+    (lambda ()
+      (let ((rank (car (org-ilm--extract-transient-values))))
+        (org-ilm--ost-format-position (org-ilm-pqueue) rank))))
+   ("s" "Scheduled" "--scheduled="
+    :transient transient--do-call
+    :reader
+    (lambda (&rest _)
+      (org-read-date 'with-time nil nil "Schedule: ")))
+   (:info
+    (lambda ()
+      (let ((scheduled (cadr (org-ilm--extract-transient-values))))
+        (ts-format "%Y-%m-%d %H:%M" scheduled))))
+   ]
+
+  [
+   ("RET" "Extract"
+    (lambda ()
+      (interactive)
+      (cl-destructuring-bind (rank scheduled) (org-ilm--extract-transient-values)
+        (let ((capture (transient-scope)))
+          (setf (org-ilm-capture-priority capture) rank
+                (org-ilm-capture-scheduled capture) scheduled)
+          (org-ilm--capture capture)))))
+   ]
+
+  (interactive)
+  (transient-setup 'org-ilm--extract-transient nil nil :scope scope))
+
+
 
 ;;;; Org attachment
 
-(cl-defun org-ilm-org-extract (capture-p &key title dont-update-priority)
+(cl-defun org-ilm-org-extract (&key title dont-update-priority)
   "Extract text in region.
 
 Will become an attachment Org file that is the child heading of current entry."
-  (interactive "P")
+  (interactive)
   (unless (use-region-p) (user-error "No region active."))
   (let* ((file-buf (current-buffer))
          (file-path buffer-file-name)
@@ -2009,11 +2179,14 @@ Will become an attachment Org file that is the child heading of current entry."
         (when-let ((timer (org-ilm--media-extract-range region-text)))
           (setf (plist-get props :ILM_MEDIA+) timer)))
           
-      (org-ilm--capture
-       'extract
-       file-org-id
-       (list :id extract-org-id :content region-text :title title :props props)
-       (lambda (&rest _) ;; on-success
+      (org-ilm--extract
+       :target file-org-id
+       :id extract-org-id
+       :content region-text
+       :title title
+       :props props
+       :on-success
+       (lambda (&rest _)
 
          ;; Wrap region with targets.
          (with-current-buffer file-buf
@@ -2041,9 +2214,6 @@ Will become an attachment Org file that is the child heading of current entry."
 
          (unless dont-update-priority
            (org-ilm--attachment-priority-update 'extract)))
-       nil
-       ;; :immediate-finish (not capture-p)
-       :immediate-finish nil
        ))))
 
 (defun org-ilm-cloze ()
@@ -2128,7 +2298,7 @@ command."
         (set-mark (point))
         (org-end-of-subtree t)
         (insert "\n")
-        (org-ilm-org-extract nil :title title :dont-update-priority t)))))
+        (org-ilm-org-extract :title title :dont-update-priority t)))))
 
 ;;;; Media attachment
 
@@ -2296,7 +2466,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
 (defun org-ilm--pdf-insert-range-as-extract (range title level &optional data)
   (let* ((priority (or (plist-get data :priority) .5))
          (interval (or (plist-get data :interval)
-                       (org-ilm--schedule-interval-from-priority priority)))
+                       (org-ilm--initial-schedule-interval-from-priority priority)))
          (org-id (or (plist-get data :id) (org-id-new)))
          (schedule-str (org-ilm--interval-to-schedule-string interval)))
     (insert (make-string level ?*) " INCR " title "\n")
@@ -2798,7 +2968,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     (list org-id attach-dir attachment buffer collection headline
           (org-element-property :level headline)
           (org-ilm--interval-to-schedule-string
-           (org-ilm--schedule-interval-from-priority .5)))))
+           (org-ilm--initial-schedule-interval-from-priority .5)))))
 
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
@@ -2829,28 +2999,21 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (org-capture nil "c")))))
         ('text
          (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
-           (org-ilm--capture 
-            'extract
-            org-id
-            (list :content text :ext "org"))))
+           (org-ilm--extract
+            :target org-id :content text :ext "org")))
         ('image
          (let* ((img-path (org-ilm--pdf-image-export extract-org-id)))
-           (org-ilm--capture
-            'extract
-            org-id
-            (list :file img-path
-                  :title (format "Page %s" current-page-real)
-                  :id extract-org-id
-                  :method 'mv
-                  :ext t))))
+           (org-ilm--extract
+            :target org-id :file img-path
+            :title (format "Page %s" current-page-real)
+            :id extract-org-id :method 'mv :ext t)))
         ('org
-         (org-ilm--capture
-          'extract
-          org-id
-          (list 
-           :title (format "Page %s" current-page-real)
-           :id extract-org-id
-           :ext "org")
+         (org-ilm--extract
+          :target org-id
+          :title (format "Page %s" current-page-real)
+          :id extract-org-id
+          :ext "org"
+          :on-success
           (lambda (&rest _)
             (org-ilm--pdf-convert-attachment-to-org
              pdf-path
@@ -2942,17 +3105,17 @@ set only (not let)."
       ;;   org-link--try-link-store-functions(nil)
       ;;   org-store-link(nil)
       (let ((org-link-parameters nil))
-        (org-ilm--capture
-         'extract
-         org-id
-         capture-data
-         (lambda (&rest _)
-           (when capture-on-success
-             (funcall capture-on-success))
-           (org-ilm--pdf-add-square-annotation
-            current-page-real region extract-org-id)
-           (when (eq major-mode 'pdf-virtual-view-mode)
-             (org-ilm-pdf-virtual-refresh))))))))
+        (apply #'org-ilm--extract
+               (append capture-data
+                       (list :target org-id
+                             :on-success
+                             (lambda (&rest _)
+                               (when capture-on-success
+                                 (funcall capture-on-success))
+                               (org-ilm--pdf-add-square-annotation
+                                current-page-real region extract-org-id)
+                               (when (eq major-mode 'pdf-virtual-view-mode)
+                                 (org-ilm-pdf-virtual-refresh))))))))))
 
 (defun org-ilm-pdf-outline-extract ()
   "Turn PDF outline items into a extracts.
@@ -3043,22 +3206,16 @@ make a bunch of headers."
                             'word buffer)
                            "\n")))))
 
-           (org-ilm--capture
-            'extract
-            org-id
-            (list :content (buffer-string)
-                  :title (concat "Section: " (alist-get 'title section))
-                  :ext "org"))))
+           (org-ilm--extract
+            :target org-id :content (buffer-string) :ext "org"
+            :title (concat "Section: " (alist-get 'title section)))))
         ('org
          (let ((pdf-path (org-ilm--pdf-path))
                (extract-org-id (org-id-new)))
-           (org-ilm--capture
-            'extract
-            org-id
-            (list 
-             :title (concat "Section: " (alist-get 'title section))
-             :id extract-org-id
-             :ext "org")
+           (org-ilm--extract
+            :target org-id :id extract-org-id :ext "org"
+            :title (concat "Section: " (alist-get 'title section))
+            :on-success
             (lambda (&rest _)
               (org-ilm--pdf-convert-attachment-to-org
                pdf-path
@@ -3635,18 +3792,23 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
   (let ((collection (or collection (plist-get org-ilm-queue :collection))))
     (cl-assert collection)
     (org-ql-select (org-ilm--collection-files collection)
-      (cons 'todo org-ilm-subject-states)
+      `(and (property "ID")
+            ,(cons 'todo org-ilm-subject-states))
       :action #'org-ilm-element-at-point)))
 
 (defun org-ilm-query-all ()
   "Query for org-ql to retrieve all elements."
-  `(or ,(cons 'todo org-ilm-incr-states) ,(cons 'todo org-ilm-card-states)))
+  `(and
+    (property "ID")
+    (or ,(cons 'todo org-ilm-incr-states) ,(cons 'todo org-ilm-card-states))))
 
 (defun org-ilm-query-outstanding ()
   "Query for org-ql to retrieve the outstanding elements."
-  `(or
-    (and ,(cons 'todo org-ilm-incr-states) (scheduled :to today))
-    (and ,(cons 'todo org-ilm-card-states) (org-ilm--ql-card-due))))
+  `(and
+    (property "ID")
+    (or
+     (and ,(cons 'todo org-ilm-incr-states) (scheduled :to today))
+     (and ,(cons 'todo org-ilm-card-states) (org-ilm--ql-card-due)))))
 
 (defun org-ilm--query-select ()
   "Prompt user for query to select from.
@@ -4513,7 +4675,7 @@ A lot of formatting code from org-ql."
          (queue (transient-scope))
          (rank-this (car (if queue
                              (org-ilm--queue-select-read queue)
-                           (org-ilm-pqueue-select-rank))))
+                           (org-ilm-pqueue-select-position))))
          (rank-other (transient-arg-value
                       (concat "--" (if minimum-p "max" "min") "=")
                       (transient-args transient-current-command)))
@@ -4838,9 +5000,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   "Import a file."
   (cl-assert (member method '(mv cp ln lns)))  
   (org-ilm--capture
-   'source
-   (car collection)
-   (list :file file :method method :ext t)))
+   :type 'source :target (car collection)
+   :file file :method method :ext t))
 
 ;;;;; Media
 
@@ -4887,12 +5048,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (cl-destructuring-bind (&key source title collection &allow-other-keys)
           (org-ilm--import-media-transient-args)
         (org-ilm--capture
-         'source
-         collection
-         (list 
-          :title title
-          :content ""
-          :props (list :ILM_MEDIA source)))))
+         :type 'source :target collection
+         :title title :content ""
+         :props (list :ILM_MEDIA source))))
     :inapt-if-not
     (lambda ()
       (cl-destructuring-bind (&key source &allow-other-keys)
@@ -5019,18 +5177,16 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
        (cl-destructuring-bind (&key collection entry attachment method media)
            (org-ilm--import-registry-transient-args)
          (org-ilm--capture
-          'source
-          collection
-          (list :file attachment
-                :content (when (and (not attachment) media) "")
-                :method (or (when method (intern method)) 'cp)
-                :ext (when attachment t)
-                :title (org-mem-entry-title entry)
-                :props
-                (append
-                 (list :REGISTRY (org-mem-entry-id entry))
-                 (when media (list :ILM_MEDIA media))
-                 )))))
+          :type 'source
+          :target collection
+          :file attachment
+          :content (when (and (not attachment) media) "")
+          :method (or (when method (intern method)) 'cp)
+          :ext (when attachment t)
+          :title (org-mem-entry-title entry)
+          :props (append
+                  (list :REGISTRY (org-mem-entry-id entry))
+                  (when media (list :ILM_MEDIA media))))))
      :inapt-if
      (lambda ()
        (let ((args (org-ilm--import-registry-transient-args (transient-get-value))))
@@ -5044,11 +5200,10 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (cl-assert (or (null method) (member method '(mv cp ln lns))))
 
   (org-ilm--capture
-   'source
-   collection
-   (list :file attachment :method (or method 'cp) :ext (when attachment t)
-         :title (org-mem-entry-title entry)
-         :props (list :REGISTRY (org-mem-entry-id entry)))))
+   :type 'source :target collection
+   :file attachment :method (or method 'cp) :ext (when attachment t)
+   :title (org-mem-entry-title entry)
+   :props (list :REGISTRY (org-mem-entry-id entry))))
 
 
 ;;;; Math and stats
@@ -5305,19 +5460,24 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   "Return ts object representing DAYS from now."
   (ts-adjust 'day -1 (ts-now)))
 
-(defun org-ilm--schedule-interval-from-priority (priority)
-  "Calculate a schedule interval from the normalized priority value."
+(defun org-ilm--initial-schedule-interval-from-priority (priority)
+  "Calculate the initial schedule interval from the normalized priority value."
   (cl-assert (and (floatp priority) (<= 0 priority 1)))
   (let* ((rate (* 25 priority))
          (interval (+ (org-ilm--random-poisson rate) 1)))
     interval))
 
+(defun org-ilm--initial-schedule-from-priority (priority &optional timestamp)
+  "Calculate the initial schedule date from the normalized priority value."
+  (setq timestamp (or timestamp (ts-now)))
+  (cl-assert (ts-p timestamp))
+  (let ((interval (org-ilm--initial-schedule-interval-from-priority priority)))
+    (ts-adjust 'day interval timestamp)))
+
 (cl-defun org-ilm--schedule (&key org-id timestamp interval-minutes interval-days ignore-time)
   (unless (setq org-id (or org-id (org-id-get)))
     (error "No headline with id given or at point."))
-  (message "lol: %s" org-id)
   (org-ilm--org-with-point-at org-id
-    (message "kek: %s" org-id)
     (org-ilm--org-schedule :timestamp timestamp
                            :interval-minutes interval-minutes
                            :interval-days interval-days
@@ -5332,7 +5492,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
               (collection (car (org-ilm--collection-file)))
               (priority (org-ilm-pqueue-priority
                          id :collection collection))
-              (interval-days (org-ilm--schedule-interval-from-priority
+              (interval-days (org-ilm--initial-schedule-interval-from-priority
                               (cdr priority))))
     (org-ilm--schedule :interval-days interval-days)))
 
@@ -5346,7 +5506,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 (defun org-ilm--schedule-interval-calculate (priority scheduled last-interval)
   "Calculate the new schedule interval assuming review was done today."
   (if (null last-interval)
-      (org-ilm--schedule-interval-from-priority priority)
+      (org-ilm--initial-schedule-interval-from-priority priority)
     (* last-interval 1.5)))
 
 (defun org-ilm--element-schedule-interval-calculate (element)
@@ -5384,6 +5544,40 @@ due or not."
 
 ;;;; Cards
 
+(defcustom org-ilm-card-fsrs-desired-retention .9
+  "Target probability of successful recall (0.0-1.0).
+
+FSRS default: 0.9"
+  :type 'number
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-learning-steps '((1 :minute) (10 :minute))
+  "List of time intervals for initial learning phase.
+
+FSRS default: '((1 :minute) (10 :minute))"
+  :type 'list
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-relearning-steps '((10 :minute))
+  "List of time intervals for relearning phase.
+
+FSRS default: '((10 :minute))"
+  :type 'list
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-maximum-interval '(36500 :day)
+  "Upper bound for scheduling intervals.
+
+FSRS default: '(36500 :day)"
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-fuzzing-p t
+  "Randomize intervals within bounds.
+
+FSRS default: t"
+  :type 'boolean
+  :group 'org-ilm-card)
+
 (defcustom org-ilm-card-first-interval 'priority
   "The first interval for cards."
   :type '(choice (const :tag "Immediate" nil)
@@ -5392,36 +5586,26 @@ due or not."
                  (number :tag "Custom interval in minutes"))
   :group 'org-ilm-card)
 
+;;;;; Logic
+
 (defun org-ilm-card-first-interval ()
   (let ((interval org-ilm-card-first-interval))
     (cond
-     ((eq interval priority)
+     ((eq interval 'priority)
       interval)
      ((and (numberp interval) (>= interval 0))
       interval)
      ((stringp interval)
       (ignore-errors (org-duration-to-minutes interval)))
-     (t nil))))
+     (t 0))))
 
-;;;;; Logic
-
-;; (cl-defstruct
-;;  (fsrs-scheduler (:copier fsrs-copy-scheduler)
-;;   (:constructor fsrs--make-scheduler))
-;;  "Container for FSRS scheduling configuration and parameters.
-
-;; PARAMETERS is the array of FSRS algorithm weights and coefficients.
-;; DESIRED-RETENTION is the target probability of successful recall (0.0-1.0).
-;; LEARNING-STEPS is the list of time intervals for initial learning phase.
-;; RELEARNING-STEPS is the list of time intervals for relearning phase.
-;; MAXIMUM-INTERVAL is the upper bound for scheduling intervals.
-;; ENABLE-FUZZING-P is the flag to randomize intervals within bounds."
-;;  (parameters fsrs-default-parameters :type fsrs-parameters)
-;;  (desired-retention 0.9 :type float)
-;;  (learning-steps '((1 :minute) (10 :minute)) :type list)
-;;  (relearning-steps '((10 :minute)) :type list)
-;;  (maximum-interval '(36500 :day) :type fsrs-timespan)
-;;  (enable-fuzzing-p t :type boolean))
+(defun org-ilm--card-default-scheduler ()
+  (fsrs-make-scheduler
+   :desired-retention org-ilm-card-fsrs-desired-retention
+   :learning-steps org-ilm-card-fsrs-learning-steps
+   :relearning-steps org-ilm-card-fsrs-relearning-steps
+   :maximum-interval org-ilm-card-fsrs-maximum-interval
+   :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p))
 
 ;;;;; Logging
 
