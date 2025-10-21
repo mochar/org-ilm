@@ -433,7 +433,7 @@ DATA is a plist that can contain :title, :body, :id, :type, :props,
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
   (let* ((registry (or registry (org-registry--registry-select)))
-         (title (string-trim (plist-get data :title)))
+         (title (ignore-errors (string-trim (plist-get data :title))))
          (body (plist-get data :body))
          (type (or (plist-get data :type) type))
          (id (or (plist-get data :id) (org-id-new)))
@@ -495,7 +495,7 @@ org-capture template properties."
 
 (defun org-registry--org-get-contents ()
   (save-excursion
-    (org-back-to-heading)
+    (org-back-to-heading-or-point-min)
     (org-end-of-meta-data 'full)
     (if (or (org-at-heading-p) (eobp))
         ;; If we end up at the next heading or end of buffer, no content except
@@ -504,7 +504,7 @@ org-capture template properties."
       (let ((start (point)))
         (org-next-visible-heading 1)
         (string-trim
-         (buffer-substring-no-props start (point)))))))
+         (buffer-substring-no-properties start (point)))))))
 
 ;;;; Types
 
@@ -518,8 +518,8 @@ PARAMETERS should be keyword value pairs. See `org-registry-types'."
 
 (defun org-registry--link-preview (ov id link)
   ;; This function must return a non-nil value to indicate success.
-  (let* ((entry (org-mem-entry-by-id id))
-         (type-data (org-registry--type-data-from-entry entry)))
+  (when-let* ((entry (org-mem-entry-by-id id))
+              (type-data (org-registry--type-data-from-entry entry)))
     (overlay-put ov 'org-registry-type (car type-data))
     (org-with-point-at (org-element-begin link)
       (funcall (plist-get (cdr type-data) :preview) entry ov link))))
@@ -587,6 +587,8 @@ environment (multiline), paste it in headline body."
               (type (org-element-type org-element))
               (latex (org-element-property :value org-element)))
     (when (member type '(latex-fragment latex-environment))
+      (when (eq type 'latex-fragment)
+        (setq latex (s-replace-regexp "\n" "" latex)))
       (list :latex latex
             :fragment (eq type 'latex-fragment)
             :begin (org-element-property :begin org-element)
