@@ -70,8 +70,8 @@
   :type 'number
   :group 'org-ilm)
 
-(defcustom org-ilm-incr-states '("INCR")
-  "TODO state of elements to be processed incrementally."
+(defcustom org-ilm-material-states '("MTRL")
+  "TODO state of material elements to be processed incrementally."
   :type 'string
   :group 'org-ilm)
 
@@ -385,7 +385,7 @@ be due starting 2am."
       (ts-format "%Y-%m-%d" ts)
     (ts-format "%Y-%m-%d %H:%M" ts)))
 
-;;;; Elisp
+;;;;; Elisp
 
 (defun org-ilm--select-alist (alist &optional prompt formatter)
   "Prompt user for element in alist to select from.
@@ -705,6 +705,56 @@ the priority, or error if there is no priority."
        (ts-format "%Y-%m-%d" timestamp)
      (ts-format "%Y-%m-%d %H:%M" timestamp))))
 
+(defun org-ilm--org-logbook-parse (logbook)
+  "Parses the Org contents of a logbook drawer entry."
+  (let ((contents (org-element-contents logbook)))
+    (mapcar
+     ;; If more data is needed, see:
+     ;; https://orgmode.org/worg/dev/org-element-api.html
+     ;; See: Timestamp, Clock
+     (lambda (clock)
+       (let* ((timestamp (org-element-property :value clock))
+              (stamps (split-string (org-element-property :raw-value timestamp) "--")))
+         (list
+          :duration-minutes
+          (when-let ((duration (org-element-property :duration clock)))
+            (org-duration-to-minutes duration))
+          :status (org-element-property :status clock)
+          :timestamp-start (ts-parse-org (nth 0 stamps))
+           ;; May be nil if active clock
+          :timestamp-end (when-let ((s (nth 1 stamps))) (ts-parse-org s))
+          :day-end (org-element-property :day-end timestamp)
+          :day-start (org-element-property :day-start timestamp)
+          :month-end (org-element-property :month-end timestamp)
+          :month-start (org-element-property :month-start timestamp)
+          :year-end (org-element-property :year-end timestamp)
+          :year-start (org-element-property :year-start timestamp))))
+     contents)))
+    
+(defun org-ilm--org-logbook-read (&optional headline)
+  "Reads and parses the LOGBOOK drawer of heading at point.
+
+If `HEADLINE' is passed, read it as org-property."
+  (unless headline
+    (setq headline (save-excursion (org-back-to-heading) (org-element-at-point))))
+  (let* ((begin (org-element-property :begin headline))
+         (end (save-excursion
+                (outline-next-heading)
+                (point))))
+    (when (and begin end)
+      (save-excursion
+        (save-restriction
+          (narrow-to-region begin end)
+          (when-let* ((drawers (org-element-map
+                                   (org-element-parse-buffer)
+                                   'drawer #'identity))
+                      (logbook (seq-find
+                                (lambda (drawer)
+                                  (string-equal
+                                   (org-element-property :drawer-name drawer) "LOGBOOK"))
+                                drawers)))
+            (org-ilm--org-logbook-parse logbook)))))))
+
 ;;;;; Org-node / org-mem
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
@@ -905,7 +955,7 @@ The collections are stored in `org-ilm-collections'."
    (lambda (entry)
      (member
       (org-ilm-type (org-mem-entry-todo-state entry))
-      '(incr card)))
+      '(material card)))
    (org-mem-entries-in-files (org-ilm--collection-files collection))))
 
 (defun org-ilm--collection-tags (collection)
@@ -1137,7 +1187,7 @@ With RANK or QUANTILE, set the new position in the queue, or insert there if not
 ;;   field to calculate how much it was postponed.
 
 (defconst org-ilm-log-element-fields '(timestamp delay priority due state))
-(defconst org-ilm-log-incr-fields org-ilm-log-element-fields)
+(defconst org-ilm-log-material-fields org-ilm-log-element-fields)
 (defconst org-ilm-log-card-fields (append
                                    org-ilm-log-element-fields
                                    '(rating stability difficulty)))
@@ -1185,7 +1235,7 @@ Difficulty is between 1 and 10. Want a bit more precision here."
 
 (defun org-ilm-log-review-from-alist (alist &optional type)
   (unless type (setq type (org-ilm-type)))
-  (cl-assert (member type '(incr card)))
+  (cl-assert (member type '(material card)))
   ;; Empty values are parsed as "" so turn them to nil
   (dolist (pair alist)
     (when (and (stringp (cdr pair)) (string= (cdr pair) ""))
@@ -1230,7 +1280,7 @@ Difficulty is between 1 and 10. Want a bit more precision here."
                difficulty (string-to-number difficulty))
          (cl-assert (floatp stability))
          (cl-assert (floatp difficulty))))
-      ('incr
+      ('material
        (cl-assert (or (not state) (member state '(:done))))
        (cl-assert (null rating))))
     
@@ -1284,7 +1334,7 @@ If found, return start and end positions as cons."
 (defun org-ilm--log-fields ()
   "Return the log table fields of the element at point."
   (pcase (org-ilm-type)
-    ('incr org-ilm-log-incr-fields)
+    ('material org-ilm-log-material-fields)
     ('card org-ilm-log-card-fields)
     (_ (error "Not an ilm element"))))
 
@@ -1361,12 +1411,12 @@ With optional INIT-DATA, create a new table with this data. See
 
 ;;;; Types
 
-;; There are three headline types: Subjects, Incrs, and Cards.
+;; There are three headline types: Subjects, Materials, and Cards.
 
 (defun org-ilm-type (&optional headline-or-state)
   "Return ilm type from an org headline or its todo state.
 
-See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
+See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-subject-states'."
   (when-let ((state (cond
                      ((org-element-type-p headline-or-state 'headline)
                       (org-element-property :todo-keyword headline-or-state))
@@ -1377,8 +1427,8 @@ See `org-ilm-card-states', `org-ilm-incr-states', and `org-ilm-subject-states'."
                      (t (error "Unrecognized arg")))))
     (cond
      ((member state org-ilm-card-states) 'card)
-     ((member state org-ilm-incr-states) 'incr)
-     ((member state org-ilm-subject-states) 'subj))))
+     ((member state org-ilm-material-states) 'material)
+     ((member state org-ilm-subject-states) 'subject))))
 
 ;;;; Element
 
@@ -1484,7 +1534,7 @@ wasteful if headline does not match query."
   (cl-assert (org-ilm-element-p element))
   (org-ilm--org-with-point-at (org-ilm-element-id element)
     (pcase (org-ilm-element-type element)
-      ('incr (plist-get (car (org-ilm--logbook-read)) :timestamp-end))
+      ('material (plist-get (car (org-ilm--org-logbook-read)) :timestamp-end))
       ('card (org-ilm--srs-last-review-timestamp)))))
 
 (defun org-ilm-element-last-interval (element)
@@ -1546,58 +1596,6 @@ ELEMENT may be nil, in which case try to read it from point."
   (org-ilm--ost-format-position
    (org-ilm-element-pqueue element)
    (org-ilm-element-priority element)))
-
-;;;;; Logbook
-
-(defun org-ilm--logbook-parse (logbook)
-  "Parses the Org contents of a logbook drawer entry."
-  (let ((contents (org-element-contents logbook)))
-    (mapcar
-     ;; If more data is needed, see:
-     ;; https://orgmode.org/worg/dev/org-element-api.html
-     ;; See: Timestamp, Clock
-     (lambda (clock)
-       (let* ((timestamp (org-element-property :value clock))
-              (stamps (split-string (org-element-property :raw-value timestamp) "--")))
-         (list
-          :duration-minutes
-          (when-let ((duration (org-element-property :duration clock)))
-            (org-duration-to-minutes duration))
-          :status (org-element-property :status clock)
-          :timestamp-start (ts-parse-org (nth 0 stamps))
-           ;; May be nil if active clock
-          :timestamp-end (when-let ((s (nth 1 stamps))) (ts-parse-org s))
-          :day-end (org-element-property :day-end timestamp)
-          :day-start (org-element-property :day-start timestamp)
-          :month-end (org-element-property :month-end timestamp)
-          :month-start (org-element-property :month-start timestamp)
-          :year-end (org-element-property :year-end timestamp)
-          :year-start (org-element-property :year-start timestamp))))
-     contents)))
-    
-(defun org-ilm--logbook-read (&optional headline)
-  "Reads and parses the LOGBOOK drawer of heading at point.
-
-If `HEADLINE' is passed, read it as org-property."
-  (unless headline
-    (setq headline (save-excursion (org-back-to-heading) (org-element-at-point))))
-  (let* ((begin (org-element-property :begin headline))
-         (end (save-excursion
-                (outline-next-heading)
-                (point))))
-    (when (and begin end)
-      (save-excursion
-        (save-restriction
-          (narrow-to-region begin end)
-          (when-let* ((drawers (org-element-map
-                                   (org-element-parse-buffer)
-                                   'drawer #'identity))
-                      (logbook (seq-find
-                                (lambda (drawer)
-                                  (string-equal
-                                   (org-element-property :drawer-name drawer) "LOGBOOK"))
-                                drawers)))
-            (org-ilm--logbook-parse logbook)))))))
 
 ;;;;; Actions
 
@@ -1873,7 +1871,9 @@ The callback ON-ABORT is called when capture is cancelled."
       (cl-assert (member type '(extract card source)))
       (unless id (setq id (org-id-new)))
       (unless state
-        (setq state (car (if (eq type 'card) org-ilm-card-states org-ilm-incr-states))))
+        (setq state (car (if (eq type 'card)
+                             org-ilm-card-states
+                           org-ilm-material-states))))
 
       ;; See `org-attach-method'
       (unless method (setq method 'cp))
@@ -2384,10 +2384,6 @@ A cloze is made automatically of the element at point or active region."
 
 ;;;; PDF attachment
 
-;; TODO keymap for pdf. Prefix A(ttachment) or I(lm)
-;; I default bound to popup info buffer but i dont find that useful
-;; But A better because in image mode, A also unused.
-
 ;; Nice functions/macros:
 ;; pdf-util-track-mouse-dragging
 ;; pdf-view-display-region
@@ -2494,7 +2490,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
                        (org-ilm--initial-schedule-interval-from-priority priority)))
          (org-id (or (plist-get data :id) (org-id-new)))
          (schedule-str (org-ilm--interval-to-schedule-string interval)))
-    (insert (make-string level ?*) " INCR " title "\n")
+    (insert (make-string level ?*) " " (car org-ilm-material-states) " " title "\n")
     (insert "SCHEDULED: " schedule-str "\n")
     (insert ":PROPERTIES:\n")
     (insert (format ":ID: %s\n" org-id))
@@ -3441,7 +3437,7 @@ This is used to keep track of changes in priority and scheduling.")
                  (- (point-max) (point-min)))))))))
 
 (defun org-ilm--attachment-ensure-data-object ()
-  "Ensure `org-ilm--object' is initialized properly.
+  "Ensure `org-ilm--data' is initialized properly.
 
 Sometimes org-mode fails to load, which will lead to
 `org-ilm--attachment-prepare-buffer' not initializing correctly. To deal
@@ -3563,7 +3559,7 @@ See `org-ilm-attachment-transclude'."
         (org-ilm-attachment-transclusion-create)
       (org-ilm-attachment-transclusion-transclude))))
 
-;;;; Targets
+;;;; Target overlays
 
 ;; Targets refer to the anchor points used to highlight extracted or clozed
 ;; sections of text in org attachments. It looks like this:
@@ -3652,8 +3648,6 @@ See `org-ilm-attachment-transclude'."
         (delete-region (plist-get (nth 0 targets) :begin)
                        (plist-get (nth 0 targets) :end)))
       (org-ilm-recreate-overlays))))
-
-;;;; Overlays
 
 (defun org-ilm--target-ov-block-edit (ov after-change-p beg end &optional len-pre)
   ;; The hook functions are called both before and after each change. If the functions save the information they receive, and compare notes between calls, they can determine exactly what change has been made in the buffer text.
@@ -3825,7 +3819,8 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
   "Query for org-ql to retrieve all elements."
   `(and
     (property "ID")
-    (or ,(cons 'todo org-ilm-incr-states) ,(cons 'todo org-ilm-card-states))))
+    (or ,(cons 'todo org-ilm-material-states)
+        ,(cons 'todo org-ilm-card-states))))
 
 (defun org-ilm-query-outstanding ()
   "Query for org-ql to retrieve the outstanding elements."
@@ -3833,7 +3828,7 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive subject
     `(and
       (property "ID")
       (scheduled :to ,today)
-      ,(cons 'todo (append org-ilm-incr-states org-ilm-card-states)))))
+      ,(cons 'todo (append org-ilm-material-states org-ilm-card-states)))))
 
 (defun org-ilm--query-select ()
   "Prompt user for query to select from.
@@ -4236,7 +4231,7 @@ If point on subject, add all headlines of subject."
                                (format "[%s] %s" (upcase (symbol-name type))
                                        (org-element-property :title headline))))))))
               (n-added 0))
-    (if (eq type 'subj)
+    (if (eq type 'subject)
         (dolist (entry (org-ilm--collection-entries collection))
           (when-let* ((element (org-ilm-element-from-id (org-mem-entry-id entry)))
                       (subjects (car (org-ilm-element-subjects element)))
@@ -4460,7 +4455,11 @@ A lot of formatting code from org-ql."
             (propertize "NA" 'face 'Info-quoted)
           (pcase-let ((`(,marked ,type) data))
             (org-ilm--vtable-format-marked
-             (org-ql-view--add-todo-face (upcase (symbol-name type)))
+             (org-ql-view--add-todo-face
+              (upcase (pcase type
+                        ('material (car org-ilm-material-states))
+                        ('card (car org-ilm-card-states))
+                        (_ "????"))))
              marked)))))
      ;; (:name
      ;;  "Cookie"
@@ -4732,16 +4731,16 @@ A lot of formatting code from org-ql."
      (if (transient-scope) "Position spread" "Priority spread"))
    (:info
     (lambda ()
-      (let ((n-incrs 0)
+      (let ((n-materials 0)
             (n-cards 0))
         (dolist (id org-ilm--queue-marked-objects)
           (pcase (org-ilm-type (org-mem-entry-todo-state (org-mem-entry-by-id id)))
-            ('incr (cl-incf n-incrs))
+            ('material (cl-incf n-materials))
             ('card (cl-incf n-cards))))
         (propertize
-         (format "%s element (%s incrs, %s cards)"
+         (format "%s element (%s materials, %s cards)"
                  (length org-ilm--queue-marked-objects)
-                 n-incrs n-cards)
+                 n-materials n-cards)
          'face 'transient-value))))
    ("a" "Min" "--min=" :always-read t
     :transient transient--do-call
@@ -4813,6 +4812,8 @@ A lot of formatting code from org-ql."
 
 
 ;;;; Queue select
+
+;; Using a queue view to select a position in the queue
 
 (defvar org-ilm--queue-select-timer nil)
 (defvar org-ilm--queue-select-buffer nil)
@@ -5353,6 +5354,8 @@ If SEED is provided, sets the random seed first for reproducible results."
 
 ;;;; Priority (cookie)
 
+;; Old colde for when priority was based on headline priority cookie.
+
 (defun org-ilm--get-priority (&optional headline-or-entry)
   "Return priority data of HEADLINE, or if nil, the one at point.
 
@@ -5434,7 +5437,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 (defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
   (let ((priority (cdr (org-ilm--get-priority headline)))
-        (logbook (org-ilm--logbook-read headline))
+        (logbook (org-ilm--org-logbook-read headline))
         (subjects (org-ilm--subject-cache-gather headline)))
     (org-ilm--priority-beta-compile priority subjects logbook)))
 
@@ -5545,14 +5548,14 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 ;; (due (<= (/ (ts-diff scheduled (org-ilm--ts-today)) 86400) 0)))
 
 (defun org-ilm--schedule-update ()
-  "Update the scheduled date of an incr element at point after review.
+  "Update the scheduled date of an material element at point after review.
 
 This will update the schedule date regardless of whether the element is
 due or not."
   (let* ((element (org-ilm-element-at-point))
          (scheduled (org-ilm-element-sched element)))
     (cl-assert scheduled)
-    (cl-assert (eq (org-ilm-element-type element) 'incr))
+    (cl-assert (eq (org-ilm-element-type element) 'material))
     (let ((interval-days (org-ilm--element-schedule-interval-calculate element)))
       (cl-assert (> interval 0))
       (org-ilm--schedule :org-id (org-ilm-element-id element)
@@ -5964,6 +5967,8 @@ An empty log implies a new card, so step is 0."
 
 ;;;; SRS (org-srs)
 
+;; Integration with org-srs, now abandoned for own implementation
+
 ;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
       
 (defun org-ilm--srs-in-cloze-p ()
@@ -6181,13 +6186,13 @@ parents, which is defined differently for subjects and extracts/cards:
            ;; Headline is self or incremental ancestor, store linked subjects
            ((or is-self
                 (and (not headline-is-subj) ; Subject never inherit!
-                     (eq type 'incr)))
+                     (eq type 'material)))
             (when-let ((prop (org-mem-entry-property "SUBJECTS+" entry)))
               (setq property-subjects-str
                     (concat property-subjects-str " " prop))))
            
            ;; Headline is subject, store as outline parent subject
-           ((eq type 'subj)
+           ((eq type 'subject)
             (cl-pushnew id subject-ids :test #'equal)
             (unless outline-parent-subject
               (setq outline-parent-subject id))
@@ -6311,7 +6316,7 @@ and again by `org-ilm-queue-mark-by-subject'."
           "Subject: " nil
           (lambda (name entry)
             (and
-             (eq 'subj (org-ilm-type (org-mem-todo-state entry)))
+             (eq 'subject (org-ilm-type (org-mem-todo-state entry)))
              (org-ilm--collection-file (org-mem-entry-file entry) collection)))
           'require-match)))
     (gethash choice org-node--candidate<>entry)))
@@ -6326,7 +6331,7 @@ and again by `org-ilm-queue-mark-by-subject'."
              (state (when at-heading-p (org-get-todo-state)))
              (ilm-type (org-ilm-type state)))
         (cond
-         ((and ilm-type (not (eq ilm-type 'subj)))
+         ((and ilm-type (not (eq ilm-type 'subject)))
           (call-interactively #'org-ilm-subject-add))
          ((and at-heading-p (null state))
           (call-interactively #'org-ilm-subject-into))
@@ -6378,7 +6383,7 @@ TODO Skip if self or descendant."
         (org-entry-put nil "SUBJECTS+"
                        (concat cur-subjects " " subject-link))))))
 
-;;;; Subject cache
+;;;;; Subject cache
 
 (defvar org-ilm-subject-cache (make-hash-table :test 'equal)
   "Map subject org-id -> ('(ancestor-subject-ids..) . num-direct-parents)
@@ -6404,7 +6409,7 @@ Headline can be a subject or not."
                 (org-ilm--subjects-get-parent-subjects headline-or-id))
                (headline (car parents-data))
                (type (org-ilm-type headline))
-               (is-subject (eq type 'subj))
+               (is-subject (eq type 'subject))
                (parent-ids (cdr parents-data))
                (entry (org-mem-entry-by-id id))
                (ancestor-ids (copy-sequence parent-ids)))
