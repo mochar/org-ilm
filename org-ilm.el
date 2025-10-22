@@ -1817,6 +1817,407 @@ ELEMENT may be nil, in which case try to read it from point."
       (org-ilm--element-transient))))
 
 
+;;;; Material
+
+;; Source material to be consumed incrementally. Includes extracts.
+
+
+
+
+;;;; Cards
+
+(defcustom org-ilm-card-fsrs-desired-retention .9
+  "Target probability of successful recall (0.0-1.0).
+
+FSRS default: 0.9"
+  :type 'number
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-learning-steps '((1 :minute) (10 :minute))
+  "List of time intervals for initial learning phase.
+
+FSRS default: '((1 :minute) (10 :minute))"
+  :type 'list
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-relearning-steps '((10 :minute))
+  "List of time intervals for relearning phase.
+
+FSRS default: '((10 :minute))"
+  :type 'list
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-maximum-interval '(36500 :day)
+  "Upper bound for scheduling intervals.
+
+FSRS default: '(36500 :day)"
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-fsrs-fuzzing-p t
+  "Randomize intervals within bounds.
+
+FSRS default: t"
+  :type 'boolean
+  :group 'org-ilm-card)
+
+(defcustom org-ilm-card-first-interval 'priority
+  "The first interval for cards."
+  :type '(choice (const :tag "Immediate" nil)
+                 (const :tag "Priority based interval" priority)
+                 (string :tag "Custom interval as %H:%S format")
+                 (number :tag "Custom interval in minutes"))
+  :group 'org-ilm-card)
+
+;;;;; Logic
+
+(defun org-ilm-card-first-interval ()
+  (let ((interval org-ilm-card-first-interval))
+    (cond
+     ((eq interval 'priority)
+      interval)
+     ((and (numberp interval) (>= interval 0))
+      interval)
+     ((stringp interval)
+      (ignore-errors (org-duration-to-minutes interval)))
+     (t 0))))
+
+(defun org-ilm--card-default-scheduler ()
+  (fsrs-make-scheduler
+   :desired-retention org-ilm-card-fsrs-desired-retention
+   :learning-steps org-ilm-card-fsrs-learning-steps
+   :relearning-steps org-ilm-card-fsrs-relearning-steps
+   :maximum-interval org-ilm-card-fsrs-maximum-interval
+   :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p))
+
+(defun org-ilm--card-rate (rating &optional org-id timestamp duration)
+  "Rate a card element with RATING.
+If ORG-ID ommitted, assume point at card headline."
+  (org-ilm--org-with-point-at org-id
+    (if-let* ((headline (org-ilm--org-headline-at-point))
+              (org-id (org-id-get))
+              (collection (car (org-ilm--collection-file)))
+              (priority (org-ilm-pqueue-priority org-id :collection collection))
+              (scheduled (org-element-property :scheduled headline)))
+        (progn
+          (cl-assert (eq (org-ilm-type headline) 'card))
+          (org-ilm--card-log (ts-parse-org-element scheduled)
+                             (car priority)
+                             (org-ilm--card-default-scheduler)
+                             rating timestamp duration))
+      ;; TODO error message sucks
+      (error "Cannot rate headline due to lacking info"))))
+
+
+;;;;; Logging
+
+;; TODO This can be optimized by truncating based on latest :review state
+(defun org-ilm--card-step-from-log (scheduler review-log)
+  "Calculate the current step based on a REVIEW-LOG.
+
+Returns the current step (integer) or nil if the card is in :review state.
+An empty log implies a new card, so step is 0."
+  ;; We could also run the simulation with fsrs-scheduler-review-card but that
+  ;; calculates also the model parameters which is unnecessary work. So just
+  ;; reimplement the step logic.
+  (let ((learn-steps (length (fsrs-scheduler-learning-steps scheduler)))
+        (relearn-steps (length (fsrs-scheduler-relearning-steps scheduler)))
+        (current-step 0))
+    (dolist (review review-log)
+      (let ((state (org-ilm-log-review-state review))
+            (rating (org-ilm-log-review-rating review)))
+        ;; Note, :hard rating does not increment step
+        (cond
+         ((eq state :review)
+          (setq current-step nil))
+         ((eq rating :again)
+          (setq current-step 0))
+         ((eq rating :good)
+          (if (= current-step (1- (pcase state
+                                    (:learning learn-steps)
+                                    (:relearning relearn-steps))))
+              (setq current-step nil)
+            (cl-incf current-step))))))
+    current-step))
+
+(defun org-ilm--card-log (scheduled priority-rank &optional scheduler rating timestamp duration)
+  "Log the creation or review of a fsrs card in the ilm drawer table."
+  (cl-assert (ts-p scheduled))
+  (setq timestamp (or timestamp (ts-now)))
+  (let* ((review-log (org-ilm--log-read))
+         (last-review (car (last review-log)))
+         ;; TODO Is this midnight shift calculation right????
+         (delay (org-ilm--ts-diff-rounded-days
+                 timestamp
+                 (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled)))
+         (scheduled (org-ilm--ts-format-utc scheduled))
+         (timestamp (org-ilm--ts-format-utc (or timestamp (ts-now))))
+         card)
+    (setq card
+          (if (not last-review)
+              (fsrs-make-card :due scheduled)
+            (cl-assert (and scheduler rating))
+            (car
+             (fsrs-scheduler-review-card
+              scheduler
+              (fsrs-make-card
+               :state (org-ilm-log-review-state last-review)
+               :step (org-ilm--card-step-from-log scheduler review-log)
+               :stability (org-ilm-log-review-stability last-review)
+               :difficulty (org-ilm-log-review-difficulty last-review)
+               :last-review (org-ilm-log-review-timestamp last-review)
+               ;; Due date should be "artificial" one (potentially manually
+               ;; edited), not the true date as scheduled in previous review, as
+               ;; the algorithm does the calculation based on expected next
+               ;; review. Having said that i cannot find this field being accessed
+               ;; in `fsrs-scheduler-review-card'.
+               :due scheduled)
+              rating timestamp duration))))
+
+    (org-ilm--log-insert
+     (make-org-ilm-log-review
+      :type 'card :timestamp timestamp :rating rating :delay delay
+      :priority (cons priority-rank (org-ilm-pqueue-count))
+      :due (fsrs-card-due card) :state (fsrs-card-state card)
+      :stability (fsrs-card-stability card)
+      :difficulty (fsrs-card-difficulty card)))))
+
+;;;;; Cloze
+
+(cl-defstruct org-ilm-cloze
+  "Cloze content and optional hint, with positions."
+  pos content content-pos hint hint-pos)
+
+;; Cloze syntax
+;; - No hint: {{c::content}}
+;; - Hint: {{c::content}{hint}}
+(define-peg-ruleset org-ilm-card-cloze
+  (text () (* (or (and (not ["{}"]) (any)) "\\{" "\\}" (nested (peg text)))))
+  (nested (content) (and "{" (funcall content) "}"))
+  (cloze () (nested (peg (and (nested (peg (and "c::" (region text))))
+                              (opt (nested (peg (region text)))))))
+         `(v1 v2 v3 v4 -- (when v1 (cons v1 v2)) (cons v3 v4))))
+
+(defun org-ilm--card-cloze-match-at-point ()
+  (with-peg-rules (org-ilm-card-cloze)
+    (when-let* ((cloze (peg-run (peg cloze))))
+      (setq cloze (if (cadr cloze) (nreverse cloze) cloze))
+      (let ((content-pos (car cloze))
+            (hint-pos (cadr cloze)))
+        (make-org-ilm-cloze
+         :content (buffer-substring-no-properties
+                   (car content-pos) (cdr content-pos))
+         :hint (when hint-pos (buffer-substring-no-properties
+                               (car hint-pos) (cdr hint-pos)))
+         :content-pos content-pos
+         :hint-pos hint-pos
+         :pos (cons (- (car content-pos) 5)
+                    (+ (cdr (or hint-pos content-pos)) 2)))))))
+
+(defun org-ilm--card-cloze-match-around-point ()
+  "Match cloze around point."
+  (save-excursion
+    (cond-let*
+      ([cloze (org-ilm--card-cloze-match-at-point)]
+       cloze)
+      ([pos (org-in-regexp "{{c::")]
+       (goto-char (car pos))
+       (org-ilm--card-cloze-match-at-point))
+      (t (when-let ((point (point))
+                    ((re-search-backward "{{c::" nil t))
+                    (cloze (org-ilm--card-cloze-match-at-point)))
+           (when (<= point (cdr (org-ilm-cloze-pos cloze)))
+             cloze))))))
+
+(defun org-ilm--card-cloze-p ()
+  "Return t if point on cloze."
+  (if (org-ilm--card-cloze-match-around-point) t nil))
+
+(defun org-ilm--card-cloze-match-forward (&optional end)
+  "Jump to and return the first matching cloze."
+  (let ((cloze (org-ilm--card-cloze-match-at-point)))
+    (while (and (not cloze)
+                (re-search-forward "{{c::" end t))
+      ;; Back to beginning
+      (goto-char (match-beginning 0))
+      ;; We might match regex but not cloze
+      (setq cloze (org-ilm--card-cloze-match-at-point)))
+    cloze))
+
+(defun org-ilm--card-cloze-gather (&optional begin end)
+  "Return all clozes found in buffer."
+  (let (cloze clozes)
+    (save-excursion
+      (goto-char (or begin (point-min)))
+      (while (setq cloze (org-ilm--card-cloze-match-forward end))
+        (push cloze clozes)))
+    (nreverse clozes)))
+
+(defun org-ilm-cloze-toggle ()
+  "Toggle cloze at point, without creating the card."
+  (interactive)
+  (if (org-ilm--card-cloze-p)
+      (org-ilm--card-uncloze)
+    (org-ilm--card-cloze-dwim)))
+
+(defun org-ilm--card-cloze-dwim (&optional hint)
+  "Cloze the region or word at point."
+  (let ((bounds (org-ilm--card-cloze-bounds)))
+    (if (not bounds)
+        (error "No active region or word at point")
+      (org-ilm--card-cloze-region (car bounds) (cdr bounds) hint)
+      bounds)))
+
+(defun org-ilm--card-cloze-bounds ()
+  "Return (beg . end) of what will be clozed."
+  (let (begin end)
+    (if (region-active-p)
+        (setq begin (region-beginning)
+              end (region-end))
+      (if-let ((bounds (bounds-of-thing-at-point 'word)))
+          (setq begin (car bounds)
+                end (cdr bounds))))
+    (cons begin end)))
+
+(defun org-ilm--card-cloze-region (begin end &optional hint)
+  "Coze the region between BEGIN and END."
+  (save-excursion
+    (goto-char end)
+    (insert "}")
+    (when hint
+      (insert "{" hint "}"))
+    (insert "}")
+    (goto-char begin)
+    (insert "{{c::")))
+
+(defun org-ilm--card-uncloze ()
+  "Remove cloze at point."
+  (when-let ((cloze (org-ilm--card-cloze-match-around-point)))
+    (delete-region (car (org-ilm-cloze-pos cloze))
+                   (cdr (org-ilm-cloze-pos cloze)))
+    (insert (string-trim (org-ilm-cloze-content cloze)))))
+
+(defun org-ilm--card-uncloze-buffer (&optional begin end)
+  "Remove clozes in buffer."
+  (save-excursion
+    (goto-char (or begin (point-min)))
+    (let (cloze)
+      (while (setq cloze (org-ilm--card-cloze-match-forward end))
+        (org-ilm--card-uncloze)))))
+
+;;;;; Review interaction
+
+;; TODO Extensible system where cloze types can be added based on thing at point
+;; like in org-registry. Instead cond in function like now.
+
+(defface org-ilm-cloze-face
+  '((t (:foreground "black"
+        :background "pink" 
+        :weight bold
+        :height 1.2)))
+  "Face for clozes.")
+
+(defun org-ilm--card-cloze-format-latex (latex)
+  "Translate emacs face to latex code and apply to LATEX."
+  (when (face-bold-p 'org-ilm-cloze-face)
+    (setq latex (format "\\textbf{%s}" latex)))
+  (when-let ((bg (face-background 'org-ilm-cloze-face)))
+    (setq latex (format "\\fcolorbox{%s}{%s}{%s}" bg bg latex)))
+  (when-let ((height (face-attribute 'org-ilm-cloze-face :height))
+             (size (cond
+                    ((< height 0.8)  "\\tiny")
+                    ((< height 0.9)  "\\scriptsize")
+                    ((< height 1.0)  "\\footnotesize")
+                    ((< height 1.2)  "\\small")
+                    ((< height 1.5)  "\\normalsize")
+                    ((< height 1.8)  "\\large")
+                    ((< height 2.0)  "\\Large")
+                    ((< height 2.5)  "\\LARGE")
+                    ((< height 3.0)  "\\huge"))))
+    (setq latex (format "{%s %s}" size latex)))
+  latex)
+
+(defun org-ilm--card-cloze-build-latex (begin end latex &optional hint reveal-p)
+  "Place the latex fragment modified by the cloze within it."
+  (with-temp-buffer
+    (insert latex)
+    (goto-char (point-min))
+    (while-let ((cloze (org-ilm--card-cloze-match-forward)))
+      (delete-region (car (org-ilm-cloze-pos cloze))
+                     (cdr (org-ilm-cloze-pos cloze)))
+      (insert (org-ilm--card-cloze-format-latex
+               (if reveal-p
+                   (concat "$" (org-ilm-cloze-content cloze) "$")
+                 (concat "[\\dots]" (when hint (concat "(" hint ")")))))))
+    (setq latex (buffer-string)))
+  
+  (org-latex-preview-clear-overlays begin end)
+  (org-latex-preview-place
+   org-latex-preview-process-default
+   (list (list begin end latex))))
+
+(defun org-ilm--card-hide-clozes (&optional begin end)
+  "Hide the clozes in the buffer by applying overlays."
+  (org-ilm--card-remove-overlays)
+  (save-excursion
+    (goto-char (or begin (point-min)))
+    (while-let ((cloze (org-ilm--card-cloze-match-forward end)))
+      (let ((begin (car (org-ilm-cloze-pos cloze)))
+            (end (cdr (org-ilm-cloze-pos cloze)))
+            (content (org-ilm-cloze-content cloze))
+            (hint (org-ilm-cloze-hint cloze)))
+        (goto-char begin)
+        (let* ((element (org-element-context))
+               (ov (make-overlay begin end nil)))
+          (overlay-put ov 'org-ilm-cloze cloze)
+          (overlay-put ov 'org-ilm-cloze-state 'hidden)
+          (overlay-put ov 'evaporate t)
+          ;; (overlay-put ov 'modification-hooks '(org-ilm--ov-delete))
+          ;; (overlay-put ov 'insert-in-front-hooks '(org-ilm--ov-delete))
+          ;; (overlay-put ov 'insert-behind-hooks '(org-ilm--ov-delete))
+
+          (cond
+           ;; Latex
+           ;; TODO Add modification and insert hooks to entire latex fragment
+           ;; that will rebuild the fragment as the cloze is being modified.
+           ((member (org-element-type element) '(latex-fragment latex-environment))
+            (let ((latex-begin (org-element-begin element))
+                  (latex-end (org-element-end element))
+                  (latex-text (org-element-property :value element)))
+
+              (org-ilm--card-cloze-build-latex latex-begin latex-end latex-text hint)
+
+              (mochar-utils--add-hook-once
+               'org-ilm-review-reveal-hook
+               (lambda ()
+                 (org-ilm--card-cloze-build-latex
+                  latex-begin latex-end latex-text hint t))
+               nil 'local)
+
+              ;; We are already building all clozes in the latex fragment, so
+              ;; skip entire fragment.
+              (goto-char latex-end)))
+           (t 
+            (overlay-put ov 'face 'org-ilm-cloze-face)
+            (overlay-put ov 'display (concat "[...]" (when hint (concat "(" hint ")"))))
+            (mochar-utils--add-hook-once
+             'org-ilm-review-reveal-hook
+             (lambda ()
+               (overlay-put ov 'display nil))
+             nil 'local)
+            (goto-char end))))
+        ))))
+
+(defun org-ilm--card-reveal-clozes ()
+  )
+
+(defun org-ilm--card-remove-overlays (&optional begin end)
+  (dolist (val '(hidden revealed))
+    (remove-overlays (or begin (point-min)) (or end (point-max))
+                     'org-ilm-cloze-state val))
+  (org-latex-preview-clear-overlays)
+  (call-interactively #'org-latex-preview))
+
+
 ;;;; Capture
 
 ;; Logic related to creating child elements, i.e. extracts and cards.
@@ -5570,399 +5971,6 @@ due or not."
          (org-read-date 'with-time nil nil "Schedule: ")))
   (unless element (user-error "No ilm element at point"))
   (org-ilm--schedule :timestamp timestamp))
-
-;;;; Cards
-
-(defcustom org-ilm-card-fsrs-desired-retention .9
-  "Target probability of successful recall (0.0-1.0).
-
-FSRS default: 0.9"
-  :type 'number
-  :group 'org-ilm-card)
-
-(defcustom org-ilm-card-fsrs-learning-steps '((1 :minute) (10 :minute))
-  "List of time intervals for initial learning phase.
-
-FSRS default: '((1 :minute) (10 :minute))"
-  :type 'list
-  :group 'org-ilm-card)
-
-(defcustom org-ilm-card-fsrs-relearning-steps '((10 :minute))
-  "List of time intervals for relearning phase.
-
-FSRS default: '((10 :minute))"
-  :type 'list
-  :group 'org-ilm-card)
-
-(defcustom org-ilm-card-fsrs-maximum-interval '(36500 :day)
-  "Upper bound for scheduling intervals.
-
-FSRS default: '(36500 :day)"
-  :group 'org-ilm-card)
-
-(defcustom org-ilm-card-fsrs-fuzzing-p t
-  "Randomize intervals within bounds.
-
-FSRS default: t"
-  :type 'boolean
-  :group 'org-ilm-card)
-
-(defcustom org-ilm-card-first-interval 'priority
-  "The first interval for cards."
-  :type '(choice (const :tag "Immediate" nil)
-                 (const :tag "Priority based interval" priority)
-                 (string :tag "Custom interval as %H:%S format")
-                 (number :tag "Custom interval in minutes"))
-  :group 'org-ilm-card)
-
-;;;;; Logic
-
-(defun org-ilm-card-first-interval ()
-  (let ((interval org-ilm-card-first-interval))
-    (cond
-     ((eq interval 'priority)
-      interval)
-     ((and (numberp interval) (>= interval 0))
-      interval)
-     ((stringp interval)
-      (ignore-errors (org-duration-to-minutes interval)))
-     (t 0))))
-
-(defun org-ilm--card-default-scheduler ()
-  (fsrs-make-scheduler
-   :desired-retention org-ilm-card-fsrs-desired-retention
-   :learning-steps org-ilm-card-fsrs-learning-steps
-   :relearning-steps org-ilm-card-fsrs-relearning-steps
-   :maximum-interval org-ilm-card-fsrs-maximum-interval
-   :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p))
-
-(defun org-ilm--card-rate (rating &optional org-id timestamp duration)
-  "Rate a card element with RATING.
-If ORG-ID ommitted, assume point at card headline."
-  (org-ilm--org-with-point-at org-id
-    (if-let* ((headline (org-ilm--org-headline-at-point))
-              (org-id (org-id-get))
-              (collection (car (org-ilm--collection-file)))
-              (priority (org-ilm-pqueue-priority org-id :collection collection))
-              (scheduled (org-element-property :scheduled headline)))
-        (progn
-          (cl-assert (eq (org-ilm-type headline) 'card))
-          (org-ilm--card-log (ts-parse-org-element scheduled)
-                             (car priority)
-                             (org-ilm--card-default-scheduler)
-                             rating timestamp duration))
-      ;; TODO error message sucks
-      (error "Cannot rate headline due to lacking info"))))
-
-
-;;;;; Logging
-
-;; TODO This can be optimized by truncating based on latest :review state
-(defun org-ilm--card-step-from-log (scheduler review-log)
-  "Calculate the current step based on a REVIEW-LOG.
-
-Returns the current step (integer) or nil if the card is in :review state.
-An empty log implies a new card, so step is 0."
-  ;; We could also run the simulation with fsrs-scheduler-review-card but that
-  ;; calculates also the model parameters which is unnecessary work. So just
-  ;; reimplement the step logic.
-  (let ((learn-steps (length (fsrs-scheduler-learning-steps scheduler)))
-        (relearn-steps (length (fsrs-scheduler-relearning-steps scheduler)))
-        (current-step 0))
-    (dolist (review review-log)
-      (let ((state (org-ilm-log-review-state review))
-            (rating (org-ilm-log-review-rating review)))
-        ;; Note, :hard rating does not increment step
-        (cond
-         ((eq state :review)
-          (setq current-step nil))
-         ((eq rating :again)
-          (setq current-step 0))
-         ((eq rating :good)
-          (if (= current-step (1- (pcase state
-                                    (:learning learn-steps)
-                                    (:relearning relearn-steps))))
-              (setq current-step nil)
-            (cl-incf current-step))))))
-    current-step))
-
-(defun org-ilm--card-log (scheduled priority-rank &optional scheduler rating timestamp duration)
-  "Log the creation or review of a fsrs card in the ilm drawer table."
-  (cl-assert (ts-p scheduled))
-  (setq timestamp (or timestamp (ts-now)))
-  (let* ((review-log (org-ilm--log-read))
-         (last-review (car (last review-log)))
-         ;; TODO Is this midnight shift calculation right????
-         (delay (org-ilm--ts-diff-rounded-days
-                 timestamp
-                 (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled)))
-         (scheduled (org-ilm--ts-format-utc scheduled))
-         (timestamp (org-ilm--ts-format-utc (or timestamp (ts-now))))
-         card)
-    (setq card
-          (if (not last-review)
-              (fsrs-make-card :due scheduled)
-            (cl-assert (and scheduler rating))
-            (car
-             (fsrs-scheduler-review-card
-              scheduler
-              (fsrs-make-card
-               :state (org-ilm-log-review-state last-review)
-               :step (org-ilm--card-step-from-log scheduler review-log)
-               :stability (org-ilm-log-review-stability last-review)
-               :difficulty (org-ilm-log-review-difficulty last-review)
-               :last-review (org-ilm-log-review-timestamp last-review)
-               ;; Due date should be "artificial" one (potentially manually
-               ;; edited), not the true date as scheduled in previous review, as
-               ;; the algorithm does the calculation based on expected next
-               ;; review. Having said that i cannot find this field being accessed
-               ;; in `fsrs-scheduler-review-card'.
-               :due scheduled)
-              rating timestamp duration))))
-
-    (org-ilm--log-insert
-     (make-org-ilm-log-review
-      :type 'card :timestamp timestamp :rating rating :delay delay
-      :priority (cons priority-rank (org-ilm-pqueue-count))
-      :due (fsrs-card-due card) :state (fsrs-card-state card)
-      :stability (fsrs-card-stability card)
-      :difficulty (fsrs-card-difficulty card)))))
-
-;;;;; Cloze
-
-(cl-defstruct org-ilm-cloze
-  "Cloze content and optional hint, with positions."
-  pos content content-pos hint hint-pos)
-
-;; Cloze syntax
-;; - No hint: {{c::content}}
-;; - Hint: {{c::content}{hint}}
-(define-peg-ruleset org-ilm-card-cloze
-  (text () (* (or (and (not ["{}"]) (any)) "\\{" "\\}" (nested (peg text)))))
-  (nested (content) (and "{" (funcall content) "}"))
-  (cloze () (nested (peg (and (nested (peg (and "c::" (region text))))
-                              (opt (nested (peg (region text)))))))
-         `(v1 v2 v3 v4 -- (when v1 (cons v1 v2)) (cons v3 v4))))
-
-(defun org-ilm--card-cloze-match-at-point ()
-  (with-peg-rules (org-ilm-card-cloze)
-    (when-let* ((cloze (peg-run (peg cloze))))
-      (setq cloze (if (cadr cloze) (nreverse cloze) cloze))
-      (let ((content-pos (car cloze))
-            (hint-pos (cadr cloze)))
-        (make-org-ilm-cloze
-         :content (buffer-substring-no-properties
-                   (car content-pos) (cdr content-pos))
-         :hint (when hint-pos (buffer-substring-no-properties
-                               (car hint-pos) (cdr hint-pos)))
-         :content-pos content-pos
-         :hint-pos hint-pos
-         :pos (cons (- (car content-pos) 5)
-                    (+ (cdr (or hint-pos content-pos)) 2)))))))
-
-(defun org-ilm--card-cloze-match-around-point ()
-  "Match cloze around point."
-  (save-excursion
-    (cond-let*
-      ([cloze (org-ilm--card-cloze-match-at-point)]
-       cloze)
-      ([pos (org-in-regexp "{{c::")]
-       (goto-char (car pos))
-       (org-ilm--card-cloze-match-at-point))
-      (t (when-let ((point (point))
-                    ((re-search-backward "{{c::" nil t))
-                    (cloze (org-ilm--card-cloze-match-at-point)))
-           (when (<= point (cdr (org-ilm-cloze-pos cloze)))
-             cloze))))))
-
-(defun org-ilm--card-cloze-p ()
-  "Return t if point on cloze."
-  (if (org-ilm--card-cloze-match-around-point) t nil))
-
-(defun org-ilm--card-cloze-match-forward (&optional end)
-  "Jump to and return the first matching cloze."
-  (let ((cloze (org-ilm--card-cloze-match-at-point)))
-    (while (and (not cloze)
-                (re-search-forward "{{c::" end t))
-      ;; Back to beginning
-      (goto-char (match-beginning 0))
-      ;; We might match regex but not cloze
-      (setq cloze (org-ilm--card-cloze-match-at-point)))
-    cloze))
-
-(defun org-ilm--card-cloze-gather (&optional begin end)
-  "Return all clozes found in buffer."
-  (let (cloze clozes)
-    (save-excursion
-      (goto-char (or begin (point-min)))
-      (while (setq cloze (org-ilm--card-cloze-match-forward end))
-        (push cloze clozes)))
-    (nreverse clozes)))
-
-(defun org-ilm-cloze-toggle ()
-  "Toggle cloze at point, without creating the card."
-  (interactive)
-  (if (org-ilm--card-cloze-p)
-      (org-ilm--card-uncloze)
-    (org-ilm--card-cloze-dwim)))
-
-(defun org-ilm--card-cloze-dwim (&optional hint)
-  "Cloze the region or word at point."
-  (let ((bounds (org-ilm--card-cloze-bounds)))
-    (if (not bounds)
-        (error "No active region or word at point")
-      (org-ilm--card-cloze-region (car bounds) (cdr bounds) hint)
-      bounds)))
-
-(defun org-ilm--card-cloze-bounds ()
-  "Return (beg . end) of what will be clozed."
-  (let (begin end)
-    (if (region-active-p)
-        (setq begin (region-beginning)
-              end (region-end))
-      (if-let ((bounds (bounds-of-thing-at-point 'word)))
-          (setq begin (car bounds)
-                end (cdr bounds))))
-    (cons begin end)))
-
-(defun org-ilm--card-cloze-region (begin end &optional hint)
-  "Coze the region between BEGIN and END."
-  (save-excursion
-    (goto-char end)
-    (insert "}")
-    (when hint
-      (insert "{" hint "}"))
-    (insert "}")
-    (goto-char begin)
-    (insert "{{c::")))
-
-(defun org-ilm--card-uncloze ()
-  "Remove cloze at point."
-  (when-let ((cloze (org-ilm--card-cloze-match-around-point)))
-    (delete-region (car (org-ilm-cloze-pos cloze))
-                   (cdr (org-ilm-cloze-pos cloze)))
-    (insert (string-trim (org-ilm-cloze-content cloze)))))
-
-(defun org-ilm--card-uncloze-buffer (&optional begin end)
-  "Remove clozes in buffer."
-  (save-excursion
-    (goto-char (or begin (point-min)))
-    (let (cloze)
-      (while (setq cloze (org-ilm--card-cloze-match-forward end))
-        (org-ilm--card-uncloze)))))
-
-;;;;; Review interaction
-
-;; TODO Extensible system where cloze types can be added based on thing at point
-;; like in org-registry. Instead cond in function like now.
-
-(defface org-ilm-cloze-face
-  '((t (:foreground "black"
-        :background "pink" 
-        :weight bold
-        :height 1.2)))
-  "Face for clozes.")
-
-(defun org-ilm--card-cloze-format-latex (latex)
-  "Translate emacs face to latex code and apply to LATEX."
-  (when (face-bold-p 'org-ilm-cloze-face)
-    (setq latex (format "\\textbf{%s}" latex)))
-  (when-let ((bg (face-background 'org-ilm-cloze-face)))
-    (setq latex (format "\\fcolorbox{%s}{%s}{%s}" bg bg latex)))
-  (when-let ((height (face-attribute 'org-ilm-cloze-face :height))
-             (size (cond
-                    ((< height 0.8)  "\\tiny")
-                    ((< height 0.9)  "\\scriptsize")
-                    ((< height 1.0)  "\\footnotesize")
-                    ((< height 1.2)  "\\small")
-                    ((< height 1.5)  "\\normalsize")
-                    ((< height 1.8)  "\\large")
-                    ((< height 2.0)  "\\Large")
-                    ((< height 2.5)  "\\LARGE")
-                    ((< height 3.0)  "\\huge"))))
-    (setq latex (format "{%s %s}" size latex)))
-  latex)
-
-(defun org-ilm--card-cloze-build-latex (begin end latex &optional hint reveal-p)
-  "Place the latex fragment modified by the cloze within it."
-  (with-temp-buffer
-    (insert latex)
-    (goto-char (point-min))
-    (while-let ((cloze (org-ilm--card-cloze-match-forward)))
-      (delete-region (car (org-ilm-cloze-pos cloze))
-                     (cdr (org-ilm-cloze-pos cloze)))
-      (insert (org-ilm--card-cloze-format-latex
-               (if reveal-p
-                   (concat "$" (org-ilm-cloze-content cloze) "$")
-                 (concat "[\\dots]" (when hint (concat "(" hint ")")))))))
-    (setq latex (buffer-string)))
-  
-  (org-latex-preview-clear-overlays begin end)
-  (org-latex-preview-place
-   org-latex-preview-process-default
-   (list (list begin end latex))))
-
-(defun org-ilm--card-hide-clozes (&optional begin end)
-  "Hide the clozes in the buffer by applying overlays."
-  (org-ilm--card-remove-overlays)
-  (save-excursion
-    (goto-char (or begin (point-min)))
-    (while-let ((cloze (org-ilm--card-cloze-match-forward end)))
-      (let ((begin (car (org-ilm-cloze-pos cloze)))
-            (end (cdr (org-ilm-cloze-pos cloze)))
-            (content (org-ilm-cloze-content cloze))
-            (hint (org-ilm-cloze-hint cloze)))
-        (goto-char begin)
-        (let* ((element (org-element-context))
-               (ov (make-overlay begin end nil)))
-          (overlay-put ov 'org-ilm-cloze cloze)
-          (overlay-put ov 'org-ilm-cloze-state 'hidden)
-          (overlay-put ov 'evaporate t)
-          ;; (overlay-put ov 'modification-hooks '(org-ilm--ov-delete))
-          ;; (overlay-put ov 'insert-in-front-hooks '(org-ilm--ov-delete))
-          ;; (overlay-put ov 'insert-behind-hooks '(org-ilm--ov-delete))
-
-          (cond
-           ;; Latex
-           ;; TODO Add modification and insert hooks to entire latex fragment
-           ;; that will rebuild the fragment as the cloze is being modified.
-           ((member (org-element-type element) '(latex-fragment latex-environment))
-            (let ((latex-begin (org-element-begin element))
-                  (latex-end (org-element-end element))
-                  (latex-text (org-element-property :value element)))
-
-              (org-ilm--card-cloze-build-latex latex-begin latex-end latex-text hint)
-
-              (mochar-utils--add-hook-once
-               'org-ilm-review-reveal-hook
-               (lambda ()
-                 (org-ilm--card-cloze-build-latex
-                  latex-begin latex-end latex-text hint t))
-               nil 'local)
-
-              ;; We are already building all clozes in the latex fragment, so
-              ;; skip entire fragment.
-              (goto-char latex-end)))
-           (t 
-            (overlay-put ov 'face 'org-ilm-cloze-face)
-            (overlay-put ov 'display (concat "[...]" (when hint (concat "(" hint ")"))))
-            (mochar-utils--add-hook-once
-             'org-ilm-review-reveal-hook
-             (lambda ()
-               (overlay-put ov 'display nil))
-             nil 'local)
-            (goto-char end))))
-        ))))
-
-(defun org-ilm--card-reveal-clozes ()
-  )
-
-(defun org-ilm--card-remove-overlays (&optional begin end)
-  (dolist (val '(hidden revealed))
-    (remove-overlays (or begin (point-min)) (or end (point-max))
-                     'org-ilm-cloze-state val))
-  (org-latex-preview-clear-overlays)
-  (call-interactively #'org-latex-preview))
 
 
 ;;;; SRS (org-srs)
