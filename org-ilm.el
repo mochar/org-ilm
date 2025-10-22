@@ -796,8 +796,13 @@ If `HEADLINE' is passed, read it as org-property."
     (let ((type (type-of obj)))
       (cl-struct-slot-value type 'ost obj)))))
 
-(defun org-ilm--ost-count (obj)
-  (ost-size (org-ilm--ost-ost obj)))
+(defun org-ilm--ost-count (obj &optional offset)
+  "Return the number of elements in ost of OBJ.
+Optional OFFSET is added to the true count."
+  (setq offset (or offset 0))
+  (let ((size (+ (ost-size (org-ilm--ost-ost obj)) offset)))
+    (cl-assert (>= size 0) nil "OFFSET may not lead to negative size.")
+    size))
 
 (defun org-ilm--ost-move (obj id new-rank)
   (ost-tree-move (org-ilm--ost-ost obj) id new-rank))
@@ -805,34 +810,47 @@ If `HEADLINE' is passed, read it as org-property."
 (defun org-ilm--ost-move-many (obj new-ranks-alist)
   (ost-tree-move-many (org-ilm--ost-ost obj) new-ranks-alist))
 
-(defun org-ilm--ost-rank-to-quantile (obj rank)
-  (let ((size (org-ilm--ost-count obj)))
-    (if (= 1 size) 0 (/ (float rank) (1- size)))))
-
-(defun org-ilm--ost-quantile-to-rank (obj quantile)
-  (cl-assert (<= 0 quantile 1))
-  (let ((size (org-ilm--ost-count obj)))
-    (round (* quantile (1- size)))))
-
 (defun org-ilm--ost-contains-p (obj id)
   (when (ost-tree-node-by-id (org-ilm--ost-ost obj) id)
     id))
 
-(defun org-ilm--ost-parse-position (obj position &optional sizebuf)
-  "Return (RANK . QUANTILE) given rank or quantile POSITION."
-  (setq sizebuf (or sizebuf 0))
-  (let ((ost-size (org-ilm--ost-count obj)))
+(defun org-ilm--ost-rank-to-quantile (obj rank &optional offset)
+  "Return the quantile of RANK in ost of OBJ.
+Optional OFFSET is added to the ost size for calculation."
+  (let ((size (org-ilm--ost-count obj offset)))
+    (if (= 1 size) 0 (/ (float rank) (1- size)))))
+
+(defun org-ilm--ost-quantile-to-rank (obj quantile &optional offset)
+  "Return the rank of QUANTILE in ost of OBJ.
+Optional OFFSET is added to the ost size for calculation."
+  (cl-assert (<= 0 quantile 1) nil "QUANTILE must be between 0 and 1")
+  (let ((size (org-ilm--ost-count obj offset)))
+    (round (* quantile (1- size)))))
+
+(defun org-ilm--ost-parse-position (obj position &optional offset)
+  "Return (RANK . QUANTILE) given rank or quantile POSITION.
+
+OFFSET artificially increases the size of the queue to correct the
+calculations, assuming POSITION was already corrected for this
+offset. For example, when POSITION represents the position of a new
+element at the end of a queue of size N: OFFSET should be 1, POSITION
+should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
+  (let ((ost-size (org-ilm--ost-count obj offset)))
     (cond
      ;; Already correct
      ((and (listp position) (numberp (car position)) (floatp (cdr position)))
+      ;; Make sure the rank fits the quantile
+      ;; TODO This calculation might fail due to rounding errors????
+      (cl-assert (= (car position)
+                    (org-ilm--ost-quantile-to-rank obj (cdr position) offset)))
       position)
      ;; Inputted quantile
      ((and (floatp position) (<= 0.0 position 1.0))
-      (let ((rank (+ (org-ilm--ost-quantile-to-rank obj position) sizebuf)))
+      (let ((rank (org-ilm--ost-quantile-to-rank obj position offset)))
         (cons rank position)))
      ;; Inputted rank
-     ((and (numberp position) (<= 0 position (+ (1- ost-size) sizebuf)))
-      (let ((quantile (org-ilm--ost-rank-to-quantile obj position)))
+     ((and (numberp position) (<= 0 position (1- ost-size)))
+      (let ((quantile (org-ilm--ost-rank-to-quantile obj position offset)))
         (cons position quantile))))))
 
 (defun org-ilm--ost-read-position (obj &optional numnew-or-id)
@@ -1079,10 +1097,10 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (setq collection (or collection (org-ilm--active-collection)))
   (org-ilm--pqueue collection))
 
-(defun org-ilm-pqueue-parse-position (position &optional sizebuf collection)
+(defun org-ilm-pqueue-parse-position (position &optional offset collection)
   (org-ilm--ost-parse-position
    (org-ilm-pqueue collection)
-   position sizebuf))
+   position offset))
 
 (defun org-ilm-pqueue-parse-new-position (position &optional collection)
   (org-ilm-pqueue-parse-position position 1 collection))
@@ -1187,7 +1205,9 @@ With RANK or QUANTILE, set the new position in the queue, or insert there if not
 ;;   field to calculate how much it was postponed.
 
 (defconst org-ilm-log-element-fields '(timestamp delay priority due state))
-(defconst org-ilm-log-material-fields org-ilm-log-element-fields)
+(defconst org-ilm-log-material-fields (append
+                                       org-ilm-log-element-fields
+                                       '(duration)))
 (defconst org-ilm-log-card-fields (append
                                    org-ilm-log-element-fields
                                    '(rating stability difficulty)))
@@ -1202,9 +1222,10 @@ Difficulty is between 1 and 10. Want a bit more precision here."
 
 (cl-defstruct org-ilm-log-review
   "A review entry in an ilm element log drawer table."
-  type timestamp delay priority due state rating stability difficulty)
+  type timestamp delay priority due duration state rating stability difficulty)
 
 (defun org-ilm-log-review-format-field (field)
+  "Format FIELD column for use in the log."
   (pcase field
     ('stability "S")
     ('difficulty "D")
@@ -1212,6 +1233,7 @@ Difficulty is between 1 and 10. Want a bit more precision here."
     (_ (format "%s" field))))
 
 (defun org-ilm-log-review-format-value (review field)
+  "Format the value of FIELD in `org-ilm-log-review' object REVIEW for use in the log."
   (let* ((getter (intern (concat "org-ilm-log-review-" (symbol-name field))))
          (value (funcall getter review)))
     (cond
@@ -1220,6 +1242,8 @@ Difficulty is between 1 and 10. Want a bit more precision here."
       (if (= 0 value) "" (format "%s" value)))
      ((eq field 'rating)
       (format "%s" value))
+     ((eq field 'duration)
+      (org-duration-from-minutes value 'h:mm:ss))
      ((eq field 'state)
       (format "%s" (pcase value
                      (:learning :learn)
@@ -1234,6 +1258,8 @@ Difficulty is between 1 and 10. Want a bit more precision here."
      (t value))))
 
 (defun org-ilm-log-review-from-alist (alist &optional type)
+  "Make an `org-ilm-log-review' object from an ALIST.
+If element TYPE is omitted, infer from headline at point."
   (unless type (setq type (org-ilm-type)))
   (cl-assert (member type '(material card)))
   ;; Empty values are parsed as "" so turn them to nil
@@ -1245,6 +1271,7 @@ Difficulty is between 1 and 10. Want a bit more precision here."
         (priority (or (alist-get 'priority alist)
                       (alist-get 'prior alist)))
         (due (alist-get 'due alist))
+        (duration (alist-get 'duration alist))
         (state (alist-get 'state alist))
         (rating (alist-get 'rating alist))
         (stability (or (alist-get 'stability alist)
@@ -1282,19 +1309,23 @@ Difficulty is between 1 and 10. Want a bit more precision here."
          (cl-assert (floatp difficulty))))
       ('material
        (cl-assert (or (not state) (member state '(:done))))
-       (cl-assert (null rating))))
+       (cl-assert (null rating))
+       (when duration
+         (setq duration (org-duration-to-minutes duration)))))
     
     (make-org-ilm-log-review
      :type type :timestamp timestamp :delay delay :priority priority
-     :due due :state state :rating rating :stability stability
-     :difficulty difficulty)))
+     :due due :duration duration :state state :rating rating
+     :stability stability :difficulty difficulty)))
 
 (defun org-ilm-log-review-ensure (data)
+  "Make an `org-ilm-log-review' object from alist DATA, or return if already is one."
   (if (org-ilm-log-review-p data)
       data
     (org-ilm-log-review-from-alist data)))
 
 (defun org-ilm--log-data-ensure (data)
+  "Make `org-ilm-log-review' object list from alist or list of alists DATA."
   ;; If alist of one row, put it in a list
   (when (or (org-ilm-log-review-p data) (not (listp (car (car data)))))
     (setq data (list data)))
@@ -1407,6 +1438,43 @@ With optional INIT-DATA, create a new table with this data. See
                          (number-sequence 0 (1- (length columns)))) )
                       (cl-subseq table 2))))
           (org-ilm--log-data-ensure data))))))
+
+(defun org-ilm--log-log (type priority due scheduled &rest review-data)
+  "Log a new review for element with TYPE.
+
+SCHEDULED is the timestamp when the element was scheduled for
+review. For new elements, this should be nil.
+
+DUE is the new scheduled review timestamp."
+  (cl-assert (member type '(material card)))
+  (cl-etypecase due
+    (string)
+    (ts (setq due (org-ilm--ts-format-utc-date due))))
+  (let* ((timestamp (or (plist-get review-data :timestamp) (ts-now)))
+         (priority (org-ilm-pqueue-parse-new-position priority))
+         (rank (car priority))
+         ;; Transform rank in car to size using quantile in cdr
+         (size (round (/ rank (float (cdr priority)))))
+         (review-log (org-ilm--log-read)))
+
+    (cl-assert (ts-p timestamp))
+    (setf (plist-get review-data :type) type
+          (plist-get review-data :priority) (cons rank size)
+          (plist-get review-data :due) due
+          (plist-get review-data :timestamp) (org-ilm--ts-format-utc timestamp))
+
+    (if (null scheduled)
+        ;; Make sure that if SCHEDULED is nil this is a new element
+        (cl-assert (null review-log))
+      (cl-assert review-log)
+      ;; TODO Is this midnight shift calculation right????
+      (setf (plist-get review-data :delay)
+            (org-ilm--ts-diff-rounded-days
+             timestamp
+             (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled))))
+    
+    (org-ilm--log-insert
+     (apply #'make-org-ilm-log-review review-data))))
 
 
 ;;;; Types
@@ -1821,7 +1889,14 @@ ELEMENT may be nil, in which case try to read it from point."
 
 ;; Source material to be consumed incrementally. Includes extracts.
 
+(defun org-ilm--material-log-new (priority due &optional timestamp)
+  "Log the creation of a new material element in the ilm drawer."
+  (org-ilm--log-log 'material priority due nil :timestamp timestamp))
 
+(defun org-ilm--material-log-review (priority due scheduled &optional timestamp duration)
+  "Log the review of a material element in the ilm drawer."
+  (org-ilm--log-log 'material priority due scheduled
+                    :duration duration :timestamp timestamp))
 
 
 ;;;; Cards
@@ -1900,10 +1975,10 @@ If ORG-ID ommitted, assume point at card headline."
               (scheduled (org-element-property :scheduled headline)))
         (progn
           (cl-assert (eq (org-ilm-type headline) 'card))
-          (org-ilm--card-log (ts-parse-org-element scheduled)
-                             (car priority)
-                             (org-ilm--card-default-scheduler)
-                             rating timestamp duration))
+          (org-ilm--card-log-review
+           priority (ts-parse-org-element scheduled) rating
+           (org-ilm--card-default-scheduler)
+           timestamp duration))
       ;; TODO error message sucks
       (error "Cannot rate headline due to lacking info"))))
 
@@ -1939,47 +2014,49 @@ An empty log implies a new card, so step is 0."
             (cl-incf current-step))))))
     current-step))
 
-(defun org-ilm--card-log (scheduled priority-rank &optional scheduler rating timestamp duration)
-  "Log the creation or review of a fsrs card in the ilm drawer table."
+(defun org-ilm--card-log-new (priority due &optional timestamp)
+  "Log the creation of a new card element in the ilm drawer."
+  (org-ilm--log-log
+   'card priority due nil 
+   :timestamp timestamp
+   ;; Default state of a new fsrs card
+   :state :learning))
+
+(defun org-ilm--card-log-review (priority scheduled rating scheduler &optional timestamp duration)
+  "Log the review of a fsrs card in the ilm drawer table."
   (cl-assert (ts-p scheduled))
   (setq timestamp (or timestamp (ts-now)))
   (let* ((review-log (org-ilm--log-read))
          (last-review (car (last review-log)))
-         ;; TODO Is this midnight shift calculation right????
-         (delay (org-ilm--ts-diff-rounded-days
-                 timestamp
-                 (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled)))
-         (scheduled (org-ilm--ts-format-utc scheduled))
-         (timestamp (org-ilm--ts-format-utc (or timestamp (ts-now))))
          card)
+    (cl-assert last-review)
+    
     (setq card
-          (if (not last-review)
-              (fsrs-make-card :due scheduled)
-            (cl-assert (and scheduler rating))
-            (car
-             (fsrs-scheduler-review-card
-              scheduler
-              (fsrs-make-card
-               :state (org-ilm-log-review-state last-review)
-               :step (org-ilm--card-step-from-log scheduler review-log)
-               :stability (org-ilm-log-review-stability last-review)
-               :difficulty (org-ilm-log-review-difficulty last-review)
-               :last-review (org-ilm-log-review-timestamp last-review)
-               ;; Due date should be "artificial" one (potentially manually
-               ;; edited), not the true date as scheduled in previous review, as
-               ;; the algorithm does the calculation based on expected next
-               ;; review. Having said that i cannot find this field being accessed
-               ;; in `fsrs-scheduler-review-card'.
-               :due scheduled)
-              rating timestamp duration))))
+          (car
+           (fsrs-scheduler-review-card
+            scheduler
+            (fsrs-make-card
+             :state (org-ilm-log-review-state last-review)
+             :step (org-ilm--card-step-from-log scheduler review-log)
+             :stability (org-ilm-log-review-stability last-review)
+             :difficulty (org-ilm-log-review-difficulty last-review)
+             :last-review (org-ilm-log-review-timestamp last-review)
+             ;; Due date should be "artificial" one (potentially manually
+             ;; edited), not the true date as scheduled in previous review, as
+             ;; the algorithm does the calculation based on expected next
+             ;; review. Having said that i cannot find this field being accessed
+             ;; in `fsrs-scheduler-review-card'.
+             :due (org-ilm--ts-format-utc scheduled))
+            rating
+            (org-ilm--ts-format-utc timestamp)
+            duration)))
 
-    (org-ilm--log-insert
-     (make-org-ilm-log-review
-      :type 'card :timestamp timestamp :rating rating :delay delay
-      :priority (cons priority-rank (org-ilm-pqueue-count))
-      :due (fsrs-card-due card) :state (fsrs-card-state card)
-      :stability (fsrs-card-stability card)
-      :difficulty (fsrs-card-difficulty card)))))
+    (org-ilm--log-log
+     'card priority (fsrs-card-due card) scheduled
+     :timestamp timestamp :rating rating
+     :state (fsrs-card-state card)
+     :stability (fsrs-card-stability card)
+     :difficulty (fsrs-card-difficulty card))))
 
 ;;;;; Cloze
 
@@ -2285,9 +2362,10 @@ The callback ON-ABORT is called when capture is cancelled."
             (cond
              ;; Target is parent org id 
              ((stringp target)
-              ;; First: Calculate priority based on parent
+              ;; If no priority given, set same as parent.
               (unless priority
-                (setq priority (org-ilm-pqueue-priority target :nil-if-absent t)))
+                (when-let ((p (org-ilm-pqueue-priority target :nil-if-absent t)))
+                  (setq priority (org-ilm-pqueue-parse-new-position (car p)))))
 
               ;; Determine collection
               (when-let* ((file (org-id-find-id-file target))
@@ -2420,15 +2498,19 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                         do (org-entry-put nil (if (stringp p) p
                                                 (substring (symbol-name p) 1)) v)))
 
-             ;; Schedule
-             (when scheduled
-               (org-schedule nil (org-ilm--ts-format-utc-date-maybe-time scheduled)))
+             ;; Schedule in the org heading
+             (org-schedule
+              nil
+              (if (eq type 'card)
+                  (org-ilm--ts-format-utc-date-maybe-time scheduled)
+                (org-ilm--ts-format-utc-date scheduled)))
 
              ;; Log to drawer
-             (when (eq type 'card)
-               (org-ilm--card-log (ts-now) (car priority)))
-             
-             )
+             (pcase type 
+               ('card 
+                (org-ilm--card-log-new priority scheduled))
+               ((or 'source 'extract)
+                (org-ilm--material-log-new priority scheduled))))
            :before-finalize
            (lambda ()
              ;; If this is a source header where the attachments will
@@ -2497,14 +2579,14 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (org-ilm--capture capture)
       (org-ilm--capture-transient capture))))
 
-(defun org-ilm--extract (&rest data)
+(defun org-ilm--capture-extract (&rest data)
   "Make an extract with DATA, see `org-ilm-capture-ensure'."
   (org-ilm--capture-capture
    (apply #'org-ilm-capture-ensure
           (org-combine-plists
            data (list :type 'extract)))))
 
-(defun org-ilm--cloze (&rest data)
+(defun org-ilm--capture-cloze (&rest data)
   "Make a cloze with DATA, see `org-ilm-capture-ensure'."
   (org-ilm--capture-capture
    (apply #'org-ilm-capture-ensure
@@ -2623,7 +2705,7 @@ Will become an attachment Org file that is the child heading of current entry."
         (when-let ((timer (org-ilm--media-extract-range region-text)))
           (setf (plist-get props :ILM_MEDIA+) timer)))
           
-      (org-ilm--extract
+      (org-ilm--capture-extract
        :target file-org-id
        :id extract-org-id
        :content region-text
@@ -2654,10 +2736,7 @@ Will become an attachment Org file that is the child heading of current entry."
                (insert target-end)
 
                (save-buffer)
-               (org-ilm-recreate-overlays region-begin (point)))))
-
-         (unless dont-update-priority
-           (org-ilm--attachment-priority-update 'extract)))
+               (org-ilm-recreate-overlays region-begin (point))))))
        ))))
 
 (defun org-ilm-cloze ()
@@ -2689,7 +2768,7 @@ A cloze is made automatically of the element at point or active region."
         (org-ilm--card-cloze-region (prog1 (point) (insert content)) (point))
         (setq buffer-text (buffer-string))))
         
-    (org-ilm--cloze
+    (org-ilm--capture-cloze
      :type 'card
      :target file-org-id
      :id card-org-id
@@ -3421,16 +3500,16 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (org-capture nil "c")))))
         ('text
          (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
-           (org-ilm--extract
+           (org-ilm--capture-extract
             :target org-id :content text :ext "org")))
         ('image
          (let* ((img-path (org-ilm--pdf-image-export extract-org-id)))
-           (org-ilm--extract
+           (org-ilm--capture-extract
             :target org-id :file img-path
             :title (format "Page %s" current-page-real)
             :id extract-org-id :method 'mv :ext t)))
         ('org
-         (org-ilm--extract
+         (org-ilm--capture-extract
           :target org-id
           :title (format "Page %s" current-page-real)
           :id extract-org-id
@@ -3527,7 +3606,7 @@ set only (not let)."
       ;;   org-link--try-link-store-functions(nil)
       ;;   org-store-link(nil)
       (let ((org-link-parameters nil))
-        (apply #'org-ilm--extract
+        (apply #'org-ilm--capture-extract
                (append capture-data
                        (list :target org-id
                              :on-success
@@ -3628,13 +3707,13 @@ make a bunch of headers."
                             'word buffer)
                            "\n")))))
 
-           (org-ilm--extract
+           (org-ilm--capture-extract
             :target org-id :content (buffer-string) :ext "org"
             :title (concat "Section: " (alist-get 'title section)))))
         ('org
          (let ((pdf-path (org-ilm--pdf-path))
                (extract-org-id (org-id-new)))
-           (org-ilm--extract
+           (org-ilm--capture-extract
             :target org-id :id extract-org-id :ext "org"
             :title (concat "Section: " (alist-get 'title section))
             :on-success
