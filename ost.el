@@ -67,6 +67,17 @@
    :type number)
   )
 
+;; TODO DOESNT WORK
+(cl-defmethod cl-print-object ((s ost-node) stream)
+  (with-slots (black key id left right parent size) s
+    (princ
+     (format "#(ost-node %s %s %s %s %s %s %s)"
+                   black key id size
+                   (when left (ost-node-id left))
+                   (when right (ost-node-id right))
+                   (when parent (ost-node-id parent)))
+           stream)))
+
 (defun ost-node-child (node direction)
   "Get the child of NODE in DIRECTION ('left or 'right)."
   (if (eq direction 'left)
@@ -123,6 +134,13 @@ First orders by key, then by id."
   (nodes
    (make-hash-table :test #'equal)
    :documentation "Hashmap id -> node."))
+
+(cl-defmethod cl-print-object ((s ost-tree) stream)
+  (princ (format "#s(ost-tree %s %s #%s)"
+                 (ost-tree-root s)
+                 (ost-tree-dynamic s)
+                 (hash-table-count (ost-tree-nodes s)))
+         stream))
 
 (defun ost-tree-size (tree)
   "Return the total number of nodes in TREE."

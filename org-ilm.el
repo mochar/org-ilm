@@ -312,8 +312,13 @@ be due starting 2am."
          (cons 'registry collection)
        (cons 'collection collection)))
     ((bound-and-true-p org-ilm-queue)
-     (let* ((el (org-ilm--vtable-get-object))
-            (id (when el (org-ilm-element-id el))))
+     (let* ((object (cdr (org-ilm--vtable-get-object)))
+            ;; TODO Can't use cl-typecase here because org-ilm-element
+            ;; not yet defined
+            (id (cond
+                  ((stringp object) object)
+                  ((org-ilm-element-p object)
+                   (org-ilm-element-id object)))))
        (list 'queue (org-ilm-queue--collection org-ilm-queue) id)))))
 
 (defun org-ilm-midnight-shift-minutes ()
@@ -755,6 +760,11 @@ If `HEADLINE' is passed, read it as org-property."
                                 drawers)))
             (org-ilm--org-logbook-parse logbook)))))))
 
+(defun org-ilm--org-delete-headline (&optional delete-attach-dir)
+  (when delete-attach-dir (org-attach-delete-all 'force))
+  (org-mark-subtree)
+  (delete-region (region-beginning) (region-end)))
+
 ;;;;; Org-node / org-mem
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
@@ -841,8 +851,8 @@ should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
      ((and (listp position) (numberp (car position)) (floatp (cdr position)))
       ;; Make sure the rank fits the quantile
       ;; TODO This calculation might fail due to rounding errors????
-      (cl-assert (= (car position)
-                    (org-ilm--ost-quantile-to-rank obj (cdr position) offset)))
+      ;; (cl-assert (= (car position)
+      ;;               (org-ilm--ost-quantile-to-rank obj (cdr position) offset)))
       position)
      ;; Inputted quantile
      ((and (floatp position) (<= 0.0 position 1.0))
@@ -1126,19 +1136,30 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (car (org-ilm--ost-read-position (org-ilm-pqueue collection) numnew-or-id)))
 
 (defun org-ilm-pqueue-queue (&optional collection)
-  "Return `org-ilm-queue' from all elements in the priority queue."
+  "Return `org-ilm-queue' from all elements in the priority queue.
+
+Because element headlines might be deleted, their ids will map to the id
+itself in `org-ilm-queue--elements', rather than `org-ilm-element'
+object."
   (let* ((pqueue (org-ilm-pqueue collection))
          (collection (org-ilm-pqueue--collection pqueue))
          (queue (make-org-ilm-queue
                  :name (format "Priority queue (%s)" 
                                (symbol-name collection))
-                 :collection collection))
+                 :collection collection
+                 :type 'pqueue))
          (elements (org-ilm-query-collection collection #'org-ilm-query-all)))
+
+    ;; First go through the elements that have been found and add them to ost
+    ;; and nodes map as normal.
     (dolist (element elements)
       (org-ilm-queue--insert
        queue element
        (car (org-ilm-pqueue-priority (org-ilm-element-id element) :pqueue pqueue))))
-    
+
+    ;; For ids that have not been found, i.e. were not added in the previous
+    ;; loop, put them in the ost as normal, but in the node map use the id also
+    ;; as value.
     (dolist (id (hash-table-keys (ost-tree-nodes (org-ilm-pqueue--ost pqueue))))
       (unless (gethash id (org-ilm-queue--elements queue))
         (puthash id id (org-ilm-queue--elements queue))
@@ -1491,6 +1512,7 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-subject-state
                      ((stringp headline-or-state)
                       headline-or-state)
                      ((not headline-or-state)
+                      (cl-assert (eq major-mode 'org-mode))
                       (org-get-todo-state))
                      (t (error "Unrecognized arg")))))
     (cond
@@ -1622,18 +1644,18 @@ wasteful if headline does not match query."
     (setq if-matches-query (plist-get org-ilm-queue :query))
     (unless if-matches-query
       (error "No query found"))))
-    
+  
   (save-excursion
-    (org-ilm--org-with-point-at
-        org-id
-      (save-restriction
-        (org-ilm--org-narrow-to-header)
-        (if if-matches-query
-            (car (org-ilm-query-buffer
-                  (current-buffer)
-                  if-matches-query
-                  t))
-          (org-ilm-element-at-point))))))
+    (org-ilm--org-with-point-at org-id
+      (pcase if-matches-query
+        (t
+         (save-restriction
+           (org-ilm--org-narrow-to-header)
+           (car (org-ilm-query-buffer
+                 (current-buffer)
+                 if-matches-query
+                 t))))
+        (_ (org-ilm-element-at-point))))))
 
 ;;;;; Priority
 
@@ -1694,6 +1716,27 @@ ELEMENT may be nil, in which case try to read it from point."
    (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
   (let ((position (org-ilm-pqueue-select-position (org-ilm-element-priority element))))
     (org-ilm-element-priority element :rank (car position))))
+
+(defun org-ilm-element-delete (element)
+  "Delete ilm element at point."
+  (interactive
+   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
+  (cl-assert (org-ilm-element-p element) nil "Not an ilm element")
+
+  (when (and (called-interactively-p) (org-attach-dir))
+    (cond-let*
+      ((org-entry-get nil "DIR")
+       (when (yes-or-no-p "Delete attachment directory?")
+         (org-attach-delete-all 'force)))
+      ([attachments (f-glob (file-name-concat (org-attach-dir)
+                                              (concat (org-ilm-element-id element) "*")))]
+       (when (yes-or-no-p (format "Delete element %s attachtment(s)?" (length attachments)))
+         (dolist (file attachments)
+           (delete-file file))))))
+     
+  (org-ilm--org-delete-headline)
+  (org-ilm-pqueue-remove (org-ilm-element-id element)
+                         (org-ilm-element-collection element)))
 
 ;;;;; Transient
 
@@ -2299,7 +2342,7 @@ An empty log implies a new card, so step is 0."
 
 ;; Logic related to creating child elements, i.e. extracts and cards.
 
-(defcustom org-ilm-capture-show-menu-by-default t
+(defcustom org-ilm-capture-show-menu t
   "When creating an extract or card, always show a menu to configure it
  first, rather than with a prefix argument."
   :type 'boolean
@@ -2572,7 +2615,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
       (org-capture nil "i"))))
 
 (defun org-ilm--capture-capture (capture)
-  (let ((immediate-p (if org-ilm-capture-show-menu-by-default
+  (let ((immediate-p (if org-ilm-capture-show-menu
                          current-prefix-arg
                        (not current-prefix-arg))))
     (if immediate-p
@@ -2791,19 +2834,20 @@ A cloze is made automatically of the element at point or active region."
 
   (unless level
     (setq level (read-number "Split by level: "  (max (org-outline-level) 1))))
-  
-  (save-excursion
-    (goto-char (point-min))
-    (let ((re (format "^\\*\\{%d\\} " level))
-          title)
-      (while (re-search-forward re nil t)
-        (setq title (org-get-heading t t t t))
-        (beginning-of-line)
-        (insert "\n")
-        (set-mark (point))
-        (org-end-of-subtree t)
-        (insert "\n")
-        (org-ilm-org-extract :title title :dont-update-priority t)))))
+
+  (let ((org-ilm-capture-show-menu nil))
+    (save-excursion
+      (goto-char (point-min))
+      (let ((re (format "^\\*\\{%d\\} " level))
+            title)
+        (while (re-search-forward re nil t)
+          (setq title (org-get-heading t t t t))
+          (beginning-of-line)
+          (insert "\n")
+          (set-mark (point))
+          (org-end-of-subtree t)
+          (insert "\n")
+          (org-ilm-org-extract :title title :dont-update-priority t))))))
 
 ;;;; Media attachment
 
@@ -4344,7 +4388,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 ;; "org-ilm-queue-" functions to org-ilm-queue-buffer.
 (cl-defstruct (org-ilm-queue (:conc-name org-ilm-queue--))
   "Queue of elements."
-  name collection query
+  name collection query type
   (ost (make-ost-tree))
   (elements (make-hash-table :test #'equal))
   key reversed)
@@ -4422,19 +4466,18 @@ ELEMENT may be an `org-ilm-element' or its id."
 (defun org-ilm-queue--remove (queue element)
   "Remove ELEMENT from QUEUE.
 ELEMENT may be an `org-ilm-element' or its id."
-  (setq element (org-ilm-queue--element queue element))
-  (cl-assert (org-ilm-element-p element))
-  (let ((id (org-ilm-element-id element)))
+  (let ((id (if (org-ilm-element-p element)
+                (org-ilm-element-id element)
+              element)))
     (ost-tree-remove (org-ilm-queue--ost org-ilm-queue) id)
-    (remhash id (org-ilm-queue--elements org-ilm-queue)))
-  element)
+    (remhash id (org-ilm-queue--elements org-ilm-queue))))
 
 (defun org-ilm-queue--pop (queue)
   "Remove the top most element in QUEUE."
   (when (org-ilm-queue--empty-p queue)
     (error "Tried popping an empty queue \"%s\"" (org-ilm-queue--name queue)))
-  (let ((head (org-ilm-queue-head)))
-    (org-ilm-queue-remove (org-ilm-element-id head))))
+  (let ((head (org-ilm--queue-head)))
+    (org-ilm--queue-remove (org-ilm-element-id head))))
 
 (defun org-ilm-queue--move (queue element new-rank)
   "Move ELEMENT in QUEUE to NEW-RANK."
@@ -4492,17 +4535,20 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   "Replace the queue object by a rebuild one.
 If the queue has a query, run it again. Else re-parse elements."
   (org-ilm-with-queue-buffer buffer
-    (setq org-ilm-queue 
-          (if-let ((query (org-ilm-queue--query org-ilm-queue)))
-              (org-ilm--queue-build
-               (org-ilm-queue--collection org-ilm-queue) query)
-            (let ((queue (copy-org-ilm-queue org-ilm-queue)))
-              (setf (org-ilm-queue--elements queue)
-                    (mapcar
-                     (lambda (element)
-                       (org-ilm-element-from-id (org-ilm-element-id element)))
-                     (hash-table-values (org-ilm-queue--elements org-ilm-queue))))
-              queue)))
+    (setq org-ilm-queue
+          (cond-let*
+            ((eq (org-ilm-queue--type org-ilm-queue) 'pqueue)
+             (org-ilm-pqueue-queue (org-ilm-queue--collection org-ilm-queue)))
+            ([query (org-ilm-queue--query org-ilm-queue)]
+             (org-ilm--queue-build
+              (org-ilm-queue--collection org-ilm-queue) query))
+            (t
+             (let ((queue (copy-org-ilm-queue org-ilm-queue))
+                   (elements (make-hash-table :test #'equal)))
+               (dolist (id (hash-table-keys (org-ilm-queue--elements org-ilm-queue)))
+                 (puthash id (or (org-ilm-element-from-id id) id) elements))
+               (setf (org-ilm-queue--elements queue) elements)
+               queue))))
     (current-buffer)))
 
 (defun org-ilm--queue-sort (key reversed &optional buffer)
@@ -4635,7 +4681,7 @@ queue buffer."
 
 ;;;;; Queue operations
 
-(cl-defun org-ilm-queue-insert (element &key buffer exists-ok)
+(cl-defun org-ilm--queue-insert (element &key buffer exists-ok)
   "Insert ELEMENT into the queue.
 When EXISTS-OK, don't throw error if ELEMENT already in queue."
   (cl-assert (org-ilm-element-p element))
@@ -4646,38 +4692,38 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
       (org-ilm-queue--insert org-ilm-queue element)
       t)))
 
-(cl-defun org-ilm-queue-count (&key buffer)
+(cl-defun org-ilm--queue-count (&key buffer)
   "Return number of elements in the queue."
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--count org-ilm-queue)))
 
-(cl-defun org-ilm-queue-empty-p (&key buffer)
-  (= 0 (org-ilm-queue-count :buffer buffer)))
+(cl-defun org-ilm--queue-empty-p (&key buffer)
+  (= 0 (org-ilm--queue-count :buffer buffer)))
 
-(cl-defun org-ilm-queue-select (index &key buffer)
+(cl-defun org-ilm--queue-select (index &key buffer)
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--select org-ilm-queue index)))
 
-(cl-defun org-ilm-queue-top (&key n buffer)
+(cl-defun org-ilm--queue-top (&key n buffer)
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--top org-ilm-queue n)))
 
-(cl-defun org-ilm-queue-head (&key buffer)
+(cl-defun org-ilm--queue-head (&key buffer)
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--head org-ilm-queue)))
 
-(cl-defun org-ilm-queue-elements (&key ordered buffer)
+(cl-defun org-ilm--queue-elements (&key ordered buffer)
   "Return elements in the queue."
   (org-ilm-with-queue-buffer buffer
     (if ordered
-        (org-ilm-queue-top :buffer buffer)
+        (org-ilm--queue-top :buffer buffer)
       (hash-table-values (org-ilm-queue--elements org-ilm-queue)))))
 
-(cl-defun org-ilm-queue-remove (element-or-id &key buffer)
+(cl-defun org-ilm--queue-remove (element-or-id &key buffer)
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--remove org-ilm-queue element-or-id)))
 
-(cl-defun org-ilm-queue-pop (&key buffer)
+(cl-defun org-ilm--queue-pop (&key buffer)
   "Remove the top most element in the queue."
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--pop org-ilm-queue)))
@@ -4717,7 +4763,7 @@ If point on subject, add all headlines of subject."
                       (subjects (car (org-ilm-element-subjects element)))
                       (ancestor-ids (mapcar #'car subjects)))
             (when (member (org-element-property :ID headline) ancestor-ids)
-              (when (org-ilm-queue-insert element :buffer queue-buffer :exists-ok t)
+              (when (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
                 (cl-incf n-added)))))
 
       (save-excursion
@@ -4726,7 +4772,7 @@ If point on subject, add all headlines of subject."
               el)
           (while (< (point) end)
             (when (setq el (org-ilm-element-at-point))
-              (when (org-ilm-queue-insert el :buffer queue-buffer :exists-ok t)
+              (when (org-ilm--queue-insert el :buffer queue-buffer :exists-ok t)
                 (cl-incf n-added))
               (outline-next-heading))))))
 
@@ -4766,53 +4812,77 @@ If point on subject, add all headlines of subject."
   "P" #'org-ilm-queue-set-priority
   "N" #'org-ilm-queue-set-position
   "S" #'org-ilm-queue-set-schedule
+  "D" #'org-ilm-queue-delete
   "M j" #'org-ilm-queue-mark-by-subject
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
   "M u" #'org-ilm-queue-mark-unmark-all
-  ;; TODO r: Review start command
-  ;; TODO G: query again - undo manual changes
-  ;; TODO C-u G: like G but also select collection
-  ;; TODO B: bulk commands
+  "M ?" #'org-ilm-queue-mark-missing
   )
 
+;; TODO Make this an alist (index . id) as index is used as queue object so that
+;; we can do (vtable-update-object (vtable-current-table) index) to update the
+;; table when marking rather than doing a whole revert.
 (defvar-local org-ilm--queue-marked-objects nil
   "Org id of marked objects in queue.")
+
+(defun org-ilm--queue-object-id (object)
+  (if (org-ilm-element-p object)
+      (org-ilm-element-id object)
+    object))
+
+(defun org-ilm--queue-mark-objects (objects)
+  (dolist (object (ensure-list objects))
+    (let ((id (org-ilm--queue-object-id object)))
+      (unless (member id org-ilm--queue-marked-objects)
+        (push id org-ilm--queue-marked-objects)))))
+
+(defun org-ilm--queue-unmark-objects (objects)
+  (dolist (object (ensure-list objects))
+    (let ((id (org-ilm--queue-object-id object)))
+      (setq org-ilm--queue-marked-objects
+            (delete id org-ilm--queue-marked-objects)))))
+
+(defun org-ilm--queue-mark-toggle-objects (objects)
+  (dolist (object (ensure-list objects))
+    (let ((id (org-ilm--queue-object-id object)))
+      (if (member id org-ilm--queue-marked-objects)
+          (setq org-ilm--queue-marked-objects
+                (delete id org-ilm--queue-marked-objects))
+        (push id org-ilm--queue-marked-objects)))))
 
 ;; TODO This is ineffcient. Instead we should give vtable the selected-ed
 ;; objects directly.
 (defun org-ilm--vtable-get-object (&optional index)
-  "Return queue object at point or by index."
+  "Return (index . queue object) at point or by index."
   ;; when-let because index can be nil when out of table bounds
   (when-let ((index (or index (vtable-current-object))))
-    (org-ilm-queue-select index)))
+    (cons index (org-ilm--queue-select index))))
+
+(defun org-ilm--vtable-get-object-id ()
+  (org-ilm--queue-object-id
+   (cdr (org-ilm--vtable-get-object))))
 
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
-  (interactive (list (org-ilm--vtable-get-object)))
+  (interactive (list (cdr (org-ilm--vtable-get-object))))
   (org-ilm--attachment-open-by-id (org-ilm-element-id object)))
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
-  (interactive (list (org-ilm--vtable-get-object)))
+  (interactive (list (cdr (org-ilm--vtable-get-object))))
   (org-ilm--org-goto-id (org-ilm-element-id object)))
 
 (defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
-  (interactive (list (org-ilm--vtable-get-object)))
-  (let ((id (org-ilm-element-id object)))
-    (if (member id org-ilm--queue-marked-objects)
-        ;; Only toggle if called interactively
-        (when (called-interactively-p)
-          ;; not sure why but inconsistent behavior when not setq, even though
-          ;; cl-delete is meant to remove destructively.
-          (setq org-ilm--queue-marked-objects
-                (cl-delete id org-ilm--queue-marked-objects :test #'equal)))
-      (cl-pushnew id org-ilm--queue-marked-objects :test #'equal))
-    ;; TODO gives cache error no idea why
-    ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
-    ;; (vtable-update-object (vtable-current-table) object)
-    (org-ilm-queue-revert))
+  (interactive (list (cdr (org-ilm--vtable-get-object))))
+  ;; Only toggle if called interactively
+  ;; (when (called-interactively-p)
+  (org-ilm--queue-mark-toggle-objects object)
+  ;; TODO gives cache error no idea why
+  ;; Maybe worked on?: https://lists.gnu.org/archive/html/bug-gnu-emacs/2025-07/msg00802.html
+  (vtable-update-object (vtable-current-table) (vtable-current-object))
+  ;; (org-ilm-queue-revert)
   (when (called-interactively-p)
     (next-line)
     (when (eobp) (previous-line))))
@@ -4827,10 +4897,12 @@ If point on subject, add all headlines of subject."
   ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
   ;; descendancy, but this would require a list-to-list comparison eg with
   ;; `seq-some' per object, instead of just an `assoc'.
-  (dolist (object (org-ilm-queue-elements))
-    (let ((ancestor-ids (car (org-ilm-element-subjects object))))
-      (when (member subject-id ancestor-ids)
-        (org-ilm-queue-object-mark object)))))
+  (dolist (object (org-ilm--queue-elements))
+    (when (org-ilm-element-p object)
+      (let ((ancestor-ids (car (org-ilm-element-subjects object))))
+        (when (member subject-id ancestor-ids)
+          (org-ilm--queue-mark-objects object)))))
+  (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-by-tag (tag)
   "Mark all elements in queue that have tag TAG."
@@ -4839,18 +4911,30 @@ If point on subject, add all headlines of subject."
     (completing-read
      "Tag: "
      (org-ilm--collection-tags (org-ilm-queue--collection org-ilm-queue)))))
-  (dolist (object (org-ilm-queue-elements))
-    (when (member tag (org-ilm-element-tags object))
-      (org-ilm-queue-object-mark object))))
+  (dolist (object (org-ilm--queue-elements))
+    (when (and (org-ilm-element-p object)
+               (member tag (org-ilm-element-tags object)))
+      (org-ilm--queue-mark-objects object)))
+  (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-by-scheduled (days)
   "Mark all elements in queue that are scheduled in DAYS days.
 DAYS can be specified as numeric prefix arg."
-  (interactive "N")
-  (dolist (object (org-ilm-queue-elements))
-    (when-let ((due (* -1 (org-ilm-element-schedrel object))))
-      (when (<= (round due) days) 
-        (org-ilm-queue-object-mark object)))))
+  (interactive "NNumber of days: ")
+  (dolist (object (org-ilm--queue-elements))
+    (when (org-ilm-element-p object)
+      (when-let ((due (* -1 (org-ilm-element-schedrel object))))
+        (when (<= (round due) days) 
+          (org-ilm--queue-mark-objects object)))))
+  (org-ilm-queue-revert))
+
+(defun org-ilm-queue-mark-missing ()
+  "Mark all elements that are missing, i.e. do not have an ilm-element."
+  (interactive)
+  (dolist (object (org-ilm--queue-elements))
+    (unless (org-ilm-element-p object)
+      (org-ilm--queue-mark-objects object)))
+  (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-unmark-all ()
   "Unmark all marked elements."
@@ -4873,12 +4957,12 @@ DAYS can be specified as numeric prefix arg."
 (defun org-ilm-queue-revert (&optional rebuild)
   "Revert/refresh the queue buffer. With REBUILD, reparse elements."
   (interactive "P")
-  (let ((was-empty (org-ilm-queue-empty-p)))
+  (let ((was-empty (org-ilm--queue-empty-p)))
     (when rebuild
       (when (yes-or-no-p "Rebuild queue? This will parse the elements again. ")
         (org-ilm--queue-rebuild)))
-    (if (or (and was-empty (not (org-ilm-queue-empty-p)))
-            (org-ilm-queue-empty-p)
+    (if (or (and was-empty (not (org-ilm--queue-empty-p)))
+            (org-ilm--queue-empty-p)
             (not (vtable-current-table)))
         (org-ilm--queue-buffer-build)
       (vtable-revert-command))
@@ -4887,12 +4971,17 @@ DAYS can be specified as numeric prefix arg."
 (defun org-ilm-queue-rebuild ()
   "Rebuild the queue buffer."
   (interactive)
+  (setq org-ilm--queue-marked-objects nil)
   (org-ilm-queue-revert 'rebuild))
 
-(defun org-ilm--vtable-format-marked (string marked)
-  (if marked
-      (propertize string 'face '(:inherit default :slant italic :underline t))
-    string))
+(defun org-ilm--vtable-format-cell (string marked &optional missing)
+  "Apply 'face property to cell STRING based in its MARKED and/or MISSING."
+  (if (not (or marked missing))
+      string
+    (let ((face (list :inherit 'default :slant 'italic)))
+      (when marked (setq face (plist-put face :underline t)))
+      (when missing (setq face (plist-put face :foreground "#595959")))
+      (propertize string 'face face))))
   
 (cl-defun org-ilm--queue-make-vtable (&key keymap)
   "Build queue vtable.
@@ -4907,47 +4996,45 @@ A lot of formatting code from org-ql."
       :align 'right
       :formatter
       (lambda (data)
-        (if (stringp data)
-            (propertize "NA" 'face 'Info-quoted)
-          (pcase-let* ((`(,marked ,index) data)
-                       ;; (index-str (format "%d" index)))
-                       (index-str (format "%4d" (1+ index))))
-            (org-ilm--vtable-format-marked index-str marked)))))
+        (pcase-let* ((`(,marked ,index ,missing) data)
+                     (index-str (format "%4d" (1+ index))))
+          (org-ilm--vtable-format-cell index-str marked missing))))
      (:name
       "Priority"
       :width 6
       :formatter
       (lambda (data)
-        (if (stringp data)
-            (propertize "NA" 'face 'Info-quoted)
-          (pcase-let ((`(,marked ,rank ,quantile) data))
-            (when (and rank quantile)
-              (org-ilm--vtable-format-marked
-               (propertize (format "%.2f" (* 100 quantile))
-                           'face 'shadow)
-               marked))))))
+        (pcase-let* ((`(,marked ,priority ,missing) data)
+                     (rank (car priority))
+                     (quantile (cdr priority)))
+          (org-ilm--vtable-format-cell
+           (if missing
+               "NA"
+             (propertize (format "%.2f" (* 100 quantile))
+                         'face 'shadow))
+           marked missing))))
      (:name
       "Type"
       :width 4
       :formatter
       (lambda (data)
-        (if (stringp data)
-            (propertize "NA" 'face 'Info-quoted)
-          (pcase-let ((`(,marked ,type) data))
-            (org-ilm--vtable-format-marked
+        (pcase-let ((`(,marked ,type ,missing) data))
+          (org-ilm--vtable-format-cell
+           (if missing
+               "NA"
              (org-ql-view--add-todo-face
               (upcase (pcase type
                         ('material (car org-ilm-material-states))
                         ('card (car org-ilm-card-states))
-                        (_ "????"))))
-             marked)))))
+                        (_ "????")))))
+           marked missing))))
      ;; (:name
      ;;  "Cookie"
      ;;  :width 4
      ;;  :formatter
      ;;  (lambda (data)
      ;;    (pcase-let ((`(,marked ,p) data))
-     ;;      (org-ilm--vtable-format-marked
+     ;;      (org-ilm--vtable-format-cell
      ;;       (org-ql-view--add-priority-face (format "[#%s]" p))
      ;;       marked))))
      (:name
@@ -4956,33 +5043,31 @@ A lot of formatting code from org-ql."
       :max-width "55%"
       :formatter
       (lambda (data)
-        (if (stringp data)
-            (propertize data 'face 'Info-quoted)
-          (pcase-let* ((`(,marked ,title) data))
-            (org-ilm--vtable-format-marked title marked)))))
+        (pcase-let* ((`(,marked ,title ,missing) data))
+          (org-ilm--vtable-format-cell title marked missing))))
      (:name
       "Due"
       :max-width 8
       ;; :align 'right
       :formatter
       (lambda (data)
-        (if (stringp data)
-            (propertize "NA" 'face 'Info-quoted)
-          (pcase-let* ((`(,marked ,due) data))
-            (let ((due-str (if due
-                               (org-add-props
+        (pcase-let ((`(,marked ,due ,missing) data))
+          (org-ilm--vtable-format-cell
+           (cond
+            (missing "NA")
+            (due (org-add-props
                                    (org-ql-view--format-relative-date
                                     (round due))
-                                   nil 'face 'org-ql-view-due-date)
-                             "")))
-              (org-ilm--vtable-format-marked due-str marked))))))
+                     nil 'face 'org-ql-view-due-date))
+            (t ""))
+           marked missing))))
      ;; (:name
      ;;  "Tags"
      ;;  :formatter
      ;;  (lambda (data)
      ;;    (pcase-let ((`(,marked ,tags) data))
      ;;      (if tags
-     ;;          (org-ilm--vtable-format-marked
+     ;;          (org-ilm--vtable-format-cell
      ;;           (--> tags
      ;;                (s-join ":" it)
      ;;                (s-wrap it ":")
@@ -4994,40 +5079,44 @@ A lot of formatting code from org-ql."
       :max-width 15
       :formatter
       (lambda (data)
-        (if (stringp data)
-            (propertize "NA" 'face 'Info-quoted)
-          (pcase-let ((`(,marked ,subjects) data))
-            (if subjects
-                (let ((names
-                       (mapcar
-                        (lambda (subject)
-                          (let ((title (or
-                                        (car (last (org-mem-entry-roam-aliases subject)))
-                                        (org-mem-entry-title subject))))
-                            (substring title 0 (min (length title)
-                                                    org-ilm-queue-subject-nchar))))
-                        subjects)))
-                  (org-ilm--vtable-format-marked
-                   (org-add-props (s-join "," names) nil 'face 'org-tag)
-                   marked))
-              ""))))))
+        (pcase-let ((`(,marked ,subjects ,missing) data)
+                    (names))
+          (when subjects
+            (setq names
+                  (mapcar
+                   (lambda (subject)
+                     (let ((title (or
+                                   (car (last (org-mem-entry-roam-aliases subject)))
+                                   (org-mem-entry-title subject))))
+                       (substring title 0 (min (length title)
+                                               org-ilm-queue-subject-nchar))))
+                   subjects)))
+          (org-ilm--vtable-format-cell
+           (cond
+            (names (org-add-props (s-join "," names) nil 'face 'org-tag))
+            (missing "NA")
+            (t ""))
+           marked missing)))))
    :objects-function
    (lambda ()
-     (unless (org-ilm-queue-empty-p)
-       (number-sequence 0 (1- (org-ilm-queue-count)))))
+     (unless (org-ilm--queue-empty-p)
+       (number-sequence 0 (1- (org-ilm--queue-count)))))
    :getter
    (lambda (row column vtable)
-     (let ((object (org-ilm--vtable-get-object row)))
+     (let* ((object (cdr (org-ilm--vtable-get-object row)))
+            ;; See `org-ilm-pqueue-queue'. Missing elements are mapped back to id.
+            (id (if (org-ilm-element-p object)
+                    (org-ilm-element-id object)
+                  object))
+            (marked (member id org-ilm--queue-marked-objects)))
        (cond
         ((org-ilm-element-p object)
-         (let* ((id (org-ilm-element-id object))
-                (marked (member id org-ilm--queue-marked-objects))
-                (subjects (org-ilm-element-subjects object))
-                (priority (org-ilm-element-priority object)))
+         (let ((subjects (org-ilm-element-subjects object))
+               (priority (org-ilm-element-priority object)))
            (pcase (vtable-column vtable column)
              ("Index" (list marked row))
              ("Type" (list marked (org-ilm-element-type object)))
-             ("Priority" (list marked (car priority) (cdr priority)))
+             ("Priority" (list marked priority))
              ;; ("Cookie" (list marked (org-ilm-element-pcookie object)))
              ("Title" (list marked (org-ilm-element-title object)))
              ("Due" (list marked (org-ilm-element-schedrel object)))
@@ -5038,7 +5127,10 @@ A lot of formatting code from org-ql."
                             ;; Only direct subjects
                             (last (car subjects) (cdr subjects))))))))
         ((stringp object)
-         object)
+         (pcase (vtable-column vtable column)
+           ("Index" (list marked row t))
+           ("Title" (list marked id t))
+           (_ (list marked nil t))))
         (t (error "wrong object value in table row")))))
          
    :keymap (or keymap org-ilm-queue-map)
@@ -5046,7 +5138,7 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm--queue-eldoc-show-info ()
   "Return info about the element at point in the queue buffer."
-  (when-let* ((element (org-ilm--vtable-get-object)))
+  (when-let* ((element (cdr (org-ilm--vtable-get-object))))
     (when (org-ilm-element-p element)
       (propertize (format "[#%s]" (org-ilm-element-pcookie element))
                   'face 'org-priority))))
@@ -5057,7 +5149,7 @@ A lot of formatting code from org-ql."
     (setq-local buffer-read-only nil)
     (erase-buffer)
     (goto-char (point-min))
-    (if (org-ilm-queue-empty-p)
+    (if (org-ilm--queue-empty-p)
         (progn
           (insert (propertize "Queue empty..." 'face 'italic))
           (use-local-map (or keymap org-ilm-queue-base-map)))
@@ -5116,9 +5208,59 @@ A lot of formatting code from org-ql."
                      (date (ts-format "%Y-%m-%d" ts)))
                 (org-ilm-schedule (org-ilm-element-at-point) date)
                 (puthash id (org-ilm-element-at-point) elements)))))
+
+      ;; No marked elements, set schedule of element at point
       (org-ilm-element-set-schedule (org-ilm-element-from-context))
       (let ((element (org-ilm-element-from-context)))
         (puthash (org-ilm-element-id element) element elements)))
+    (org-ilm-queue-revert)))
+
+(defun org-ilm-queue-remove ()
+  "Remove current or selected elements from this queue."
+  (interactive)
+  )
+
+(defun org-ilm-queue-delete ()
+  "Delete current or selected elements from the collection."
+  (interactive)
+  (let* ((queue-buffer (current-buffer))
+         (collection (org-ilm-queue--collection org-ilm-queue))
+         (ids (copy-sequence
+               (or org-ilm--queue-marked-objects
+                   (list (org-ilm--vtable-get-object-id)))))
+         (ask-confirmation-p t)
+         (confirm-p (lambda (message)
+                      (if (not ask-confirmation-p)
+                          t
+                        (setq message (concat message " (y)es, (n)o, (!)all, (q)uit"))
+                        (setq message (propertize message 'face 'bold))
+                        (pcase (read-char message '("y" "n" "!" "q"))
+                          (?y t)
+                          (?n nil)
+                          (?q (throw 'abort nil))
+                          (?! (setq ask-confirmation-p nil)
+                              t)))))
+         (delete-id (lambda (id)
+                      (org-ilm--queue-remove id :buffer queue-buffer)
+                      (org-ilm-pqueue-remove id collection))))
+    (catch 'abort
+      (dolist (id ids)
+        (cond
+         ((ignore-errors (progn (org-id-goto id) t))
+          (org-mark-subtree)
+          (when (funcall confirm-p "Delete element?")
+            (call-interactively #'org-ilm-element-delete)
+            (funcall delete-id id)))
+         (t
+          (switch-to-buffer queue-buffer)
+          
+          (when (funcall confirm-p "Element not found. Delete from priority queue?")
+            (funcall delete-id id))))
+        (when ask-confirmation-p
+          (with-current-buffer queue-buffer
+            (org-ilm-queue-revert)))))
+    (switch-to-buffer queue-buffer)
+    (org-ilm--queue-unmark-objects ids)
     (org-ilm-queue-revert)))
 
 ;;;;; Sort transient
@@ -5329,7 +5471,7 @@ A lot of formatting code from org-ql."
   (with-current-buffer org-ilm--queue-select-buffer
     (when (and org-ilm--queue-select-minibuffer-window
                (window-live-p org-ilm--queue-select-minibuffer-window))
-      (when-let* ((element (org-ilm--vtable-get-object))
+      (when-let* ((element (cdr (org-ilm--vtable-get-object)))
                   (rank (org-ilm-queue--element-value org-ilm-queue element)))
         (with-selected-window org-ilm--queue-select-minibuffer-window
           (delete-minibuffer-contents)
@@ -6402,9 +6544,11 @@ and again by `org-ilm-queue-mark-by-subject'."
          (org-node-read-candidate
           "Subject: " nil
           (lambda (name entry)
-            (and
-             (eq 'subject (org-ilm-type (org-mem-todo-state entry)))
-             (org-ilm--collection-file (org-mem-entry-file entry) collection)))
+            (when-let ((state (org-mem-todo-state entry))
+                       (file (org-mem-entry-file entry)))
+              (and
+               (eq 'subject (org-ilm-type state))
+               (org-ilm--collection-file file collection))))
           'require-match)))
     (gethash choice org-node--candidate<>entry)))
 
@@ -6636,7 +6780,7 @@ during review."
 
   ;; Make sure queue is not empty
   (with-current-buffer org-ilm-queue-active-buffer
-    (when (org-ilm-queue-empty-p)
+    (when (org-ilm--queue-empty-p)
       (user-error "Queue is empty!")))
 
   (when (yes-or-no-p "Start reviewing?")
@@ -6739,7 +6883,7 @@ Return t if already ready."
               (org-ilm--card-rate rating)
             (org-ilm--schedule-update)))))
     
-    (let ((element (org-ilm-queue-pop)))
+    (let ((element (org-ilm--queue-pop)))
       
       ;; TODO Card might already be due, eg when rating again. So need to check the
       ;; new review time and add it back to the queue. Set a minimum position in
@@ -6748,7 +6892,7 @@ Return t if already ready."
     
     (org-ilm--review-cleanup-current-element))
   
-  (if (org-ilm-queue-empty-p)
+  (if (org-ilm--queue-empty-p)
       (progn
         (message "Finished reviewing queue!")
         (org-ilm-review-quit)
@@ -6774,9 +6918,9 @@ Return t if already ready."
 
 The main job is to prepare the variable `org-ilm--review-data', which
 needs the attachment buffer."
-  (cl-assert (not (org-ilm-queue-empty-p)))
+  (cl-assert (not (org-ilm--queue-empty-p)))
 
-  (let* ((element (org-ilm-queue-head))
+  (let* ((element (org-ilm--queue-head))
          (id (org-ilm-element-id element))
          attachment-buffer)
 
