@@ -523,7 +523,8 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
       (when template (list "-o" template))
       (list url)
       (when restrict-p '("--restrict-filenames"))
-      convtools-ytdlp-args)))))
+      convtools-ytdlp-args
+      '("--no-warnings"))))))
 
 (defun convtools--ytdlp-title-from-url (url)
   (convtools--ytdlp-filename-from-url url "%(title)s"))
@@ -538,7 +539,8 @@ Parse the OUTPUT string from:
                          (append
                           '("yt-dlp" "--print" "subtitles_table" "--print" "automatic_captions_table")
                           (list url)
-                          convtools-ytdlp-args))))
+                          convtools-ytdlp-args
+                          '("--no-warnings")))))
          (result '())
          (section nil))
     (dolist (line lines)
