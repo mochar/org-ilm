@@ -728,6 +728,9 @@ environment (multiline), paste it in headline body."
 
 ;;;;; Resource type
 
+;; TODO All of this has been copied over to org-ilm import resource. Still not
+;; sure if it should be in org-registry as well.
+
 ;; Generic object with citation that contains zero or more attachments. Think of:
 ;; - Website article / blog post
 ;; - Youtube video (media)
@@ -818,7 +821,7 @@ See `parsebib-read-entry'."
             key (cdr (assoc "=key=" bibtex))))
 
     (when (and (null title) (eq source-type 'url))
-      (setq title (mochar-get-page-title source)))
+      (setq title (mochar-utils--get-page-title source)))
 
     (list :source source :source-type source-type :title title
           :bibtex bibtex :key key :type type)))

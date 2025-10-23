@@ -599,7 +599,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
       (setq sub-langs (list sub-langs)))
      ((listp sub-langs))
      (t (error "SUB-LANGS must be string or list of strings"))))
-  
+
   (let ((default-directory (or working-dir default-directory)))
     (apply
      #'convtools--convert-make-process
@@ -836,7 +836,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
                   (attach-dir (org-attach-dir-get-create)))
 
         ;; HTML
-        (when-let ((title (if (eq type 'url)
+        (when-let ((_ (transient-arg-value "--html-download" args))
+                   (title (if (eq type 'url)
                               (if-let ((title (mochar-utils--get-page-title source)))
                                   (mochar-utils--slugify-title title)
                                 org-id)
@@ -978,24 +979,31 @@ SUB-LANGS may also be 'all' to download all subtitles."
              (subs (convtools--ytdlp-subtitles-from-url url)))
         (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs))))))
 
-(defun convtools--transient-media-build ()
+(defun convtools--transient-media-build (&optional no-template)
   (let ((inapt-if
          (lambda ()
-           (null (transient-arg-value "--media-download" (transient-get-value))))))
-  (mapcar
-   (lambda (suffix)
-     (transient-parse-suffix 'transient--prefix suffix))
-   (list
-    convtools--transient-media-download-suffix
-    (append
-     convtools--transient-media-template-suffix
-     (list :inapt-if inapt-if))
-    (append
-     convtools--transient-media-audio-suffix
-     (list :inapt-if inapt-if))
-    convtools--transient-media-subs-suffix))))
+           (null (transient-arg-value "--media-download" (transient-get-value)))))
+        suffixes)
+        
+    (push convtools--transient-media-subs-suffix suffixes)
+    (push (append
+           convtools--transient-media-audio-suffix
+           (list :inapt-if inapt-if)) suffixes)
+    (push (append
+           convtools--transient-media-template-suffix
+           (if no-template
+               (list :inapt-if-nil nil)
+           (list :inapt-if inapt-if)))
+          suffixes)
+    (push convtools--transient-media-download-suffix suffixes)
+    
+    (mapcar
+     (lambda (suffix)
+       (transient-parse-suffix 'transient--prefix suffix))
+     suffixes)))
 
 (defun convtools--transient-media-run (url output-dir id transient-args)
+  "Convert a media URL to a local video file."
   (let* ((download (transient-arg-value "--media-download" transient-args))
          (template (transient-arg-value "--media-template=" transient-args))
          (audio-only (transient-arg-value "--media-audio" transient-args))

@@ -795,6 +795,48 @@ If `HEADLINE' is passed, read it as org-property."
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
+;;;; Citation
+
+(defcustom org-ilm-bibtex-fields nil
+  "List of field names to include in the bibtex entry.
+See `parsebib-read-entry'."
+  :type '(repeat string)
+  :group 'org-ilm)
+
+(defun org-ilm--citation-get-bibtex (source &optional as-alist)
+  "Return the bibtex entry as string from SOURCE."
+  ;; Much better results with citoid backend compared to zotra
+  (let ((zotra-backend 'citoid)
+        bibtex-string)
+    (setq bibtex-string (-some-> (zotra-get-entry source "bibtex")
+                          s-trim))
+    (if (and bibtex-string as-alist)
+        (org-ilm--citation-parse-bibtex bibtex-string)
+      bibtex-string)))
+
+(defun org-ilm--citation-parse-bibtex (bibtex-string)
+  "Parses BIBTEX-STRING as alist."
+  (with-temp-buffer
+    (insert bibtex-string)
+    (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
+                                :fields org-ilm-bibtex-fields
+                                :expand-strings t
+                                :inheritance t
+                                :replace-TeX t)))
+                (key (car (hash-table-keys bibtexes))))
+      (setq bibtex (gethash key bibtexes)))))
+
+(defun org-ilm--citation-get-zotero (source)
+  "Return the zotero reference of SOURCE as an alist."
+  (when-let* ((zotra-backend 'citoid)
+              (json-string (zotra-get-entry source "zotero")))
+    (with-temp-buffer
+      (insert json-string)
+      (goto-char (point-min))
+      (aref (json-read) 0))))
+
+
+
 ;;;; Ost
 
 ;; Shared code for structs that hold an ost.
@@ -901,17 +943,27 @@ should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
 
 ;;;; Collection
 
-(defcustom org-ilm-collections '((ilm . "~/ilm/"))
-  "Alist mapping collection name to path to its org file or directory."
-  :type '(alist :key-type symbol
-                :value-type (choice (file :tag "File")
-                                    (directory :tag "Directory")))
+(defcustom org-ilm-collections '((ilm . ((path . "~/ilm/")
+                                         (bib . "refs.bib"))))
+  "Alist mapping collection name symbol to its configuration alist.
+
+Properties:
+
+`path' (required)
+
+  The path to the collection (file or folder).
+
+`bib'
+
+  The path to the bibtex file. If missing will be named refs.bib."
+  :type '(alist :key-type symbol :value-type alist)
   :group 'org-ilm)
 
 (defvar org-ilm--active-collection nil
   "The current collection that is active.")
 
 (defun org-ilm--active-collection ()
+  "Return or infer the active collection. If missing, prompt user."
   (or org-ilm--active-collection
       (when-let ((collection (org-ilm--collection-from-context)))
         (setq org-ilm--active-collection collection))
@@ -919,14 +971,34 @@ should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
         (setq org-ilm--active-collection (car collection)))))
 
 (defun org-ilm--collection-from-context ()
+  "Infer collection based on the current buffer."
   (let ((location (org-ilm--where-am-i)))
     (pcase (car location)
-      ('collection (cadr location))
+      ('collection (cdr location))
       ('attachment (caaddr location))
       ('queue (cadr location)))))
 
+(defun org-ilm--collection-path (collection)
+  "Return path of COLLECTION."
+  (alist-get 'path (alist-get collection org-ilm-collections)))
+
+(defun org-ilm--collection-single-file-p (collection)
+  "Return t if COLLECTION is a single file collection."
+  (f-file-p (org-ilm--collection-path collection)))
+
+(defun org-ilm--collection-bib (&optional collection)
+  "Return path to bibtex file of COLLECTION."
+  (let* ((collection (or collection (org-ilm--active-collection)))
+         (conf (alist-get collection org-ilm-collections))
+         (bib (alist-get 'bib conf)))
+    (if (org-ilm--collection-single-file-p collection)
+        (cl-assert (f-absolute-p bib) nil "Path to bibtex file must be absolute")
+      (setq bib (expand-file-name (or bib "refs.bib") (alist-get 'path conf))))
+    (unless (file-exists-p bib) (make-empty-file bib))
+    bib))
+
 (defun org-ilm--collection-file (&optional file collection)
-  "Return collection of which file belongs to.
+  "Return collection of which FILE belongs to.
 A collection symbol COLLECTION can be passed to test if file belongs to
  that collection."
   (when-let ((file (or file (buffer-file-name (buffer-base-buffer))))
@@ -938,25 +1010,22 @@ A collection symbol COLLECTION can be passed to test if file belongs to
                           (not (file-in-directory-p f org-attach-id-dir)))
                        (file-equal-p f place)))))
     (if collection
-        (when-let ((col (pcase (type-of collection)
-                          ('symbol
-                           (assoc collection org-ilm-collections))
-                          ('string
-                           (seq-find
-                            (lambda (c) (file-equal-p collection (cdr c)))
-                            org-ilm-collections))
-                          ('cons collection))))
-          (when (funcall test path (cdr col)) col))
-      (seq-find (lambda (c) (funcall test path (cdr c))) org-ilm-collections))))
+        (funcall test path (org-ilm--collection-path collection))
+      (car (seq-find (lambda (c) (funcall test path (alist-get 'path (cdr c))))
+                     org-ilm-collections)))))
 
 (defun org-ilm--select-collection ()
   "Prompt user for collection to select from.
 The collections are stored in `org-ilm-collections'."
-  (org-ilm--select-alist org-ilm-collections "Collection: "))
+  (car 
+   (org-ilm--select-alist
+    (mapcar (lambda (x) (cons (car x) (alist-get 'path x)))
+            org-ilm-collections)
+    "Collection: ")))
 
 (defun org-ilm--collection-files (collection)
-  "Return all files that belong to COLLECTION."
-  (let ((file-or-dir (alist-get collection org-ilm-collections)))
+  "Return all collection org files that belong to COLLECTION."
+  (let ((file-or-dir (org-ilm--collection-path collection)))
     (cond
      ((f-file-p file-or-dir)
       (list (expand-file-name file-or-dir)))
@@ -964,21 +1033,24 @@ The collections are stored in `org-ilm-collections'."
       (directory-files file-or-dir 'full "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
-(defun org-ilm--collection-single-file-p (collection)
-  "Return t if COLLECTION is a single file collection."
-  (f-file-p (alist-get collection org-ilm-collections)))
-
 (defun org-ilm--select-collection-file (collection)
-  "Propmt user to select a file from COLLECTION."
+  "Prompt user to select a file from COLLECTION."
   (cl-assert (assoc collection org-ilm-collections))
   (let ((files (org-ilm--collection-files collection)))
     (cond
      ((= 1 (length files))
       (car files))
      ((> (length files) 1)
-      (completing-read "Collection file: " files nil 'require-match)))))
+      (let* ((col-path (org-ilm--collection-path collection))
+             ;; TODO Make it work with nested files
+             (file (completing-read
+                    "Collection file: "
+                    (mapcar #'file-name-nondirectory files)
+                    nil 'require-match)))
+        (expand-file-name file col-path))))))
 
 (defun org-ilm--collection-entries (collection)
+  "All org-mem entries in COLLECTION."
   (seq-filter
    (lambda (entry)
      (member
@@ -987,9 +1059,11 @@ The collections are stored in `org-ilm-collections'."
    (org-mem-entries-in-files (org-ilm--collection-files collection))))
 
 (defun org-ilm--collection-tags (collection)
+  "List of tags used in COLLECTION."
   (cl-remove-duplicates
    (apply #'append
-          (mapcar #'org-mem-entry-tags (org-ilm--collection-entries collection)))
+          (mapcar #'org-mem-entry-tags
+                  (org-ilm--collection-entries collection)))
    :test #'string=))
 
 
@@ -1018,7 +1092,7 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 
 (defun org-ilm--pqueue-dir (collection)
   "Return the directory path where the queue of COLLECTION is stored."
-  (when-let ((file-or-dir (alist-get collection org-ilm-collections)))
+  (when-let ((file-or-dir (org-ilm--collection-path collection)))
     (if (f-file-p file-or-dir)
         org-ilm-pqueue-data-dir
       (let ((dir (expand-file-name ".ilm/" file-or-dir)))
@@ -1578,7 +1652,7 @@ wasteful if headline does not match query."
                  (org-element-interpret-data (org-element-property :title headline)))
 
          ;; Ilm stuff
-         :collection (car (org-ilm--collection-file (buffer-file-name (buffer-base-buffer))))
+         :collection (org-ilm--collection-file)
          :sched scheduled
          :type type
          :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
@@ -2384,6 +2458,7 @@ An empty log implies a new card, so step is 0."
   (call-interactively #'org-latex-preview))
 
 
+
 ;;;; Capture
 
 ;; Logic related to creating child elements, i.e. extracts and cards.
@@ -2407,7 +2482,7 @@ Arguments are: extract id, collection")
 (cl-defstruct org-ilm-capture
   "Data for a capture (extract or card)."
   type target title id ext content props file method
-  priority scheduled template collection state
+  priority scheduled template collection state bibtex
   on-success on-abort capture-kwargs)
 
 (defun org-ilm-capture-ensure (&rest data)
@@ -2433,7 +2508,7 @@ The callback ON-ABORT is called when capture is cancelled."
     (cl-destructuring-bind
         (&key target type title id ext content props file method
               priority scheduled template state on-success on-abort
-              collection capture-kwargs) data
+              bibtex collection capture-kwargs) data
       
       (cl-assert (member type '(extract card source)))
       (unless id (setq id (org-id-new)))
@@ -2459,7 +2534,7 @@ The callback ON-ABORT is called when capture is cancelled."
               ;; Determine collection
               (when-let* ((file (org-id-find-id-file target))
                           (col (org-ilm--collection-file file)))
-                (setq collection (car col)))
+                (setq collection col))
               
               ;; Originally used the built-in 'id target, however for some reason
               ;; it sometimes finds the wrong location which messes everything
@@ -2478,7 +2553,6 @@ The callback ON-ABORT is called when capture is cancelled."
              ;; TODO Determine collection based on arbitrary target?
              ;; Maybe its ok to leave this
              (t target)))
-
       ;; Priority. We always need a priority value.
       (setq priority
             (if priority
@@ -2524,12 +2598,15 @@ The callback ON-ABORT is called when capture is cancelled."
                       (if title (concat " " title) "")
                       "%?")))
 
+      ;; Make sure there is a collection
+      (setq collection (or collection (org-ilm--active-collection)))
+
       (make-org-ilm-capture
        :target target :type type :title title :id id :ext ext
        :content content :props props :file file :method method
        :priority priority :scheduled scheduled :template template
        :state state :on-success on-success :on-abort on-abort
-       :capture-kwargs capture-kwargs))))
+       :bibtex bibtex :collection collection :capture-kwargs capture-kwargs))))
 
 (defun org-ilm--capture (&rest data)
   "Make an org capture to make a new source heading, extract, or card.
@@ -2599,7 +2676,13 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                ('card 
                 (org-ilm--card-log-new priority scheduled))
                ((or 'source 'extract)
-                (org-ilm--material-log-new priority scheduled))))
+                (org-ilm--material-log-new priority scheduled)))
+
+             ;; Store bibtex
+             (when-let ((bibtex (org-ilm-capture-bibtex capture)))
+               (write-region (mochar-utils--format-bibtex-entry bibtex) nil
+                             (org-ilm--collection-bib collection) 'append))
+             )
            :before-finalize
            (lambda ()
              ;; If this is a source header where the attachments will
@@ -2660,27 +2743,24 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                   (org-ilm-capture-capture-kwargs capture))))))
       (org-capture nil "i"))))
 
-(defun org-ilm--capture-capture (capture)
+(defun org-ilm--capture-capture (type &rest data)
   (let ((immediate-p (if org-ilm-capture-show-menu
                          current-prefix-arg
-                       (not current-prefix-arg))))
+                       (not current-prefix-arg)))
+        (capture (apply #'org-ilm-capture-ensure
+                        (org-combine-plists
+                         data (list :type type)))))
     (if immediate-p
         (org-ilm--capture capture)
       (org-ilm--capture-transient capture))))
 
 (defun org-ilm--capture-extract (&rest data)
   "Make an extract with DATA, see `org-ilm-capture-ensure'."
-  (org-ilm--capture-capture
-   (apply #'org-ilm-capture-ensure
-          (org-combine-plists
-           data (list :type 'extract)))))
+  (apply #'org-ilm--capture-capture 'extract data))
 
 (defun org-ilm--capture-cloze (&rest data)
   "Make a cloze with DATA, see `org-ilm-capture-ensure'."
-  (org-ilm--capture-capture
-   (apply #'org-ilm-capture-ensure
-          (org-combine-plists
-           data (list :type 'card)))))
+  (apply #'org-ilm--capture-capture 'card data))
 
 ;;;;; Transient
 
@@ -2707,7 +2787,12 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
   :refresh-suffixes t
   
   [:description
-   (lambda () (if (eq (org-ilm-capture-type (transient-scope)) 'card) "Cloze" "Extract"))
+   (lambda ()
+     (pcase (org-ilm-capture-type (transient-scope))
+       ('card "Cloze")
+       ('material "Extract")
+       ('source "Import")
+       (_ "Capture")))
    
    ("p" "Priority" "--priority="
     :transient transient--do-call
@@ -5614,7 +5699,7 @@ A lot of formatting code from org-ql."
   :refresh-suffixes t
   ["Ilm import"
    ("C" "Collection" org-ilm--import-transient-collection)
-   ("r" "Resource" org-ilm--import-transient-resource
+   ("r" "Resource" org-ilm--import-resource-transient
     :inapt-if-nil org-ilm--active-collection)
    ("f" "File" org-ilm--import-file-transient
     :inapt-if-nil org-ilm--active-collection)
@@ -5669,7 +5754,7 @@ A lot of formatting code from org-ql."
       (let ((args (org-ilm--import-file-transient-args)))
         (org-ilm-import-file
          (plist-get args :file)
-         (assoc org-ilm--active-collection org-ilm-collections)
+         (org-ilm--active-collection)
          (intern (plist-get args :method)))))
     :inapt-if-not
     (lambda ()
@@ -5695,7 +5780,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   "Import a file."
   (cl-assert (member method '(mv cp ln lns)))  
   (org-ilm--capture
-   :type 'source :target (car collection)
+   :type 'source :target collection
    :file file :method method :ext t))
 
 ;;;;; Media
@@ -5751,6 +5836,251 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (cl-destructuring-bind (&key source &allow-other-keys)
           (org-ilm--import-media-transient-args (transient-get-value))
         source)))])
+
+;;;;; Resource
+
+;; Generic object with citation that contains zero or more attachments. Think of:
+;; - Website article / blog post
+;; - Youtube video (media)
+;; - Paper from arxiv link or doi (paper)
+;; - Paper from local pdf file
+
+(defvar org-ilm--import-resource-data nil)
+
+(defun org-ilm--import-resource-process-source (&optional source)
+  (unless source
+    ;; TODO Support for path to pdf -> recover bibtex data (zotero-like)
+    ;; (setq source (ffap-read-file-or-url "URL/path/DOI: " nil))
+    (setq source (read-string "URL or ID: ")))
+
+  (when (and source (not (string-empty-p source)))
+    (let* ((data (org-ilm--citation-get-zotero-json source))
+           (type "resource")
+           (source-type (if (org-url-p source) 'url 'id))
+           (title (or (alist-get 'title data)
+                      (alist-get 'shortTitle data)
+                      (when (eq source-type 'url)
+                        (mochar-utils--get-page-title source))
+                      source)))
+
+      (pcase (alist-get 'itemType data)
+        ((or "preprint" "conferencePaper" "document" "journalArticle" "manuscript")
+         (setq type "paper"))
+        ((or "videoRecording" "audioRecording")
+         (setq type "media"))
+        (_ (setq type "website")))
+      
+      (list :source source :source-type source-type
+            :title title :type type :data data))))
+
+(defun org-ilm--import-resource-transient-args (&optional args)
+  (setq args (or args (transient-args 'org-ilm--import-resource-transient)))
+  (cl-destructuring-bind (&key source-type bibtex id key &allow-other-keys)
+      org-ilm--import-resource-data
+    
+    (list :source (transient-arg-value "--source=" args)
+          :source-type source-type
+          :type (transient-arg-value "--type=" args)
+          :bibtex bibtex
+          :key key
+          :id id
+
+          :paper-download (transient-arg-value "--paper-download" args)
+
+          ;; HTML Download
+          :html-download (transient-arg-value "--html-download" args)
+          :html-simplify
+          (cond
+           ((transient-arg-value "--html-simplify-to-html" args)
+            "html")
+           ((transient-arg-value "--html-simplify-to-markdown" args)
+            "markdown"))
+          :html-orgify (transient-arg-value "--html-orgify" args)
+
+          ;; Media download
+          :media-download (transient-arg-value "--media-download" args)
+          :media-template (transient-arg-value "--media-template=" args)
+          :media-audio-only (transient-arg-value "--media-audio" args)
+          :media-sub-langs (cdr (assoc "--media-subs=" args))
+          )))
+
+(transient-define-infix org-ilm--import-resource-transient-source ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :key "s"
+  :description "Source"
+  :argument "--source="
+  :always-read t
+  :allow-empty nil
+  :reader
+  (lambda (&rest _)
+    (let ((source-data (org-ilm--import-resource-process-source)))
+      (setq org-ilm--import-resource-data source-data)
+      (mochar-utils--transiet-set-target-value "t" (plist-get source-data :type))
+      (plist-get source-data :source))))
+
+(transient-define-infix org-ilm--import-resource-transient-key ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :key "ck"
+  :description
+  (lambda ()
+    (concat
+     "Key"
+     (when-let* ((key (plist-get org-ilm--import-resource-data :key))
+                 (entry (or (org-mem-entry-by-roam-ref (concat "@" key))
+                            (citar-get-entry key))))
+       (propertize " DUPLICATE" 'face 'error))))
+  :argument "--key="
+  :always-read t
+  :allow-empty nil
+  :inapt-if-not
+  (lambda () (plist-get org-ilm--import-resource-data :bibtex))
+  :reader
+  (lambda (&rest _)
+    (let ((key (read-string "Key (empty to auto-generate): "))
+          (bibtex (plist-get org-ilm--import-resource-data :bibtex)))
+      (unless (and key (not (string-empty-p key)))
+        (with-temp-buffer
+          (insert (mochar-utils--format-bibtex-entry
+                   bibtex
+                   (plist-get org-ilm--import-resource-data :key)))
+          (goto-char (point-min))
+          (setq key (ignore-errors (bibtex-generate-autokey)))
+          (unless (and key (not (string-empty-p key)))
+            (setq key (upcase (substring (org-id-uuid) 0 8))))))
+      (setf (plist-get org-ilm--import-resource-data :key) key
+            (alist-get "=key=" bibtex nil nil #'string=) key)
+      (mochar-utils--transiet-set-target-value "ck" key))))
+
+(transient-define-prefix org-ilm--import-resource-transient (scope)
+  :refresh-suffixes t
+  :value
+  (lambda ()
+    (append
+     '("--html-simplify-to-markdown" "--html-orgify")
+     (let ((id (or (plist-get org-ilm--import-resource-data :id) (org-id-new)))
+           (source (plist-get org-ilm--import-resource-data :source)))
+       (unless source
+         (setq org-ilm--import-resource-data
+               (org-ilm--import-resource-process-source))
+         (setq source (plist-get org-ilm--import-resource-data :source)))
+       (setf (plist-get org-ilm--import-resource-data :id) id)
+       (list (concat "--source=" source)
+             (concat "--key=" (plist-get org-ilm--import-resource-data :key))
+             (concat "--type=" (plist-get org-ilm--import-resource-data :type))
+             (concat "--media-template=" id ".%(ext)s")))))
+
+  ["Import Resource"
+   (org-ilm--import-resource-transient-source)
+   (:info
+    (lambda ()
+      (let ((title (plist-get org-ilm--import-resource-data :title)))
+          (propertize title 'face 'italic)))
+    :if (lambda () (plist-get org-ilm--import-resource-data :title)))
+   ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
+      :always-read t :allow-empty nil)
+   ]
+
+  ["HTML download"
+   :hide
+   (lambda ()
+     (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
+       (not (member (plist-get args :source-type) '(url)))))
+   :setup-children
+   (lambda (_)
+     (convtools--transient-html-build t t))]
+
+  ["Media download"
+   :if
+   (lambda ()
+     (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
+       (and (string= (plist-get args :type) "media")
+            (eq (plist-get args :source-type) 'url))))
+   :setup-children
+   (lambda (_)
+     (convtools--transient-media-build 'no-template))
+   ]
+
+  ["Paper download"
+   :if
+   (lambda ()
+     (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
+       (string= (plist-get args :type) "paper")))
+   ("pd" "Download" "--paper-download" :transient transient--do-call)
+   ]
+
+  ["Citation"
+   ("cc" "Add citation"
+    (lambda ()
+      (interactive)
+      ;; TODO We already save the zotero data in :data, write a function to
+      ;; transform it into bibtex
+      (let* ((args (org-ilm--import-resource-transient-args))
+             (source (plist-get args :source)))
+        (if-let* ((bibtex (org-ilm--citation-get-bibtex source 'as-alist))
+                  (key (cdr (assoc "=key=" bibtex))))
+            (progn
+              (setf (plist-get org-ilm--import-resource-data :bibtex) bibtex
+                    (plist-get org-ilm--import-resource-data :key) key)
+              (mochar-utils--transiet-set-target-value "ck" key))
+          (message "Bibtex could not be found"))))
+    :transient transient--do-call)
+   (org-ilm--import-resource-transient-key)
+   ]
+
+  ["Actions"
+   ("RET" "Import"
+    (lambda ()
+      (interactive)
+      (cl-destructuring-bind
+          (&key source source-type type bibtex key title id
+                paper-download
+                html-download html-simplify html-orgify
+                media-download media-template media-audio-only media-sub-langs)
+          (org-ilm--import-resource-transient-args)
+
+        (let ((transient-args (transient-args 'org-ilm--import-resource-transient)))
+          (org-ilm--capture-capture
+           'source
+           :target (org-ilm--active-collection)
+           :title title
+           :id id
+           :bibtex bibtex
+           :props
+           (list :ROAM_REFS (if key (concat source " @" key) source))
+           :on-success
+           (lambda (id attach-dir collection)
+             (when (or html-download media-download paper-download)
+               (make-directory attach-dir t)
+
+               (when paper-download
+                 (condition-case nil
+                     (progn
+                       (zotra-download-attachment
+                        source nil
+                        (expand-file-name (concat id ".pdf") attach-dir))
+                       (mochar-utils--org-with-point-at id
+                         (org-attach-sync)))
+                   (error (message "Failed to download paper for %s" title))))
+
+               (when html-download
+                 (convtools--transient-html-run
+                  source id attach-dir id transient-args))
+
+               (when (or media-download media-sub-langs)
+                 (convtools--transient-media-run
+                  source attach-dir id transient-args))
+               )))
+            ))))
+   ]
+
+  (interactive "P")
+  (transient-setup 'org-ilm--import-resource-transient nil nil :scope scope)
+  (mochar-utils--add-hook-once
+       'transient-post-exit-hook
+       (lambda () (setq org-ilm--import-resource-data nil)))
+  )
 
 ;;;;; Registry
 
