@@ -1461,21 +1461,21 @@ With optional INIT-DATA, create a new table with this data. See
           (org-ilm--log-data-ensure data))))))
 
 (defun org-ilm--log-log (type priority due scheduled &rest review-data)
-  "Log a new review for element with TYPE.
+  "Log a new review for element with TYPE, return the review object.
 
 SCHEDULED is the timestamp when the element was scheduled for
 review. For new elements, this should be nil.
 
 DUE is the new scheduled review timestamp."
   (cl-assert (member type '(material card)))
-  (cl-etypecase due
-    (string)
-    (ts (setq due (org-ilm--ts-format-utc-date due))))
+  (when (ts-p due)
+    (setq due (pcase type
+                ('card (org-ilm--ts-format-utc-date-maybe-time due))
+                ('material (org-ilm--ts-format-utc-date due)))))
   (let* ((timestamp (or (plist-get review-data :timestamp) (ts-now)))
          (priority (org-ilm-pqueue-parse-new-position priority))
          (rank (car priority))
-         ;; Transform rank in car to size using quantile in cdr
-         (size (round (/ rank (float (cdr priority)))))
+         (size (org-ilm-pqueue-count))
          (review-log (org-ilm--log-read)))
 
     (cl-assert (ts-p timestamp))
@@ -1493,9 +1493,10 @@ DUE is the new scheduled review timestamp."
             (org-ilm--ts-diff-rounded-days
              timestamp
              (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled))))
-    
-    (org-ilm--log-insert
-     (apply #'make-org-ilm-log-review review-data))))
+
+    (let ((review (apply #'make-org-ilm-log-review review-data)))
+      (org-ilm--log-insert review)
+      review)))
 
 
 ;;;; Types
@@ -1620,15 +1621,17 @@ wasteful if headline does not match query."
   (cl-assert (org-ilm-element-p element))
   (eq 'card (org-ilm-element-type element)))
 
-(defun org-ilm-element-last-review (element)
-  (cl-assert (org-ilm-element-p element))
-  (org-ilm--org-with-point-at (org-ilm-element-id element)
-    (pcase (org-ilm-element-type element)
-      ('material (plist-get (car (org-ilm--org-logbook-read)) :timestamp-end))
-      ('card (org-ilm--srs-last-review-timestamp)))))
+(defun org-ilm-element-last-review (element-or-id)
+  (org-ilm--org-with-point-at
+      (if (org-ilm-element-p element-or-id)
+          (org-ilm-element-id element-or-id)
+        element-or-id)
+    (when-let* ((review-log (org-ilm--log-read))
+                (last-review (car (last review-log))))
+      (ts-parse (org-ilm-log-review-timestamp last-review)))))
 
-(defun org-ilm-element-last-interval (element)
-  "Last interval in days."
+(defun org-ilm-element-interval (element)
+  "Interval in days."
   (when-let ((last-review (org-ilm-element-last-review element))
              (sched (org-ilm-element-sched element)))
     ;; Seconds to days
@@ -1941,6 +1944,48 @@ ELEMENT may be nil, in which case try to read it from point."
   (org-ilm--log-log 'material priority due scheduled
                     :duration duration :timestamp timestamp))
 
+(defun org-ilm--material-calculate-interval (priority scheduled last-review)
+  "Calculate the new scheduled interval in days."
+  (cl-assert (and (ts-p scheduled) (ts-p last-review)))
+
+  (let ((review-interval (org-ilm--ts-diff-rounded-days (ts-now) last-review)))
+    ;; If the scheduled date was adjusted to be before the last review, then see
+    ;; it as a new element and use initial interval base on priority
+    (if (< (org-ilm--ts-diff-rounded-days (ts-now) last-review) 0)
+        (org-ilm--initial-schedule-interval-from-priority priority)
+      
+      (let* ((multiplier 1.5)
+             (sched-interval (org-ilm--ts-diff-rounded-days scheduled last-review))
+             (new-interval (* sched-interval multiplier)))
+
+        ;; Reviewed earlier than scheduled. Take proportion of time from last review
+        ;; to today relative to scheduled date and use that to adjust the new
+        ;; interval.
+        (when (< review-interval sched-interval)
+          (setq new-interval
+                (+ sched-interval
+                   (* new-interval (/ (float review-interval) sched-interval)))))
+
+        (round new-interval)))))
+
+(defun org-ilm--material-review (&optional org-id duration)
+  "Apply a review on the material element.
+This will update the log table and the headline scheduled date."
+  (org-ilm--org-with-point-at org-id
+    (let* ((review-log (org-ilm--log-read))
+           (last-review (car (last review-log))))
+      (cl-assert last-review nil "Element missing log")
+      (let* ((element (org-ilm-element-at-point))
+             (scheduled (org-ilm-element-sched element))
+             (priority (org-ilm-element-priority element))
+             (interval (org-ilm--material-calculate-interval
+                        priority scheduled
+                        (ts-parse (org-ilm-log-review-timestamp last-review))))
+             (due (ts-adjust 'day interval (ts-now))))
+        (atomic-change-group
+          (org-ilm--material-log-review priority due scheduled nil duration)
+          (org-ilm--org-schedule :timestamp due :ignore-time t))))))
+
 
 ;;;; Cards
 
@@ -2007,8 +2052,8 @@ FSRS default: t"
    :maximum-interval org-ilm-card-fsrs-maximum-interval
    :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p))
 
-(defun org-ilm--card-rate (rating &optional org-id timestamp duration)
-  "Rate a card element with RATING.
+(defun org-ilm--card-review (rating &optional org-id timestamp duration)
+  "Rate a card element with RATING, update log and scheduled date.
 If ORG-ID ommitted, assume point at card headline."
   (org-ilm--org-with-point-at org-id
     (if-let* ((headline (org-ilm--org-headline-at-point))
@@ -2016,15 +2061,16 @@ If ORG-ID ommitted, assume point at card headline."
               (collection (car (org-ilm--collection-file)))
               (priority (org-ilm-pqueue-priority org-id :collection collection))
               (scheduled (org-element-property :scheduled headline)))
-        (progn
+        (atomic-change-group
           (cl-assert (eq (org-ilm-type headline) 'card))
-          (org-ilm--card-log-review
-           priority (ts-parse-org-element scheduled) rating
-           (org-ilm--card-default-scheduler)
-           timestamp duration))
+          (let ((review (org-ilm--card-log-review
+                         priority (ts-parse-org-element scheduled) rating
+                         (org-ilm--card-default-scheduler)
+                         timestamp duration)))
+            (org-ilm--org-schedule
+             :timestamp (ts-parse (org-ilm-log-review-due review)))))
       ;; TODO error message sucks
       (error "Cannot rate headline due to lacking info"))))
-
 
 ;;;;; Logging
 
@@ -2066,13 +2112,13 @@ An empty log implies a new card, so step is 0."
    :state :learning))
 
 (defun org-ilm--card-log-review (priority scheduled rating scheduler &optional timestamp duration)
-  "Log the review of a fsrs card in the ilm drawer table."
+  "Log the review of a fsrs card in the ilm drawer table, return the review object."
   (cl-assert (ts-p scheduled))
   (setq timestamp (or timestamp (ts-now)))
   (let* ((review-log (org-ilm--log-read))
          (last-review (car (last review-log)))
          card)
-    (cl-assert last-review)
+    (cl-assert last-review nil "Card missing log")
     
     (setq card
           (car
@@ -6152,8 +6198,6 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   (apply func args)
   (org-ilm--set-schedule-from-priority))
 
-;; TODO Better scheduling algorithm:
-;; Early review, etc.
 (defun org-ilm--schedule-interval-calculate (priority scheduled last-interval)
   "Calculate the new schedule interval assuming review was done today."
   (if (null last-interval)
@@ -6168,21 +6212,6 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 
 ;; TODO Turn this to function
 ;; (due (<= (/ (ts-diff scheduled (org-ilm--ts-today)) 86400) 0)))
-
-(defun org-ilm--schedule-update ()
-  "Update the scheduled date of an material element at point after review.
-
-This will update the schedule date regardless of whether the element is
-due or not."
-  (let* ((element (org-ilm-element-at-point))
-         (scheduled (org-ilm-element-sched element)))
-    (cl-assert scheduled)
-    (cl-assert (eq (org-ilm-element-type element) 'material))
-    (let ((interval-days (org-ilm--element-schedule-interval-calculate element)))
-      (cl-assert (> interval 0))
-      (org-ilm--schedule :org-id (org-ilm-element-id element)
-                         :interval-days interval-days
-                         :ignore-time t))))
 
 ;; TODO remove rely on element - just parse id
 (defun org-ilm-schedule (element timestamp)
@@ -6878,10 +6907,9 @@ Return t if already ready."
         org-ilm--review-data
       
       (when org-ilm--review-update-schedule
-        (org-ilm--org-with-point-at id
-          (if (org-ilm-element-card-p element)
-              (org-ilm--card-rate rating)
-            (org-ilm--schedule-update)))))
+        (if (org-ilm-element-card-p element)
+            (org-ilm--card-review rating id)
+          (org-ilm--material-review id))))
     
     (let ((element (org-ilm--queue-pop)))
       
