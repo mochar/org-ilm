@@ -22,7 +22,6 @@
 (require 'org-ql)
 (require 'org-ql-view)
 (require 'fsrs)
-(require 'org-srs)
 (require 'org-transclusion)
 (require 'cl-lib)
 (require 'dash)
@@ -256,13 +255,6 @@ be due starting 2am."
           (org-node-goto-id (org-mem-entry-id entry))
         (user-error "No ilm element derived from this registry entry!")))
      (_ (org-ilm-open-collection)))))
-
-(defun org-ilm-cloze-toggle-this ()
-  "Toggle cloze at point, without creating the card."
-  (interactive)
-  (if (org-ilm--srs-in-cloze-p)
-      (org-srs-item-uncloze-dwim)
-    (org-srs-item-cloze-dwim)))
 
 (defun org-ilm-extract-dwim ()
   "Extract region depending on file."
@@ -1642,11 +1634,6 @@ wasteful if headline does not match query."
            (type (org-ilm-type todo-keyword))
            (is-card (eq type 'card))
            (subject-data (org-ilm--subject-cache-gather headline))
-           ;; (scheduled (if is-card
-           ;;                ;; TODO Move this out to srs section
-           ;;                (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)
-           ;;              (when-let ((s (org-element-property :scheduled headline)))
-           ;;                (ts-parse-org-element s))))
            (scheduled (when-let ((s (org-element-property :scheduled headline)))
                         (ts-parse-org-element s)))
            (entry (org-node-at-point)))
@@ -4480,11 +4467,6 @@ See `org-ilm-attachment-transclude'."
              (priority-second (org-ilm-element-psample second)))
     (< priority-first priority-second)))
 
-(defun org-ilm--ql-card-due ()
-  "Check if org-srs earliest card due today, optimized for org-ql query."
-  (when-let ((due (org-ql--value-at (point) #'org-ilm--srs-earliest-due-timestamp)))
-    (ts<= due (ts-now))))
-
 (defun org-ilm-query-collection (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
   (unless (functionp query)
@@ -6564,10 +6546,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
     (org-ilm--org-schedule :timestamp timestamp
                            :interval-minutes interval-minutes
                            :interval-days interval-days
-                           :ignore-time ignore-time)
-    ;; If card, make sure srs table matches
-    (when (eq 'card (org-ilm-type (org-get-todo-state)))
-      (org-ilm--srs-match-timestamp-to-schedule))))
+                           :ignore-time ignore-time)))
 
 (defun org-ilm--set-schedule-from-priority ()
   "Set the schedule based on the priority."
@@ -6607,191 +6586,6 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
          (org-read-date 'with-time nil nil "Schedule: ")))
   (unless element (user-error "No ilm element at point"))
   (org-ilm--schedule :timestamp timestamp))
-
-
-;;;; SRS (org-srs)
-
-;; Integration with org-srs, now abandoned for own implementation
-
-;; TODO https://github.com/bohonghuang/org-srs/issues/30#issuecomment-2829455202
-      
-(defun org-ilm--srs-in-cloze-p ()
-  "Is point on a cloze?
-
-Just a hack by looking at code of `org-srs-item-cloze-item-at-point'."
-  (if (org-srs-item-cloze-bounds) t nil))
-
-(defun org-ilm--srs-earliest-due-timestamp ()
-  "Returns the earliest due timestamp of this headline's cards."
-  (when-let* ((items (org-srs-query-region #'always (org-entry-beginning-position) (org-entry-end-position)))
-         (due-timestamps
-          (save-excursion
-            (mapcar (lambda (item) (apply #'org-srs-item-due-timestamp item)) items))))
-    (ts-parse (apply #'org-srs-timestamp-min due-timestamps))))
-
-(defun org-ilm--srs-review-this ()
-  "Start an org-srs review session of just the heading at point.
-
-Achieves this by narrowing to subtree and calling
-`org-srs-review-start'. In the collection, cards are always the leafs of
-the hierarchy, so we don't have to worry about another srs heading being
-below it.
-
-TODO replace with org-srs-item-review as suggested by org-srs creator:
-https://github.com/bohonghuang/org-srs/issues/20#issuecomment-2816991976"
-  (org-narrow-to-subtree)
-  ;; When buffer narrows, will only review items within narrowed region.
-  (org-srs-review-start))
-
-;; TODO This returns the first item only.
-(defun org-ilm--srs-headline-item ()
-  "Return item of the org-srs card of headline at point."
-  (save-excursion
-    (org-back-to-heading)
-    (org-srs-log-beginning-of-drawer)
-    (forward-line)
-    (org-srs-item-at-point)))
-
-;; TODO This returns the first item only.
-(defun org-ilm--srs-headline-item-type ()
-  "Return the item type of the cards of this headline."
-  ;; Returns (type-info id)
-  ;; type-info can be: (cloze) (card front) (card back)
-  (car (car (org-ilm--srs-headline-item))))
-
-;; TODO This returns the first item only.
-(defun org-ilm--srs-review-rate (rating)
-  "Rate SRS item without being in review.
-
-https://github.com/bohonghuang/org-srs/issues/27#issuecomment-2830949169"
-  (org-srs-property-let ((org-srs-review-cache-p nil))
-    (apply #'org-srs-review-rate rating (org-ilm--srs-headline-item))))
-
-;; TODO This works on first item only (if item is nil)
-(defun org-ilm--srs-set-timestamp (time-or-duration &optional item)
-  "Set time, or add duration to org-srs ITEM. If nil, current heading item.
-
-Usage: (apply #'org-ilm--srs-set-timestamp (org-srs-timestamp-now) '(1 :day))
-
-Duration specification: (NUM :UNIT). For units see `org-srs-time-units'.
-
-From: `org-srs-review-postpone'"
-  (unless item (setq item (org-ilm--srs-headline-item)))
-  (save-excursion
-    (org-srs-item-with-current item
-      (setf (org-srs-item-due-timestamp) (cl-etypecase time-or-duration
-                                           (org-srs-timestamp time-or-duration)
-                                           (list (apply #'org-srs-timestamp+
-                                                        (org-srs-timestamp-max
-                                                         (org-srs-item-due-timestamp)
-                                                         (org-srs-timestamp-now))
-                                                        time-or-duration)))))))
-
-(defun org-ilm--srs-match-schedule-to-timestamp ()
-  "Set the headeline scheduled date to the due timestamp of the org-srs table."
-  (save-excursion
-    (org-back-to-heading)
-    (when-let* ((srs-ts (org-ilm--srs-earliest-due-timestamp)))
-      (org-schedule nil (ts-format "%Y-%m-%d %H:%M" srs-ts)))))
-
-(defun org-ilm--srs-match-timestamp-to-schedule ()
-  "Set the timestamp of the org-srs table to be the same date as the
-scheduel of the org headline."
-  (save-excursion
-    (org-back-to-heading)
-    (when-let* ((headline (org-ilm--org-headline-at-point))
-                (sched-element (org-element-property :scheduled headline))
-                (sched-ts (ts-parse-org-element sched-element))
-                (srs-ts (org-ilm--srs-earliest-due-timestamp)))
-      (setf (ts-second srs-ts) 0) ;; Seconds don't contribute
-      
-      ;; Headline schedule can omit time, in which case we only match on date.
-      ;; ts lib returns 0 when hour absent which is ambigous
-      (unless (org-element-property :hour-start sched-element)
-        (setf (ts-hour srs-ts) 0
-              (ts-minute srs-ts) 0))
-
-      ;; Cannot use `ts=' as it uses unix timestamp which can differ in less than
-      ;; a second.
-      (unless (string= (ts-format "%Y-%m-%d %H:%M" sched-ts)
-                       (ts-format "%Y-%m-%d %H:%M" srs-ts))
-        (org-ilm--srs-set-timestamp
-         ;; ts-format does not accept timezone
-         (format-time-string "%FT%TZ" (ts-unix sched-ts) "UTC"))))))
-    
-;; TODO Only works for first item
-(defun org-ilm--srs-table ()
-  "Return the table rows of the first srs item of the current heading."
-  (save-excursion
-    (save-restriction
-      (org-ilm--org-narrow-to-header)
-      (re-search-forward org-srs-item-regexp)
-      (forward-line)
-      (org-srs-table-lines))))
-
-(defun org-ilm--srs-last-review-timestamp ()
-  ;; TODO Only works for first item
-  (when-let* ((table (org-ilm--srs-table))
-              (last (pop table)))
-    (when (= 1 (length last))
-      (setq last (pop table)))
-    (when last
-      (ts-parse (alist-get 'timestamp last)))))
-
-;;;;; Custom org-srs types
-
-(cl-defmethod org-srs-item-review ((type (eql 'ilm-cloze)) &rest args)
-  "Exactly as the default 'cloze type, but assumes no header."
-  (cl-loop with visibility = (org-srs-item-cloze-visibility) and cloze-id-set = args
-           initially (org-srs-item-cloze-remove-overlays (point-min) (point-max))
-           ;; for cloze in (progn (org-srs-item-narrow) (org-srs-item-cloze-collect))
-           for cloze in (org-srs-item-cloze-collect)
-           for (id . (start end text hint)) = cloze
-           if (or (null cloze-id-set) (member id cloze-id-set))
-           collect (cons (org-srs-item-cloze-put-overlay
-                          start end
-                          (org-srs-item-cloze-current hint))
-                         cloze)
-           into hidden-clozes
-           else
-           do (cl-ecase visibility
-                ((nil) (org-srs-item-cloze-put-overlay start end (org-srs-item-cloze-hidden)))
-                ((t) (org-srs-item-cloze-put-overlay start end text)))
-           finally
-           (cl-loop with centeredp = (org-srs-item-cloze-centered-in-review-p)
-                    for (overlay _id start _end text _hint) in hidden-clozes
-                    do (cl-assert (overlayp overlay))
-                    unless (> (length hidden-clozes) 1)
-                    do (goto-char start)
-                    and when (cl-etypecase centeredp
-                               (boolean centeredp)
-                               (function (funcall centeredp)))
-                    do (recenter) (org-srs-item-cloze-recenter-horizontally)
-                    do (org-srs-item-add-hook-once
-                        'org-srs-item-after-confirm-hook
-                        (apply-partially #'\(setf\ org-srs-item-cloze-overlay-text\) (org-srs-item-cloze-answer text) overlay)))
-           (org-srs-item-add-hook-once
-            'org-srs-review-continue-hook
-            (apply-partially #'org-srs-item-cloze-remove-overlays (point-min) (point-max))
-            50)
-           (apply (org-srs-item-confirm) type args)))
-
-;;;;; Temporary advice
-
-;; https://github.com/bohonghuang/org-srs/issues/45
-
-(defun org-ilm--org-srs-item-goto-override (&rest args)
-  (let* ((marker (apply #'org-srs-item-marker args))
-         (buffer (marker-buffer marker)))
-    ;; (cl-assert (eq (window-buffer) (current-buffer)))
-    (unless (eq buffer (current-buffer))
-      (switch-to-buffer buffer nil t)
-      ;; (cl-assert (eq (window-buffer) buffer))
-      )
-    (cl-assert (eq (current-buffer) buffer))
-    (goto-char marker)))
-(advice-add 'org-srs-item-goto
-            :override #'org-ilm--org-srs-item-goto-override)
 
 ;;;; Subjects
 
@@ -7393,7 +7187,9 @@ needs the attachment buffer."
              (element (plist-get org-ilm--review-data :element)))
     (with-current-buffer buffer
       (when (org-ilm-element-card-p element)
-        (org-srs-item-cloze-remove-overlays (point-min) (point-max)))
+        ;; TODO Clean up card overlays
+        ;; (org-srs-item-cloze-remove-overlays (point-min) (point-max))
+        )
       (setq header-line-format nil)
       (remove-hook 'kill-buffer-hook #'org-ilm--review-confirm-quit t))
     ;; I know it doesn't make sense to clean the buffer then kill it, but better

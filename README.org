@@ -6,7 +6,7 @@ This Emacs package implements [[https://supermemo.guru/wiki/Incremental_reading]
 
 Emacs packages:
 - [[https://github.com/meedstrom/org-node][Org-node/org-mem]] to cache the nodes for quick access
-- [[https://github.com/bohonghuang/org-srs][Org-srs]] for flashcards
+- [[https://github.com/open-spaced-repetition/lisp-fsrs][Lisp-fsrs]] for flashcards
 - [[https://github.com/yuchen-lea/org-media-note][Org-media-note]] for video/audio elements
 - [[https://github.com/vedang/pdf-tools][PDF-tools]] for PDF elements
 - [[https://github.com/mpedramfar/zotra][Zotra]] to retrieve citation data
