@@ -3135,6 +3135,14 @@ TODO Cute if we can use numeric prefix to jump to that page number"
 
 ;;;;; Utilities
 
+(defun org-ilm--pdf-mode-p ()
+  "Return non-nil if current major mode is `pdf-view-mode' or `pdf-virtual-view-mode'."
+  (member major-mode '(pdf-view-mode pdf-virtual-view-mode)))
+
+(defun org-ilm--pdf-mode-assert ()
+  "Assert if not in pdf mode."
+  (cl-assert (org-ilm--pdf-mode-p) nil "Not in a PDF document"))
+
 (defun org-ilm--pdf-region-below-min-size-p (size-or-page &optional region min-size)
   "Check if normalized coordinates REGION in SIZE is less than SIZE-MAX.
 When REGION is nil, use active region.
@@ -3151,6 +3159,7 @@ When MIN-SIZE is nil, compare to `org-ilm-pdf-minimum-virtual-page-size'."
 (defmacro org-ilm--pdf-with-point-on-collection-headline (of-document &rest body)
   "Place point on the headline belonging to this PDF attachment.
 When OF-DOCUMENT non-nil, jump to headline which has the orginal document as attachment."
+  (declare (indent 1))
   `(let* ((virtual-page (pdf-view-current-page))
           (document (pdf-virtual-document-page virtual-page))
           (pdf-path (nth 0 document))
@@ -3179,13 +3188,14 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
     (insert "SCHEDULED: " schedule-str "\n")
     (insert ":PROPERTIES:\n")
     (insert (format ":ID: %s\n" org-id))
-    (insert (format ":PDF_RANGE: %s\n" range))
+    (insert (format ":ILM_PDF: %s\n" range))
     (insert ":END:\n")))
 
 (cl-defun org-ilm--pdf-image-export (filename &key region page dir)
   "Export current PDF buffer as an image.
 
 REGION: Note that if in virtual view with region, already exports that region."
+  (org-ilm--pdf-mode-assert)
   (let ((region (or region '(0 0 1 1)))
         (img-buffer (get-buffer-create "*Org Ilm PDF Image*"))
         img-type img-ext img-path)
@@ -3206,6 +3216,7 @@ REGION: Note that if in virtual view with region, already exports that region."
 (cl-defun org-ilm--pdf-path (&key directory-p)
   "Infer the path of the PDF file, regardless if in virtual or not.
 When DIRECTORY-P, return directory of the file."
+  (org-ilm--pdf-mode-assert)
   (let ((path (expand-file-name
                (if (eq major-mode 'pdf-virtual-view-mode)
                    (car (pdf-virtual-document-page 1))
@@ -3369,6 +3380,7 @@ attachment from its highlight."
     menu))
 
 ;;;;; Virtual
+
 ;; PDF range. One of:
 ;; - Page:
 ;;   number
@@ -3380,6 +3392,7 @@ attachment from its highlight."
 ;;   ((start . area) . (end . area))
 ;;   ((start . area) . end)
 ;;   (start . (end . area))
+
 (defun org-ilm--pdf-range-to-string (begin end)
   "Convert PDF page area from lisp to a string format."
   (format "(%s %s)"
@@ -3405,7 +3418,6 @@ attachment from its highlight."
 
 (defun org-ilm--pdf-parse-spec (spec)
   "Parse SPEC for viewing in virtual PDF buffers."
-  (org-ilm--debug "Spec:" spec)
   (let ((file (car spec))
         (first (cadr spec))
         (second (cddr spec))
@@ -3536,68 +3548,112 @@ view (`org-ilm--pdf-open-ranges')."
    :on-success on-success
    :on-error on-error))
 
-(defun org-ilm-pdf-convert (output-type)
+(defun org-ilm-pdf-convert ()
   "Convert PDF to another format within the same attachment.
 
 See also `org-ilm-pdf-convert-org-respect-area'."
-  (interactive
-   (list
-    (let ((options (seq-filter
-                    (lambda (option) (member (cdr option) '(text org image)))
-                    (org-ilm--invert-alist org-ilm--pdf-output-types))))
-      (cdr (assoc (completing-read "Convert to: " options nil t) options)))))
-  (unless (or (eq major-mode 'pdf-view-mode) (eq major-mode 'pdf-virtual-view-mode))
-    (user-error "Not in PDF buffer."))
+  (interactive)
+  (org-ilm--pdf-mode-assert)
   (unless (org-ilm--attachment-data)
     (user-error "Not in an attachment buffer."))
+  (org-ilm--pdf-convert-transient))
 
-  (let* ((pdf-buffer (current-buffer))
-         (org-id (file-name-base (buffer-name)))
-         (headline (org-ilm--org-headline-element-from-id org-id))
-         (num-pages (pdf-info-number-of-pages))
-         (document-page-1 (pdf-virtual-document-page 1))
-         (pdf-path (expand-file-name (car document-page-1)))
-         (region (nth 2 document-page-1))
-         (attach-dir (file-name-directory pdf-path))
-         (out-path-format (expand-file-name (concat org-id ".%s") attach-dir))
-         (on-success
-          (lambda ()
-            (when (yes-or-no-p "Conversion finished. Use as main attachment?")
-              (org-with-point-at headline
-                (org-entry-put nil "ILM_EXT" "org"))))))
+(defun org-ilm--pdf-convert-transient-format ()
+  (when-let* ((args (or (transient-get-value) (transient-args transient-current-command)))
+              (format (car (remove "main" args))))
+    (intern format)))
 
-    (pcase output-type
+(transient-define-prefix org-ilm--pdf-convert-transient ()
+  :refresh-suffixes t
+  :value '("image")
+  
+  ["PDF Convert"
+   ("f" "Format" "%s"
+    :class transient-switches
+    :transient transient--do-call
+    :allow-empty nil
+    :always-read t
+    :choices ("image" "org" "text")
+    :argument-format "%s"
+    :argument-regexp "\\(\\(image\\|org\\|text\\)\\)")
+   (:info
+    (lambda ()
+      (propertize
+       (pcase (org-ilm--pdf-convert-transient-format)
+         ('org "Convert to Org file with Marker")
+         ('text "Extract text to Org file")
+         ('image "Convert this page to an image")
+         (_ ""))
+       'face 'transient-key-noop))
+    :if org-ilm--pdf-convert-transient-format)
+
+   ("m" "Main" "main" :transient transient--do-call)
+   (:info (propertize "Use as main attachment of this element" 'face 'transient-key-noop))
+   ]
+  
+  [
+   ("RET" "Convert"
+    (lambda ()
+      (interactive)
+      (let* ((args (transient-args transient-current-command))
+             (main-p (member "main" args))
+             (format (org-ilm--pdf-convert-transient-format)))
+        (org-ilm--pdf-convert format main-p)))
+    :inapt-if-not org-ilm--pdf-convert-transient-format)
+   ]
+  )
+
+(defun org-ilm--pdf-convert (format &optional as-main-p)
+  "Convert current PDF buffer into FORMAT."
+  (cl-assert (member format '(org text image)))
+  (pcase-let* ((pdf-buffer (current-buffer))
+               (`(,org-id ,collection) (org-ilm--attachment-data))
+               (headline (org-ilm--org-headline-element-from-id org-id))
+               (num-pages (pdf-info-number-of-pages))
+               ;; This will only return if in virtual page
+               (`(,pdf-path ,_ ,region) (ignore-errors (pdf-virtual-document-page 1)))
+               (pdf-path (or pdf-path buffer-file-name))
+               (attach-dir (file-name-directory pdf-path))
+               (out-path-format (expand-file-name (concat org-id ".%s") attach-dir))
+               (on-success
+                (lambda ()
+                  (when as-main-p
+                    (org-with-point-at headline
+                      (org-entry-put nil "ILM_EXT" "org"))))))
+
+    (pcase format
       ('text
        (with-temp-buffer
          (dolist (page (number-sequence 1 num-pages))
            (insert (pdf-info-gettext page '(0 0 1 1) nil pdf-buffer)))
          (write-region (point-min) (point-max) (format out-path-format "org")))
        (funcall on-success))
+      ('image
+       ;; Note: Will convert current page only
+       (org-ilm--pdf-image-export org-id :dir attach-dir)
+       (funcall on-success))
       ('org
        ;; Decide on whether to convert just the virtual pdf region or the entire
        ;; page.
-       (if (and (eq major-mode 'pdf-virtual-view-mode)
-                (= 1 num-pages) region
-                org-ilm-pdf-convert-org-respect-area)
+       (if (and region (= 1 num-pages) org-ilm-pdf-convert-org-respect-area)
            (org-ilm--image-convert-attachment-to-org
             (org-ilm--pdf-image-export org-id :dir attach-dir)
             org-id
             :on-success
             (lambda (proc buf id) (funcall on-success)))
-         (org-ilm--pdf-convert-attachment-to-org
-          pdf-path
-          (if (= 1 num-pages)
-              (1- (nth 1 (pdf-virtual-document-page 1)))
-            (cons (1- (nth 1 (pdf-virtual-document-page 1)))
-                  (1- (nth 1 (pdf-virtual-document-page num-pages)))))
-          org-id
-          :on-success
-          (lambda (proc buf id) (funcall on-success)))))
-      ('image
-       (unless (= 1 num-pages)
-         (user-error "Can only convert a single-paged document to an image."))
-       (org-ilm--pdf-image-export org-id :dir attach-dir)
-       (funcall on-success)))))
+         (when (or (<= num-pages 3)
+                   (yes-or-no-p (format "Convert %s pages to Org using Marker?" num-pages)))
+           (org-ilm--pdf-convert-attachment-to-org
+            pdf-path
+            (if (= 1 num-pages)
+                (1- (org-ilm--pdf-page-normalized))
+              (cons (1- (org-ilm--pdf-page-normalized 1))
+                    (1- (org-ilm--pdf-page-normalized num-pages))))
+            org-id
+            :on-success
+            (lambda (proc buf id) (funcall on-success)))))))))
+
+
 
 ;;;;; Extract
 
@@ -4165,6 +4221,40 @@ missing, something else is wrong, so throw an error."
        :beta (plist-get org-ilm--data :beta)
        :a (car update-params)
        :b (cdr update-params)))))
+
+;;;;; Transient
+
+(defun org-ilm-attachment-actions ()
+  "Open menu with actions to be applied on current element attachment."
+  (interactive)
+  (if (eq (car (org-ilm--where-am-i)) 'attachment)
+      (org-ilm--attachment-transient)
+    (user-error "Not in an element attachment!")))
+
+(transient-define-prefix org-ilm--attachment-transient ()
+  ["Attachment"
+   (:info*
+    (lambda ()
+      (propertize
+       (org-ilm-element-title (org-ilm-element-from-context))
+       'face 'italic)))
+   ]
+  
+  [
+   ("x" "Extract" org-ilm-extract
+    :inapt-if
+    (lambda ()
+      (pcase major-mode
+        ('org-mode (not (region-active-p)))
+        ((or 'pdf-view-mode 'pdf-virtual-view-mode))
+        (_ t))))
+   ("c" "Cloze" org-ilm-cloze
+    :inapt-if-not-mode org-mode)
+   ("s" "Split" org-ilm-org-split
+    :inapt-if-not-mode org-mode)
+   ]
+  )
+
 
 ;;;; Transclusion
 
