@@ -580,7 +580,7 @@ Parse the OUTPUT string from:
     (nreverse result)))
 
 (cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs audio-only-p no-download working-dir on-success &allow-other-keys)
-  "yt-dlp
+  "Download media from url using yt-dlp.
 
 SUB-LANGS may also be 'all' to download all subtitles."
   (unless (and process-id url (or (xor output-path output-dir) sub-langs))
@@ -619,16 +619,22 @@ SUB-LANGS may also be 'all' to download all subtitles."
          (output-path (list "-o" output-path))
          (filename-template (list  "-o" filename-template "--no-download"))
          (t (list "--no-download")))
-        (when audio-only-p
-          (list "-x"))
-        (when no-download
-          (list "--no-download"))
+        (when audio-only-p '("-x"))
+        (when no-download '("--no-download"))
         (when sub-langs
           (append '("--write-sub" "--sub-lang") (list (string-join sub-langs ","))))
-       ))))))
+        )
+       :on-success
+       (lambda (proc buf id)
+         (when on-success
+           (funcall on-success proc buf id output-path)))
+       )))))
 
 
 ;;;; Conversions view
+
+(defconst convtools--conversions-buffer-name
+  "*convtools conversions*")
 
 (defvar-keymap convtools-conversions-map
   :doc "Keymap for the conversions view."
@@ -648,7 +654,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
   "SPC" #'convtools-conversions-goto
   "RET" #'convtools-conversions-buffer-open
   "d" #'convtools-conversions-buffer-delete
-  "B" #'convtools-conversions-ibuffer)
+  "B" #'convtools-conversions-ibuffer
+  "g" #'convtools-conversions-revert)
 
 (defun convtools-conversions-goto ()
   "View element of object at point in collection."
@@ -665,7 +672,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
   "Kill buffer of object at point."
   (interactive)
   (when (yes-or-no-p "Kill buffer?")
-    (kill-buffer (plist-get (vtable-current-object) :buffer))))
+    (kill-buffer (plist-get (vtable-current-object) :buffer))
+    (convtools-conversions-revert)))
 
 (defun convtools-conversions-ibuffer ()
   "Open conversion buffers in ibuffer."
@@ -709,6 +717,17 @@ SUB-LANGS may also be 'all' to download all subtitles."
     ('success (propertize "Success" 'face 'success))
     ('busy (propertize "Busy" 'face 'italic))))
 
+(defun convtools-conversions-revert ()
+  (interactive)
+  (cond
+   ((not (string= (buffer-name) convtools--conversions-buffer-name))
+    (user-error "Not in conversions buffer"))
+   ((convtools--conversions)
+    (vtable-revert-command))
+   (t
+    (kill-buffer convtools--conversions-buffer-name)
+    (message "No conversions found!"))))
+
 (defun convtools--conversions-make-vtable ()
   "Build conversions view vtable."
   (make-vtable
@@ -734,15 +753,21 @@ SUB-LANGS may also be 'all' to download all subtitles."
 (defun convtools-conversions ()
   "Open the conversions view."
   (interactive)
-  (let ((buf (get-buffer-create "*ilm conversions*")))
-    (with-current-buffer buf
-      (setq-local buffer-read-only nil)
-      (erase-buffer)
-      (goto-char (point-min))
-      (vtable-insert (convtools--conversions-make-vtable))
-      (setq-local buffer-read-only t)
-      (goto-char (point-min)))
-    (switch-to-buffer buf)))
+  (let ((buf (get-buffer-create convtools--conversions-buffer-name))
+        (conversions (convtools--conversions)))
+    (cond
+     (conversions
+      (with-current-buffer buf
+        (setq-local buffer-read-only nil)
+        (erase-buffer)
+        (goto-char (point-min))
+        (vtable-insert (convtools--conversions-make-vtable))
+        (setq-local buffer-read-only t)
+        (goto-char (point-min)))
+      (switch-to-buffer buf))
+     (t
+      (kill-buffer buf)
+      (message "No conversions found!")))))
 
 ;;;; Org headings
 
@@ -1002,7 +1027,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
        (transient-parse-suffix 'transient--prefix suffix))
      suffixes)))
 
-(defun convtools--transient-media-run (url output-dir id transient-args)
+(defun convtools--transient-media-run (url output-dir id transient-args &optional on-success)
   "Convert a media URL to a local video file."
   (let* ((download (transient-arg-value "--media-download" transient-args))
          (template (transient-arg-value "--media-template=" transient-args))
@@ -1018,10 +1043,12 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :sub-langs sub-langs
      :no-download (not download)
      :on-success
-     (lambda (proc buf id)
+     (lambda (proc buf id output-path)
        (message "[Convtools] Media conversion completed: %s" url)
        (mochar-utils--org-with-point-at id
-         (org-attach-sync))))))
+         (org-attach-sync)
+         (when on-success
+           (funcall on-success id output-path)))))))
 
         
 

@@ -126,7 +126,8 @@ be due starting 2am."
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim
-  "g" #'org-ilm-registry)
+  "g" #'org-ilm-registry
+  "b" #'org-ilm-bibliography)
 
 ;; TODO This autoload doesnt work. Problem because i need this var in dir-locals.
 ;;;###autoload
@@ -279,6 +280,17 @@ be due starting 2am."
   "Open collection registry."
   (interactive)
   (org-registry-open))
+
+(defun org-ilm-bibliography ()
+  (interactive)
+  (if-let ((path (org-ilm--collection-bib)))
+      (let ((key (ignore-errors
+                   (car (mochar-utils--org-mem-cite-refs)))))
+        (with-current-buffer (find-file path)
+          (goto-char (point-min))
+          (when (re-search-forward key nil t)
+            (beginning-of-line))))
+    (user-error "Path to bibliography not found")))
   
 ;;;; Utilities
 
@@ -1794,13 +1806,18 @@ ELEMENT may be nil, in which case try to read it from point."
   (let ((position (org-ilm-pqueue-select-position (org-ilm-element-priority element))))
     (org-ilm-element-priority element :rank (car position))))
 
-(defun org-ilm-element-delete (element)
+(defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
   (interactive
    (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
   (cl-assert (org-ilm-element-p element) nil "Not an ilm element")
 
-  (when (and (called-interactively-p) (org-attach-dir))
+  (when (called-interactively-p)
+    (org-mark-subtree)
+    (unless (yes-or-no-p "Delete element?")
+      (user-error "Abort deletion")))
+    
+  (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
     (cond-let*
       ((org-entry-get nil "DIR")
        (when (yes-or-no-p "Delete attachment directory?")
@@ -1977,16 +1994,37 @@ ELEMENT may be nil, in which case try to read it from point."
      :transient transient--do-call)
     ]
 
+  ["Attachment"
+   ("as" "Set attachment"
+    (lambda ()
+      (interactive)
+      (let* ((attach-dir (org-attach-dir))
+             (attachments (org-attach-file-list attach-dir))
+             (attachment (completing-read "Attachment: " attachments nil t)))
+        (rename-file (expand-file-name attachment attach-dir)
+                     (expand-file-name
+                      (concat (org-id-get-create) "." (file-name-extension attachment))
+                      attach-dir)))))
+   ]
+
   ["Open"
-   ("SPC" "Collection"
+   ("oc" "Collection"
     (lambda ()
       (interactive)
       (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
-   ("RET" "Attachment"
+   ("oa" "Attachment"
     (lambda ()
       (interactive)
       (org-ilm-element-with-point-at org-ilm--element-transient-element
         (org-ilm-open-attachment))))
+   ]
+
+  ["Actions"
+   ("D" "Delete"
+    (lambda ()
+      (interactive)
+      (org-ilm-element-with-point-at org-ilm--element-transient-element
+        (call-interactively #'org-ilm-element-delete))))
    ]
   )
 
@@ -2132,7 +2170,7 @@ If ORG-ID ommitted, assume point at card headline."
   (org-ilm--org-with-point-at org-id
     (if-let* ((headline (org-ilm--org-headline-at-point))
               (org-id (org-id-get))
-              (collection (car (org-ilm--collection-file)))
+              (collection (org-ilm--collection-file))
               (priority (org-ilm-pqueue-priority org-id :collection collection))
               (scheduled (org-element-property :scheduled headline)))
         (atomic-change-group
@@ -2647,7 +2685,6 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              (org-entry-put nil "ID" id)
              ;; Also trigger org-mem to update cache
              ;; (save-buffer)
-             (org-node-nodeify-entry)
              ;; (org-mem-updater-ensure-id-node-at-point-known)
 
              ;; Add id to priority queue. An abort is detected in
@@ -2693,7 +2730,9 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              (when (eq type 'source)
                (org-entry-put
                 nil "DIR"
-                (abbreviate-file-name (org-attach-dir-get-create))))
+                (file-relative-name
+                 (org-attach-dir-get-create)
+                 (file-name-directory (org-ilm--collection-path collection)))))
              
              (when-let ((file (org-ilm-capture-file capture))
                         (method (org-ilm-capture-method capture)))
@@ -2985,15 +3024,17 @@ A cloze is made automatically of the element at point or active region."
 ;; Media attachments are actually just org attachmnets with a ILM_MEDIA property.
 
 (defun org-ilm--source-recover (source element-id &optional registry-id)
+  "Return path to media attachment or its url."
   (cond-let*
     ((org-url-p source) source)
-    ([attach-dir (mapcan
+    ((file-exists-p source) source)
+    ([attach-dir (seq-some
                   (lambda (id)
                     (when id 
                       (org-ilm--org-with-point-at id
                         (when-let ((attach-dir (org-attach-dir)))
                           (when (member source (org-attach-file-list attach-dir))
-                            attach-dir)))))
+                            (expand-file-name attach-dir))))))
                   (list element-id registry-id))]
      (expand-file-name source attach-dir))))
 
@@ -3001,6 +3042,7 @@ A cloze is made automatically of the element at point or active region."
   (org-media-note--split-link media))
 
 (defun org-ilm--media-compile (entry)
+  "Return (source start end)"
   (let ((media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry))
         (media2 (org-mem-entry-property-with-inheritance "ILM_MEDIA+" entry)))
     (when media
@@ -3012,6 +3054,7 @@ A cloze is made automatically of the element at point or active region."
           (concat source (when start (concat "#" start (when end (concat "-" end))))))))))
 
 (defun org-ilm--media-open (&optional entry)
+  "Open the media of ENTRY (or at point) with `org-media-note'."
   (when-let* ((entry (or entry (org-node-at-point)))
               (media (org-ilm--media-compile entry)))
     (cl-destructuring-bind (source start end)
@@ -4012,8 +4055,8 @@ This is used to keep track of changes in priority and scheduling.")
        (run-hook-with-args 'org-attach-open-hook path)
        (find-file path)))
     ;; Check if headline represents a virtual view of a parent PDF element by
-    ;; looking at the PDF_RANGE property.
-    ([pdf-range (org-entry-get nil "PDF_RANGE")]
+    ;; looking at the ILM_PDF property.
+    ([pdf-range (org-entry-get nil "ILM_PDF")]
      ;; Returns 0 if not a number
      [pdf-page-maybe (string-to-number pdf-range)]
      [attachment (org-ilm--attachment-find-ancestor "pdf")]
@@ -5380,7 +5423,7 @@ A lot of formatting code from org-ql."
          ((ignore-errors (progn (org-id-goto id) t))
           (org-mark-subtree)
           (when (funcall confirm-p "Delete element?")
-            (call-interactively #'org-ilm-element-delete)
+            (org-ilm-element-delete (org-ilm-element-at-point) 'warn-attach)
             (funcall delete-id id)))
          (t
           (switch-to-buffer queue-buffer)
@@ -5875,7 +5918,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
 (defun org-ilm--import-resource-transient-args (&optional args)
   (setq args (or args (transient-args 'org-ilm--import-resource-transient)))
-  (cl-destructuring-bind (&key source-type bibtex id key &allow-other-keys)
+  (cl-destructuring-bind (&key source-type bibtex id key title &allow-other-keys)
       org-ilm--import-resource-data
     
     (list :source (transient-arg-value "--source=" args)
@@ -5884,6 +5927,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           :bibtex bibtex
           :key key
           :id id
+          :title title
 
           :paper-download (transient-arg-value "--paper-download" args)
 
@@ -5901,8 +5945,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           :media-download (transient-arg-value "--media-download" args)
           :media-template (transient-arg-value "--media-template=" args)
           :media-audio-only (transient-arg-value "--media-audio" args)
-          :media-sub-langs (cdr (assoc "--media-subs=" args))
-          )))
+          :media-sub-langs (cdr (assoc "--media-subs=" args)))))
 
 (transient-define-infix org-ilm--import-resource-transient-source ()
   :class 'transient-option
@@ -5958,7 +6001,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   :value
   (lambda ()
     (append
-     '("--html-simplify-to-markdown" "--html-orgify")
+     '("--html-simplify-to-markdown" "--html-orgify"
+       "--media-template=%(title)s.%(ext)s")
      (let ((id (or (plist-get org-ilm--import-resource-data :id) (org-id-new)))
            (source (plist-get org-ilm--import-resource-data :source)))
        (unless source
@@ -5969,7 +6013,11 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
        (list (concat "--source=" source)
              (concat "--key=" (plist-get org-ilm--import-resource-data :key))
              (concat "--type=" (plist-get org-ilm--import-resource-data :type))
-             (concat "--media-template=" id ".%(ext)s")))))
+             ;; Don't want media filename to be org-id as I rely on ILM_MEDIA
+             ;; prop to point to media. The dedicated attachment is the org file
+             ;; in media elements
+             ;; (concat "--media-template=" id ".%(ext)s")
+             ))))
 
   ["Import Resource"
    (org-ilm--import-resource-transient-source)
@@ -5986,7 +6034,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
    :hide
    (lambda ()
      (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
-       (not (member (plist-get args :source-type) '(url)))))
+       (or (not (eq (plist-get args :source-type) 'url))
+           (string= (plist-get args :type) "media"))))
    :setup-children
    (lambda (_)
      (convtools--transient-html-build t t))]
@@ -5999,7 +6048,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
             (eq (plist-get args :source-type) 'url))))
    :setup-children
    (lambda (_)
-     (convtools--transient-media-build 'no-template))
+     (convtools--transient-media-build))
    ]
 
   ["Paper download"
@@ -6047,6 +6096,10 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            :title title
            :id id
            :bibtex bibtex
+           ;; Create an org attachment when downloading media for note
+           ;; taking. HTML download is inactive when type is media, so no clash
+           ;; with org file generated by it.
+           :content (when media-download "")
            :props
            (list :ROAM_REFS (if key (concat source " @" key) source))
            :on-success
@@ -6070,7 +6123,11 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
                (when (or media-download media-sub-langs)
                  (convtools--transient-media-run
-                  source attach-dir id transient-args))
+                  source attach-dir id transient-args
+                  (lambda (id output-path)
+                    (org-entry-put nil "ILM_MEDIA" (file-name-nondirectory output-path))
+                    )
+                  ))
                )))
             ))))
    ]
@@ -6079,8 +6136,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (transient-setup 'org-ilm--import-resource-transient nil nil :scope scope)
   (mochar-utils--add-hook-once
        'transient-post-exit-hook
-       (lambda () (setq org-ilm--import-resource-data nil)))
-  )
+       (lambda () (setq org-ilm--import-resource-data nil))))
 
 ;;;;; Registry
 
@@ -6516,7 +6572,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 (defun org-ilm--set-schedule-from-priority ()
   "Set the schedule based on the priority."
   (when-let* ((id (org-id-get))
-              (collection (car (org-ilm--collection-file)))
+              (collection (org-ilm--collection-file))
               (priority (org-ilm-pqueue-priority
                          id :collection collection))
               (interval-days (org-ilm--initial-schedule-interval-from-priority

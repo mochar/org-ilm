@@ -136,6 +136,13 @@ save-excursion."
 (defun mochar-utils--org-mem-website-refs (&optional entry)
   (mochar-utils--org-mem-refs entry '("http" "https")))
 
+(defun mochar-utils--org-mem-cite-refs (&optional entry)
+  (seq-keep
+   (lambda (ref)
+     (when (s-starts-with-p "@" ref)
+       (substring ref 1)))
+   (mochar-utils--org-mem-refs entry)))
+
 ;; TODO this doesnt properly take care of inherited properties
 ;; https://github.com/meedstrom/org-mem/issues/31
 (defun mochar-utils--org-mem-update-cache-after-capture (extent)
