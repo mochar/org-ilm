@@ -2013,7 +2013,7 @@ ELEMENT may be nil, in which case try to read it from point."
        (interactive)
        (let* ((element org-ilm--element-transient-element)
               (entry (org-ilm-element-entry element))
-              (parts (org-ilm--media-parse (org-ilm--media-compile entry)))
+              (parts (org-ilm--media-compile entry))
               (range (read-string "Range: "
                                   (when (stringp (nth 1 parts))
                                     (if (stringp (nth 2 parts))
@@ -2913,7 +2913,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
     (lambda ()
       (interactive)
       (org-ilm--capture-transient-capture)))
-   ("C" "  Capture with buffer"
+   ("M-RET" "Capture with buffer"
     (lambda ()
       (interactive)
       (org-ilm--capture-transient-capture 'with-buffer-p)))
@@ -3100,7 +3100,8 @@ A cloze is made automatically of the element at point or active region."
                   (list element-id registry-id))]
      (expand-file-name source attach-dir))))
 
-(defun org-ilm--media-parse (media)
+(defun org-ilm--media-prop-parse (media)
+  "Parse the ILM_MEDIA property MEDIA and return (source start end)."
   (org-media-note--split-link media))
 
 (defun org-ilm--media-compile (entry)
@@ -3108,19 +3109,18 @@ A cloze is made automatically of the element at point or active region."
   (let ((media (org-mem-entry-property-with-inheritance "ILM_MEDIA" entry))
         (media2 (org-mem-entry-property-with-inheritance "ILM_MEDIA+" entry)))
     (when media
-      (cl-destructuring-bind (source start end) (org-ilm--media-parse media)
+      (cl-destructuring-bind (source start end) (org-ilm--media-prop-parse media)
         (cl-destructuring-bind (start2 end2) (or (ignore-errors (split-string media2 "-"))
                                                  '(nil nil))
           (setq start (or start2 start)
                 end (if start2 end2 end))
-          (concat source (when start (concat "#" start (when end (concat "-" end))))))))))
+          (list source start end))))))
 
 (defun org-ilm--media-open (&optional entry)
   "Open the media of ENTRY (or at point) with `org-media-note'."
   (when-let* ((entry (or entry (org-node-at-point)))
               (media (org-ilm--media-compile entry)))
-    (cl-destructuring-bind (source start end)
-        (org-ilm--media-parse media)
+    (cl-destructuring-bind (source start end) media
       (setq source (org-ilm--source-recover
                     source (org-mem-entry-id entry)
                     (org-mem-entry-property-with-inheritance "REGISTRY" entry)))
@@ -3141,6 +3141,61 @@ A cloze is made automatically of the element at point or active region."
         (setq end (match-string-no-properties 0))))
     (when start (if end (concat start "-" end) start))))
 
+;;;;; Custom link
+
+(defconst org-ilm-media-link "ilmmedia")
+
+(defun org-ilm--media-link-folow (link)
+  (if-let* ((element-id (car (org-ilm--attachment-data)))
+            (entry (org-mem-entry-by-id element-id))
+            (source (car (org-ilm--media-compile entry))))
+      (pcase-let* ((`(,start ,end) (string-split link "-")))
+        ;; (string-match org-timer-re start)
+        (org-media-note--follow-link source start end))
+    (user-error "Cannot find element or its ILM_MEDIA property")))
+
+(org-link-set-parameters
+ org-ilm-media-link
+ :follow #'org-ilm--media-link-folow
+ )
+
+;;;;; Org-media-note advice
+
+;; Advice org-media-note to use our link type when inserting
+
+(defun org-ilm--advice--org-media-note--link (&rest r)
+  (pcase-let* ((`(,file-path ,filename ,timestamp) (org-media-note--current-media-info))
+               (link-type org-ilm-media-link))
+    (if (org-media-note--ab-loop-p)
+        ;; ab-loop link
+        (let ((time-a (org-media-note--seconds-to-timestamp (mpv-get-property "ab-loop-a")))
+              (time-b (org-media-note--seconds-to-timestamp (mpv-get-property "ab-loop-b"))))
+          (format "[[%s:%s-%s][%s]]"
+                  link-type
+                  time-a
+                  time-b
+                  (org-media-note--link-formatter org-media-note-ab-loop-link-format
+                                                  `(("filename" . ,filename)
+                                                    ("ab-loop-a" . ,time-a)
+                                                    ("ab-loop-b" . ,time-b)
+                                                    ("file-path" . ,file-path)))))
+      ;; timestamp link
+      (format "[[%s:%s][%s]]"
+              link-type
+              timestamp
+              (org-media-note--link-formatter org-media-note-timestamp-link-format
+                                              `(("filename" . ,filename)
+                                                ("timestamp" . ,timestamp)
+                                                ("file-path" . ,file-path)))))))
+
+(defun org-ilm--ilm-hook-media ()
+  (if org-ilm-global-minor-mode
+      (advice-add #'org-media-note--link
+                  :override #'org-ilm--advice--org-media-note--link)
+    (advice-remove #'org-media-note--link
+                   #'org-ilm--advice--org-media-note--link)))
+
+(add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--ilm-hook-media)
 
 ;;;; PDF attachment
 
