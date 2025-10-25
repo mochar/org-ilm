@@ -1926,54 +1926,82 @@ ELEMENT may be nil, in which case try to read it from point."
 (transient-define-prefix org-ilm--element-transient ()
   :refresh-suffixes t
   [:description
-   (lambda () (org-ilm-element-title org-ilm--element-transient-element))
+   (lambda ()
+     (pcase (org-ilm-element-type org-ilm--element-transient-element)
+       ('material "Material")
+       ('card "Card")
+       (_ "Element")))
+   (:info*
+    (lambda ()
+      (propertize
+       (org-ilm-element-title org-ilm--element-transient-element)
+       'face 'italic)))
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
    ]
 
-  ["Registry"
-   :if (lambda () (org-ilm-element-registry org-ilm--element-transient-element))
-   ("gj" "Jump"
-    (lambda ()
-      (interactive)
-      (org-node-goto-id (org-ilm-element-registry org-ilm--element-transient-element))))
-   ("ga" "Attach..." org-ilm--element-transient-registry-attach
-    :inapt-if-not
-    (lambda ()
-      (org-ilm--org-with-point-at
-          (org-ilm-element-registry org-ilm--element-transient-element)
-        (org-attach-dir))))
-   ]
+  [
+   ["Attachment"
+    ("as" "Set"
+     (lambda ()
+       (interactive)
+       (let* ((attach-dir (org-attach-dir))
+              (attachments (org-attach-file-list attach-dir))
+              (attachment (completing-read "Attachment: " attachments nil t)))
+         (rename-file (expand-file-name attachment attach-dir)
+                      (expand-file-name
+                       (concat (org-id-get-create) "." (file-name-extension attachment))
+                       attach-dir)))))
+    ("ao" "Open"
+     (lambda ()
+       (interactive)
+       (org-ilm-element-with-point-at org-ilm--element-transient-element
+         (org-ilm-open-attachment))))
+    ]
 
-  ["Media"
-   ("ms" "Set"
-    (lambda ()
-      (interactive)
-      (let* ((element org-ilm--element-transient-element)
-             (id (org-ilm-element-id element))
-             (entry (org-mem-entry-by-id id))
-             (registry-entry (org-mem-entry-by-id (org-ilm-element-registry element)))
-             (element-medias (org-ilm--entry-media-sources entry))
-             (registry-medias (org-ilm--entry-media-sources registry-entry))
-             (choice (consult--multi
-                      (list
+   ["Registry"
+    :if (lambda () (org-ilm-element-registry org-ilm--element-transient-element))
+    ("gj" "Jump"
+     (lambda ()
+       (interactive)
+       (org-node-goto-id (org-ilm-element-registry org-ilm--element-transient-element))))
+    ("ga" "Attach..." org-ilm--element-transient-registry-attach
+     :inapt-if-not
+     (lambda ()
+       (org-ilm--org-with-point-at
+           (org-ilm-element-registry org-ilm--element-transient-element)
+         (org-attach-dir))))
+    ]
+
+   ["Media"
+    ("ms" "Set"
+     (lambda ()
+       (interactive)
+       (let* ((element org-ilm--element-transient-element)
+              (id (org-ilm-element-id element))
+              (entry (org-mem-entry-by-id id))
+              (registry-entry (org-mem-entry-by-id (org-ilm-element-registry element)))
+              (element-medias (org-ilm--entry-media-sources entry))
+              (registry-medias (org-ilm--entry-media-sources registry-entry))
+              (choice (consult--multi
                        (list
-                        :name "Element"
-                        :narrow ?e
-                        :items element-medias
-                        :action #'message)
-                       (list
-                        :name "Registry"
-                        :narrow ?r
-                        :items registry-medias
-                        :action #'message))
-                      :require-match t
-                      :prompt "Media: "))
-             (media (car choice)))
-        (org-ilm--org-with-point-at id
-          (org-entry-put nil "ILM_MEDIA" media)
-          (save-buffer))))
-    :transient transient--do-call)
+                        (list
+                         :name "Element"
+                         :narrow ?e
+                         :items element-medias
+                         :action #'message)
+                        (list
+                         :name "Registry"
+                         :narrow ?r
+                         :items registry-medias
+                         :action #'message))
+                       :require-match t
+                       :prompt "Media: "))
+              (media (car choice)))
+         (org-ilm--org-with-point-at id
+           (org-entry-put nil "ILM_MEDIA" media)
+           (save-buffer))))
+     :transient transient--do-call)
     ("mo" "Open"
      (lambda ()
        (interactive)
@@ -2000,38 +2028,35 @@ ELEMENT may be nil, in which case try to read it from point."
      :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
      :transient transient--do-call)
     ]
-
-  ["Attachment"
-   ("as" "Set attachment"
-    (lambda ()
-      (interactive)
-      (let* ((attach-dir (org-attach-dir))
-             (attachments (org-attach-file-list attach-dir))
-             (attachment (completing-read "Attachment: " attachments nil t)))
-        (rename-file (expand-file-name attachment attach-dir)
-                     (expand-file-name
-                      (concat (org-id-get-create) "." (file-name-extension attachment))
-                      attach-dir)))))
-   ]
-
-  ["Open"
-   ("oc" "Collection"
-    (lambda ()
-      (interactive)
-      (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
-   ("oa" "Attachment"
-    (lambda ()
-      (interactive)
-      (org-ilm-element-with-point-at org-ilm--element-transient-element
-        (org-ilm-open-attachment))))
    ]
 
   ["Actions"
-   ("D" "Delete"
-    (lambda ()
-      (interactive)
-      (org-ilm-element-with-point-at org-ilm--element-transient-element
-        (call-interactively #'org-ilm-element-delete))))
+   [
+    ("o" "Open"
+     (lambda ()
+       (interactive)
+       (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
+    ("D" "Delete"
+     (lambda ()
+       (interactive)
+       (org-ilm-element-with-point-at org-ilm--element-transient-element
+         (call-interactively #'org-ilm-element-delete))))
+    ]
+   [
+    ("C" "New card"
+     (lambda ()
+       (interactive)
+       (org-ilm--capture-cloze
+        :target (org-ilm-element-id org-ilm--element-transient-element)
+        :content "")
+       ))
+    ("X" "New extract"
+     (lambda ()
+       (interactive)
+       (org-ilm--capture-extract
+        :target (org-ilm-element-id org-ilm--element-transient-element)
+        :content "")))
+    ]
    ]
   )
 
@@ -2636,13 +2661,6 @@ The callback ON-ABORT is called when capture is cancelled."
                     temporary-file-directory)
               method 'cp))
 
-      (unless template
-        (setq template
-              (format "* %s%s %s"
-                      state
-                      (if title (concat " " title) "")
-                      "%?")))
-
       ;; Make sure there is a collection
       (setq collection (or collection (org-ilm--active-collection)))
 
@@ -2663,6 +2681,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
          (collection (org-ilm-capture-collection capture))
          (scheduled (org-ilm-capture-scheduled capture))
          (priority (org-ilm-capture-priority capture))
+         (template (org-ilm-capture-template capture))
          capture-kwargs
          attach-dir) ; Will be set in :hook, and passed to on-success
 
@@ -2672,6 +2691,16 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
     ;; TODO set MUSTBENEW to t?
     (when-let ((content (org-ilm-capture-content capture)))
       (write-region content nil (org-ilm-capture-file capture)))
+
+    ;; If no explicit template is set, build it from title and state
+    (unless template
+      (let ((title (org-ilm-capture-title capture))
+            (state (org-ilm-capture-state capture)))
+        (setq template
+              (format "* %s%s %s"
+                      state
+                      (if title (concat " " title) "")
+                      "%?"))))
 
     (setq capture-kwargs
           (list
@@ -2785,7 +2814,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                  (list
                   "i" "Import" 'entry
                   (org-ilm-capture-target capture)
-                  (org-ilm-capture-template capture))
+                  template)
                  (org-combine-plists
                   capture-kwargs
                   (org-ilm-capture-capture-kwargs capture))))))
@@ -2817,6 +2846,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
          (args (if transient-current-command
                    (transient-args transient-current-command)
                  (transient-get-value)))
+         (title (transient-arg-value "--title=" args))
          (capture (transient-arg-value "--capture" args))
          (rank (transient-arg-value "--priority=" args))
          (scheduled (transient-arg-value "--scheduled=" args)))          
@@ -2829,7 +2859,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (setq rank (1- (string-to-number rank)))
       (setq rank (org-ilm-capture-priority (transient-scope))))
 
-    (list rank scheduled capture)))
+    (list title rank scheduled capture)))
 
 (transient-define-prefix org-ilm--capture-transient (scope)
   :refresh-suffixes t
@@ -2841,7 +2871,18 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
        ('material "Extract")
        ('source "Import")
        (_ "Capture")))
-   
+
+   ("t" "Title" "--title="
+    :transient transient--do-call
+    :always-read t
+    :allow-empty nil
+    :reader
+    (lambda (&rest _)
+      (let* ((cur-title (nth 0 (org-ilm--capture-transient-values)))
+             (title (read-string "Title: " cur-title)))
+        (if (string-empty-p title)
+            cur-title
+          title))))
    ("p" "Priority" "--priority="
     :transient transient--do-call
     :class transient-option
@@ -2855,7 +2896,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (number-to-string (1+ (car priority))))))
    (:info
     (lambda ()
-      (let ((rank (car (org-ilm--capture-transient-values))))
+      (let ((rank (nth 1 (org-ilm--capture-transient-values))))
         (org-ilm--ost-format-position (org-ilm-pqueue) rank))))
    ("s" "Scheduled" "--scheduled="
     :transient transient--do-call
@@ -2864,7 +2905,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
       (org-read-date 'with-time nil nil "Schedule: ")))
    (:info
     (lambda ()
-      (let ((scheduled (cadr (org-ilm--capture-transient-values))))
+      (let ((scheduled (nth 2 (org-ilm--capture-transient-values))))
         (ts-format "%Y-%m-%d %H:%M" scheduled))))
    ("c" "Capture" "--capture")
    (:info "Open in capture buffer")
@@ -2874,17 +2915,22 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
    ("RET" "Capture"
     (lambda ()
       (interactive)
-      (cl-destructuring-bind (rank scheduled capture-p)
+      (cl-destructuring-bind (title rank scheduled capture-p)
           (org-ilm--capture-transient-values)
         (let ((capture (transient-scope)))
           (setf (org-ilm-capture-priority capture) rank
                 (org-ilm-capture-scheduled capture) scheduled
+                (org-ilm-capture-title capture) title
                 (org-ilm-capture-capture-kwargs capture) (list :immediate-finish (not capture-p)))
           (org-ilm--capture capture)))))
    ]
 
   (interactive)
-  (transient-setup 'org-ilm--capture-transient nil nil :scope scope))
+  (transient-setup 'org-ilm--capture-transient
+                   nil nil :scope scope
+                   :value (append
+                           (when-let ((title (org-ilm-capture-title scope)))
+                             (list (concat "--title=" title))))))
 
 
 
