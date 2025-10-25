@@ -2847,7 +2847,6 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                    (transient-args transient-current-command)
                  (transient-get-value)))
          (title (transient-arg-value "--title=" args))
-         (capture (transient-arg-value "--capture" args))
          (rank (transient-arg-value "--priority=" args))
          (scheduled (transient-arg-value "--scheduled=" args)))          
 
@@ -2859,7 +2858,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (setq rank (1- (string-to-number rank)))
       (setq rank (org-ilm-capture-priority (transient-scope))))
 
-    (list title rank scheduled capture)))
+    (list title rank scheduled)))
 
 (transient-define-prefix org-ilm--capture-transient (scope)
   :refresh-suffixes t
@@ -2907,22 +2906,17 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
     (lambda ()
       (let ((scheduled (nth 2 (org-ilm--capture-transient-values))))
         (ts-format "%Y-%m-%d %H:%M" scheduled))))
-   ("c" "Capture" "--capture")
-   (:info "Open in capture buffer")
    ]
 
   [
    ("RET" "Capture"
     (lambda ()
       (interactive)
-      (cl-destructuring-bind (title rank scheduled capture-p)
-          (org-ilm--capture-transient-values)
-        (let ((capture (transient-scope)))
-          (setf (org-ilm-capture-priority capture) rank
-                (org-ilm-capture-scheduled capture) scheduled
-                (org-ilm-capture-title capture) title
-                (org-ilm-capture-capture-kwargs capture) (list :immediate-finish (not capture-p)))
-          (org-ilm--capture capture)))))
+      (org-ilm--capture-transient-capture)))
+   ("C" "  Capture with buffer"
+    (lambda ()
+      (interactive)
+      (org-ilm--capture-transient-capture 'with-buffer-p)))
    ]
 
   (interactive)
@@ -2931,6 +2925,17 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                    :value (append
                            (when-let ((title (org-ilm-capture-title scope)))
                              (list (concat "--title=" title))))))
+
+(defun org-ilm--capture-transient-capture (&optional with-buffer-p)
+  (cl-destructuring-bind (title rank scheduled)
+      (org-ilm--capture-transient-values)
+    (let ((capture (transient-scope))
+          (capture-kwargs (list :immediate-finish (not with-buffer-p))))
+      (setf (org-ilm-capture-priority capture) rank
+            (org-ilm-capture-scheduled capture) scheduled
+            (org-ilm-capture-title capture) title
+            (org-ilm-capture-capture-kwargs capture) capture-kwargs)
+      (org-ilm--capture capture))))
 
 
 
