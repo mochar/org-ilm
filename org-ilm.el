@@ -1994,6 +1994,16 @@ ELEMENT may be nil, in which case try to read it from point."
        (interactive)
        (org-ilm-element-with-point-at org-ilm--element-transient-element
          (org-ilm-open-attachment))))
+    ("ad" "Dired"
+     (lambda ()
+       (interactive)
+       (let* ((element org-ilm--element-transient-element)
+              (id (org-ilm-element-id element))
+              attach-dir)
+         (org-ilm-element-with-point-at element
+           (setq attach-dir (org-attach-dir)))
+         (unless attach-dir (user-error "No attachment directory"))
+         (find-name-dired attach-dir (concat id "*")))))
     ]
 
    ["Registry"
