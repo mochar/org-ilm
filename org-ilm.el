@@ -1769,6 +1769,7 @@ wasteful if headline does not match query."
           (org-ql-select (list (current-buffer))
             `(and
               (property "ID")
+              (not (property "ID" ,id))
               (property "ILM_PDF")
               (or ,(cons 'todo org-ilm-material-states)
                   ,(cons 'todo org-ilm-card-states)))
@@ -3407,6 +3408,17 @@ When DIRECTORY-P, return directory of the file."
     (set-window-hscroll (selected-window) hscroll)
     (set-window-vscroll (selected-window) vscroll pixel-scroll-p)))
 
+(defun org-ilm--pdf-data ()
+  "Return list with some data about the current PDF attachment."
+  (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
+                  (org-ilm--pdf-mode-p)))
+  (pcase-let* ((`(,_ ,org-id ,collection) (org-ilm--where-am-i))
+               (pdf-path (org-ilm--pdf-path))
+               (attach-dir (file-name-directory pdf-path))
+               (headline (org-ilm--org-headline-element-from-id org-id)))
+    (cl-assert headline nil "Collection element not found")
+    (list org-id attach-dir pdf-path collection headline)))
+
 ;;;;; Data
 ;; Like outline and stuff
 
@@ -3497,16 +3509,17 @@ When not specified, REGION is active region."
 (defvar-local org-ilm--pdf-captures nil)
 
 (defun org-ilm--pdf-gather-captures ()
-  "Return alist (element-id . spec) for all child elements of PDF element."
+  "Return list of elements (id type spec) for all child elements of PDF element."
   (pcase-let* ((`(,id ,collection ,file) (org-ilm--attachment-data))
                (captures (org-ilm--element-children id 'headline)))
     (seq-keep
      (lambda (headline)
        (when-let* ((id (org-element-property :ID headline))
+                   (type (org-ilm-type headline))
                    (range (org-element-property :ILM_PDF headline))
                    (range (org-ilm--pdf-range-from-string range))
                    (spec (org-ilm--pdf-parse-spec (cons nil range))))
-         (cons id spec)))
+         (list id type spec)))
      captures)))
 
 (defun org-ilm--pdf-captures (&optional reparse-p)
@@ -3515,13 +3528,13 @@ When not specified, REGION is active region."
       (setq-local org-ilm--pdf-captures
                   (org-ilm--pdf-gather-captures))))
 
-(defun org-ilm--pdf-page-captured-specs (&optional page)
+(defun org-ilm--pdf-page-captures (&optional page)
   "Return all specs in or part of PAGE."
   (setq page (or page (org-ilm--pdf-page-normalized)))
   (seq-filter
-   (lambda (spec)
+   (lambda (capture)
      (cl-destructuring-bind (&key begin-page end-page &allow-other-keys)
-         (cdr spec)
+         (nth 2 capture)
        (or (and (not end-page) (= begin-page page))
            (and end-page (<= begin-page page end-page)))))
    (org-ilm--pdf-captures)))
@@ -3558,14 +3571,17 @@ See :map in info node `(elisp) Image Descriptors'
 
 See `pdf-annot-create-hotspots', `pdf-annot-hotspot-function', and
 buffer-local `pdf-view--hotspot-functions'."
-  (mapcar
+  (seq-keep
    (lambda (capture)
-     (let* ((id (car capture))
-            (region (cdr capture))
-            (id-symb (intern (format "ilm-pdf-capture-%s" id)))
-            ;; Scale relative coords to pixel coords
-            (e (pdf-util-scale region size 'round)))
-       
+     (when-let* ((id (nth 0 capture))
+                 (type (nth 1 capture))
+                 (spec (nth 2 capture))
+                 ((eq (plist-get spec :type) 'area-page))
+                 (region (plist-get spec :begin-area))
+                 (id-symb (intern (format "ilm-pdf-capture-%s" id)))
+                 ;; Scale relative coords to pixel coords
+                 (e (pdf-util-scale region size 'round)))
+
        ;; Bind the mouse click event for this ID to our handler
        (local-set-key
         (vector id-symb 'mouse-1)
@@ -3584,10 +3600,41 @@ buffer-local `pdf-view--hotspot-functions'."
        (list
         `(rect . ((,(nth 0 e) . ,(nth 1 e))
                   . (,(nth 2 e) . ,(nth 3 e))))
-         id-symb
-         (list 'pointer 'hand
-               'help-echo (format "My Custom Highlight %s" id)))))
+        id-symb
+        (list 'pointer 'hand
+              'help-echo (format "My Custom Highlight %s" id)))))
    captures))
+
+(defun org-ilm--pdf-info-renderpage-captures (page width captures &optional file-or-buffer)
+  "Render PDF PAGE as image with CAPTURES highlighted."
+  ;; To create the image we call `pdf-info-renderpage' at the end. It accepts a
+  ;; list of commands that it goes through sequantilally and applies. The
+  ;; important commands are setting the current style (:alpha :background
+  ;; :foreground) and creating a highlight (:highlight-region).
+  (let* ((cmds (list :alpha org-ilm-pdf-highlight-alpha))
+         (capture-cmds
+          (lambda (captures color)
+            (apply #'append
+                   cmds
+                   (list :background color :foreground color)
+                   (seq-keep
+                    (lambda (capture)
+                      (when (eq (plist-get (nth 2 capture) :type) 'area-page)
+                        (list :highlight-region (plist-get (nth 2 capture) :begin-area ))))
+                    captures)))))
+    
+    (when-let* ((extracts (seq-filter (lambda (c) (eq (nth 1 c) 'material)) captures))
+                (color (face-background 'org-ilm-face-extract))
+                (color (color-darken-name color 10.)))
+      (setq cmds (funcall capture-cmds extracts color)))
+
+    (when-let* ((clozes (seq-filter (lambda (c) (eq (nth 1 c) 'card)) captures))
+                (color (face-background 'org-ilm-face-card))
+                (color (color-darken-name color 10.)))
+      (setq cmds (funcall capture-cmds clozes color)))
+    
+    (apply #'pdf-info-renderpage
+           page width file-or-buffer cmds)))
 
 ;; Advice `pdf-view-create-page' to add highlights for our captures. The
 ;; function is responsible for generating an image of the PDF. During this
@@ -3595,59 +3642,43 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; which we intercept to add our capture highlights. Alternative was calling
 ;; `pdf-view-display-region' to create the regions but it gets overwritten as
 ;; soon as the image needs to be generated again.
-(progn
-  (defun org-ilm--advice--pdf-view-create-page (page &optional window)
-    (let* ((specs (org-ilm--pdf-page-captured-specs))
-           ;; Alist: capture-id -> region
-           (captures (seq-keep
-                      (lambda (spec)
-                        (cl-destructuring-bind
-                            (&key type begin-area &allow-other-keys)
-                            (cdr spec)
-                          (when (eq type 'area-page)
-                            (cons (car spec) begin-area))))
-                      (org-ilm--pdf-page-captured-specs)))
-           (regions (mapcar #'cdr captures))
-           
-           ;; Replicate logic from pdf-view-display-region
-           (size (pdf-view-desired-image-size page window))
-           (width (car size))
-           (hotspots (append
-                      (org-ilm--pdf-create-highlight-hotspots captures size)
-                      ;; Standard hotspots for eg PDF annotations
-                      (pdf-view-apply-hotspot-functions window page size)))
-           (color (face-background 'org-ilm-face-extract))
-           (color (color-darken-name color 10.))
-           (colors (cons color color))
-           
-           ;; Call the low-level renderer with highlight data
-           (data (pdf-info-renderpage-highlight
-                  page width nil
-                  ;; Format: (FILL-COLOR STROKE-COLOR ALPHA REGION1 REGION2 ...)
-                  `(,(car colors) ,(cdr colors)
-                    ,org-ilm-pdf-highlight-alpha ,@regions))))
+(defun org-ilm--advice--pdf-view-create-page (page &optional window)
+  (let* ((captures (org-ilm--pdf-page-captures))
+         
+         ;; Replicate logic from pdf-view-display-region
+         (size (pdf-view-desired-image-size page window))
+         (width (car size))
+         (hotspots (append
+                    (org-ilm--pdf-create-highlight-hotspots captures size)
+                    ;; Standard hotspots for eg PDF annotations
+                    (pdf-view-apply-hotspot-functions window page size)))
+         
+         ;; Call the low-level renderer with highlight data
+         (data (org-ilm--pdf-info-renderpage-captures
+                page width captures)))
 
-      ;; This is just a small wrapper around emacs' `create-image'.
-      ;; The properties that are passed can be found in (C-x C-e):
-      ;;      (info "(elisp) Image Descriptors")
-      (pdf-view-create-image data
-        :width width
-        :rotation (or pdf-view--current-rotation 0)
-        :map hotspots
-        :pointer 'arrow)))
+    ;; This is just a small wrapper around emacs' `create-image'.
+    ;; The properties that are passed can be found in (C-x C-e):
+    ;;      (info "(elisp) Image Descriptors")
+    (pdf-view-create-image data
+      :width width
+      :rotation (or pdf-view--current-rotation 0)
+      :map hotspots
+      :pointer 'arrow)))
 
-  (defun org-ilm--ilm-hook-pdf ()
-    (if org-ilm-global-minor-mode
-        (advice-add #'pdf-view-create-page
-                    :override #'org-ilm--advice--pdf-view-create-page)
-      (advice-remove #'pdf-view-create-page
-                     #'org-ilm--advice--pdf-view-create-page)))
+(defun org-ilm--ilm-hook-pdf ()
+  (if org-ilm-global-minor-mode
+      (advice-add #'pdf-view-create-page
+                  :override #'org-ilm--advice--pdf-view-create-page)
+    (advice-remove #'pdf-view-create-page
+                   #'org-ilm--advice--pdf-view-create-page)))
 
-  (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--ilm-hook-pdf))
+(add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--ilm-hook-pdf)
   
 
-;;;;; Annotation highlight (deprecated?)
+;;;;; Annotation highlight
 
+;; Deprecated?
 ;; Previously I saved captures as annotations within the PDF file to let
 ;; pdf-view render them for me. I don't like this because:
 ;;   1. It doesn't reflect the current state of the captures, i.e. when I remove
@@ -4020,22 +4051,11 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     ('region (org-ilm-pdf-region-extract output-type))
     ('section (org-ilm-pdf-section-extract output-type))))
 
-(defun org-ilm--pdf-extract-prepare ()
-  "Groundwork to do an extract."
-  (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
-                  (org-ilm--pdf-mode-p)))
-  (pcase-let* ((`(,_ ,org-id ,collection) (org-ilm--where-am-i))
-               (pdf-path (org-ilm--pdf-path))
-               (attach-dir (file-name-directory pdf-path))
-               (headline (org-ilm--org-headline-element-from-id org-id)))
-    (cl-assert headline nil "Collection element not found")
-    (list org-id attach-dir pdf-path collection headline)))
-
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'page)))
   (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-extract-prepare))
+                (org-ilm--pdf-data))
                (current-page (pdf-view-current-page))
                (current-page-real (org-ilm--pdf-page-normalized))
                (extract-org-id (org-id-new)))
@@ -4084,7 +4104,7 @@ set only (not let)."
   (cl-assert (pdf-view-active-region-p) nil "No active region")
   
   (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-extract-prepare))
+                (org-ilm--pdf-data))
                (extract-org-id (org-id-new))
                (current-page (pdf-view-current-page))
                (current-page-real (org-ilm--pdf-page-normalized))
@@ -4158,7 +4178,7 @@ set only (not let)."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'section)))
 
   (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-extract-prepare))
+                (org-ilm--pdf-data))
                (extract-org-id (org-id-new))
                (pdf-buffer (current-buffer))
                ;; TODO pass orginial file if in virtual
@@ -4242,7 +4262,7 @@ set only (not let)."
   "Split PDF outline items into a extracts."
   (interactive)
   (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-extract-prepare))
+                (org-ilm--pdf-data))
                (outline (org-ilm--pdf-outline-get)))
     (unless outline (error "No outline found"))
     (setq x outline)
