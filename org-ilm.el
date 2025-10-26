@@ -267,8 +267,7 @@ be due starting 2am."
     (cond
      ((eq major-mode 'org-mode)
       (call-interactively #'org-ilm-org-extract))
-     ((or (eq major-mode 'pdf-view-mode)
-          (eq major-mode 'pdf-virtual-view-mode))
+     ((org-ilm--pdf-mode-p)
       (call-interactively #'org-ilm-pdf-extract)))
     (user-error "Extracts can only be made from within an attachment")))
 
@@ -3328,20 +3327,36 @@ When MIN-SIZE is nil, compare to `org-ilm-pdf-minimum-virtual-page-size'."
     (or (< region-width (car min-size))
         (< region-height (cdr min-size)))))
 
+(cl-defun org-ilm--pdf-path (&key directory-p)
+  "Infer the path of the PDF file, regardless if in virtual or not.
+When DIRECTORY-P, return directory of the file."
+  (org-ilm--pdf-mode-assert)
+  (let ((path (expand-file-name
+               (if (eq major-mode 'pdf-virtual-view-mode)
+                   (car (pdf-virtual-document-page 1))
+                 buffer-file-name))))
+    (if directory-p
+        (file-name-directory path)
+      path)))
+
+(defun org-ilm--pdf-data ()
+  "Return list with some data about the current PDF attachment."
+  (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
+                  (org-ilm--pdf-mode-p)))
+  (pcase-let* ((`(,_ ,org-id ,collection) (org-ilm--where-am-i))
+               (pdf-path (org-ilm--pdf-path))
+               (attach-dir (file-name-directory pdf-path))
+               (headline (org-ilm--org-headline-element-from-id org-id)))
+    (cl-assert headline nil "Collection element not found")
+    (list org-id attach-dir pdf-path collection headline)))
+
 (defmacro org-ilm--pdf-with-point-on-collection-headline (of-document &rest body)
   "Place point on the headline belonging to this PDF attachment.
 When OF-DOCUMENT non-nil, jump to headline which has the orginal document as attachment."
   (declare (indent 1))
-  `(let* ((virtual-page (pdf-view-current-page))
-          (document (pdf-virtual-document-page virtual-page))
-          (pdf-path (nth 0 document))
-          (page (nth 1 document))
-          (region (nth 2 document)))
-     ;; TODO use org-ilm--attachment-data
-     (when-let* ((org-id (file-name-base (if ,of-document pdf-path (buffer-name))))
-                 (headline (org-ilm--org-headline-element-from-id org-id)))
-       (org-with-point-at headline
-         ,@body))))
+  `(when-let ((headline (nth 4 (org-ilm--pdf-data))))
+     (org-with-point-at headline
+       ,@body)))
 
 (cl-defun org-ilm--pdf-image-export (filename &key region page dir)
   "Export current PDF buffer as an image.
@@ -3364,18 +3379,6 @@ REGION: Note that if in virtual view with region, already exports that region."
       (write-region (point-min) (point-max) img-path))
     (kill-buffer img-buffer)
     img-path))
-
-(cl-defun org-ilm--pdf-path (&key directory-p)
-  "Infer the path of the PDF file, regardless if in virtual or not.
-When DIRECTORY-P, return directory of the file."
-  (org-ilm--pdf-mode-assert)
-  (let ((path (expand-file-name
-               (if (eq major-mode 'pdf-virtual-view-mode)
-                   (car (pdf-virtual-document-page 1))
-                 buffer-file-name))))
-    (if directory-p
-        (file-name-directory path)
-      path)))
 
 (defun org-ilm-pdf-virtual-refresh ()
   "Refresh the virtual document."
@@ -3407,20 +3410,6 @@ When DIRECTORY-P, return directory of the file."
     ;; depends on the rendered image size.
     (set-window-hscroll (selected-window) hscroll)
     (set-window-vscroll (selected-window) vscroll pixel-scroll-p)))
-
-(defun org-ilm--pdf-data ()
-  "Return list with some data about the current PDF attachment."
-  (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
-                  (org-ilm--pdf-mode-p)))
-  (pcase-let* ((`(,_ ,org-id ,collection) (org-ilm--where-am-i))
-               (pdf-path (org-ilm--pdf-path))
-               (attach-dir (file-name-directory pdf-path))
-               (headline (org-ilm--org-headline-element-from-id org-id)))
-    (cl-assert headline nil "Collection element not found")
-    (list org-id attach-dir pdf-path collection headline)))
-
-;;;;; Data
-;; Like outline and stuff
 
 (defun org-ilm--pdf-outline-get (&optional file-or-buffer full-p)
   "Parse outline of the PDF in FILE-OR-BUFFER or current buffer.
@@ -3526,6 +3515,32 @@ When not specified, REGION is active region."
           region)))
      (t (error "Not in a PDF buffer")))))
 
+(defun org-ilm--pdf-region-denormalized (region &optional virtual-page)
+  "Given a region with coords relative to full page, transform them to be
+relative to virtual page.
+
+If VIRTUAL-PAGE is omitted, use the current virtual page."
+  (org-ilm--pdf-mode-assert)
+  (if (eq major-mode 'pdf-view-mode)
+      region
+
+    (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
+           (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
+      (if page-region
+          (pcase-let* ((`(,LE ,TO ,RI ,BO) page-region)
+                       (`(,le ,to ,ri ,bo) region)
+                       (w (- RI LE))
+                       (h (- BO TO)))
+            ;; Inverse of normalization:
+            ;; full = LE + rel_virtual * w
+            ;; rel_virtual = (full - LE) / w
+            (list (/ (- le LE) w)
+                  (/ (- to TO) h)
+                  (/ (- ri LE) w)
+                  (/ (- bo TO) h)))
+        ;; No subregion (whole page shown)
+        region))))
+
 ;;;;; Capture highlights
 
 (defvar-local org-ilm--pdf-captures nil)
@@ -3599,7 +3614,8 @@ buffer-local `pdf-view--hotspot-functions'."
                  (type (nth 1 capture))
                  (spec (nth 2 capture))
                  ((eq (plist-get spec :type) 'area-page))
-                 (region (plist-get spec :begin-area))
+                 (region (org-ilm--pdf-region-denormalized
+                          (plist-get spec :begin-area)))
                  (id-symb (intern (format "ilm-pdf-capture-%s" id)))
                  ;; Scale relative coords to pixel coords
                  (e (pdf-util-scale region size 'round)))
@@ -3645,7 +3661,7 @@ buffer-local `pdf-view--hotspot-functions'."
                     (lambda (capture)
                       (when (eq (plist-get (nth 2 capture) :type) 'area-page)
                         (list :highlight-region
-                              (org-ilm--pdf-region-normalized
+                              (org-ilm--pdf-region-denormalized
                                (plist-get (nth 2 capture) :begin-area)))))
                     captures)))))
     
@@ -4038,8 +4054,6 @@ See also `org-ilm-pdf-convert-org-respect-area'."
             :on-success
             (lambda (proc buf id) (funcall on-success)))))))))
 
-
-
 ;;;;; Extract
 
 (defun org-ilm--pdf-extract-prompt-for-output-type (extract-option)
@@ -4133,7 +4147,8 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (extract-org-id (org-id-new))
                (current-page (pdf-view-current-page))
                (current-page-real (org-ilm--pdf-page-normalized))
-               (region (org-ilm--pdf-region-normalized))
+               (region (org-ilm--pdf-active-region))
+               (region-normalized (org-ilm--pdf-region-normalized region))
                (region-text (car (pdf-view-active-region-text)))
                (pdf-buffer (current-buffer))
                (title
@@ -4149,15 +4164,14 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                  :id extract-org-id
                  ;; Add PDF region so that it can be rendered in pdf page even
                  ;; when extracting as eg image
-                 :props (list :ILM_PDF (cons current-page-real region))))
+                 :props (list :ILM_PDF (cons current-page-real region-normalized))))
                (capture-on-success))
 
-    (when (org-ilm--pdf-region-below-min-size-p current-page region)
+    (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
       (user-error "Region smaller than minimum size. Try extracting as text or image."))
 
     (pcase output-type
       ('virtual
-       ;; (setf (plist-get capture-data :props) (list :ILM_PDF (cons current-page-real region)))
        )
       ('text
        (setf (plist-get capture-data :content) region-text
@@ -4174,7 +4188,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (org-ilm--image-convert-attachment-to-org
                 ;; TODO this shouldnt be the normalized region i think
                 (org-ilm--pdf-image-export
-                 extract-org-id :region region :dir attach-dir)
+                 extract-org-id :region region-normalized :dir attach-dir)
                 extract-org-id))))
       (_ (error "Unrecognized output type")))
 
