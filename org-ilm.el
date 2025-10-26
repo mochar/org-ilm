@@ -3479,10 +3479,32 @@ When not specified, PAGE is current page."
       (nth 1 (pdf-virtual-document-page page)))
      (t (error "Not in a PDF buffer")))))
 
+(defun org-ilm--pdf-active-region ()
+  "If region select, return first region, if text select, return bounding box."
+  (interactive)
+  (if pdf-view--have-rectangle-region
+      (car (pdf-view-active-region))
+    (pcase-let* ((boxes (pdf-info-getselection
+                         (pdf-view-current-page)
+                         (car (pdf-view-active-region))))
+                 (`(,min-l ,min-t ,max-r ,max-b) (car boxes)))
+      
+      (unless boxes
+        (error "Selection does not contain any text"))
+      
+      (dolist (box (seq-subseq boxes 1))
+        (cl-destructuring-bind (L T R B) box
+          (setq min-l (min min-l L))
+          (setq min-t (min min-t T))
+          (setq max-r (max max-r R))
+          (setq max-b (max max-b B))))
+      
+      (list min-l min-t max-r max-b))))
+
 (defun org-ilm--pdf-region-normalized (&optional region virtual-page)
   "If in virtual mode, maps virtual REGION to document region, else return as is.
 When not specified, REGION is active region."
-  (let ((region (or region (car (pdf-view-active-region)))))
+  (let ((region (or region (org-ilm--pdf-active-region))))
     (cond
      ((eq major-mode 'pdf-view-mode) region)
      ((eq major-mode 'pdf-virtual-view-mode)
@@ -3504,7 +3526,7 @@ When not specified, REGION is active region."
           region)))
      (t (error "Not in a PDF buffer")))))
 
-;;;;; Extract highlight
+;;;;; Capture highlights
 
 (defvar-local org-ilm--pdf-captures nil)
 
@@ -3587,7 +3609,9 @@ buffer-local `pdf-view--hotspot-functions'."
         (vector id-symb 'mouse-1)
         (lambda ()
           (interactive)
-          (message "woooow: %s" id-symb)))
+          (when-let ((entry (org-mem-entry-by-id id)))
+            (message "%s: %s" (org-mem-entry-todo-state entry)
+                     (org-mem-entry-title entry)))))
 
        (local-set-key
         (vector id-symb 'down-mouse-3)
@@ -3602,7 +3626,7 @@ buffer-local `pdf-view--hotspot-functions'."
                   . (,(nth 2 e) . ,(nth 3 e))))
         id-symb
         (list 'pointer 'hand
-              'help-echo (format "My Custom Highlight %s" id)))))
+              'help-echo (format "Capture: %s" id)))))
    captures))
 
 (defun org-ilm--pdf-info-renderpage-captures (page width captures &optional file-or-buffer)
@@ -3620,7 +3644,9 @@ buffer-local `pdf-view--hotspot-functions'."
                    (seq-keep
                     (lambda (capture)
                       (when (eq (plist-get (nth 2 capture) :type) 'area-page)
-                        (list :highlight-region (plist-get (nth 2 capture) :begin-area ))))
+                        (list :highlight-region
+                              (org-ilm--pdf-region-normalized
+                               (plist-get (nth 2 capture) :begin-area)))))
                     captures)))))
     
     (when-let* ((extracts (seq-filter (lambda (c) (eq (nth 1 c) 'material)) captures))
@@ -4094,12 +4120,11 @@ See also `org-ilm-pdf-convert-org-respect-area'."
            :on-success
            (lambda (proc buf id) (message "Conversion finished.")))))))))
 
+;; TODO When extracting text, use add-variable-watcher to watch for changes in
+;; pdf-view-active-region as it has no hooks. it allow buffer local and set only
+;; (not let).
 (defun org-ilm-pdf-region-extract (output-type)
-  "Turn selected PDF region into an extract.
-
-TODO When extracting text, use add-variable-watcher to watch for changes
-in pdf-view-active-region as it has no hooks. it allow buffer local and
-set only (not let)."
+  "Turn selected PDF region into an extract."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'region)))
   (cl-assert (pdf-view-active-region-p) nil "No active region")
   
@@ -4169,6 +4194,8 @@ set only (not let)."
                (when capture-on-success
                  (funcall capture-on-success))
                (org-ilm--pdf-captures 'reparse)
+               (pdf-view-deactivate-region)
+               (pdf-view-redisplay)
                (when (eq major-mode 'pdf-virtual-view-mode)
                  (org-ilm-pdf-virtual-refresh)))
              capture-data))))
