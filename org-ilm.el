@@ -3913,15 +3913,30 @@ attachment from its highlight."
 (defun org-ilm--pdf-open-virtual (&optional no-region)
   "Open virtual page given by ILM_PDF spec, return buffer if found."
   (when-let* ((el-type (ignore-errors (org-ilm-type)))
-              (pdf-range (save-excursion
-                           (when (eq el-type 'card)
-                             (org-up-heading 1))
-                           (org-entry-get nil "ILM_PDF")))
+              (pdf-range (org-entry-get nil "ILM_PDF"))
               (attachment (org-ilm--attachment-find-ancestor "pdf"))
               (spec (org-ilm--pdf-parse-spec
                      (org-ilm--pdf-range-from-string pdf-range)
                      attachment))
               (buffer-name (concat (org-id-get) ".pdf")))
+
+    ;; For cards, the ILM_PDF property specifies the cloze, so it is not
+    ;; desirable to zoom into just the cloze region. Instead infer from parent
+    ;; what region should be, and `org-ilm--pdf-render-page-highlights' will
+    ;; show the current cloze region with a black border. Further during review,
+    ;; the alpha will be set to 1 to hide the cloze.
+    (when (eq el-type 'card)
+      (save-excursion
+        (org-up-heading 1)
+        (if-let ((parent-pdf-range (org-entry-get nil "ILM_PDF")))
+            (setq spec (org-ilm--pdf-parse-spec
+                        (org-ilm--pdf-range-from-string
+                         parent-pdf-range)
+                        attachment))
+          (setq spec (org-ilm--pdf-parse-spec
+                      (plist-get spec :begin-page)
+                      attachment)))))
+
     (org-ilm--pdf-open-specs (list spec) buffer-name no-region)))
 
 (defun org-ilm--pdf-open-specs (specs buffer-name &optional no-region)
