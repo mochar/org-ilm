@@ -3494,13 +3494,10 @@ When not specified, REGION is active region."
 
 ;;;;; Extract highlight
 
-;; TODO on caputre hook: reparse extracts
+(defvar-local org-ilm--pdf-captures nil)
 
-(defun org-ilm--pdf-gather-captured-specs ()
-"Return alist (element-id . spec) for all child elements of PDF element.
-
-This is called in `org-ilm--attachment-prepare-buffer' to set the
-buffer-local `org-ilm--pdf-captured-specs'."
+(defun org-ilm--pdf-gather-captures ()
+  "Return alist (element-id . spec) for all child elements of PDF element."
   (pcase-let* ((`(,id ,collection ,file) (org-ilm--attachment-data))
                (captures (org-ilm--element-children id 'headline)))
     (seq-keep
@@ -3512,6 +3509,12 @@ buffer-local `org-ilm--pdf-captured-specs'."
          (cons id spec)))
      captures)))
 
+(defun org-ilm--pdf-captures (&optional reparse-p)
+  (org-ilm--pdf-mode-assert)
+  (or (and (not reparse-p) (bound-and-true-p org-ilm--pdf-captures))
+      (setq-local org-ilm--pdf-captures
+                  (org-ilm--pdf-gather-captures))))
+
 (defun org-ilm--pdf-page-captured-specs (&optional page)
   "Return all specs in or part of PAGE."
   (setq page (or page (org-ilm--pdf-page-normalized)))
@@ -3521,7 +3524,7 @@ buffer-local `org-ilm--pdf-captured-specs'."
          (cdr spec)
        (or (and (not end-page) (= begin-page page))
            (and end-page (<= begin-page page end-page)))))
-   org-ilm--pdf-captured-specs))
+   (org-ilm--pdf-captures)))
 
 (defun org-ilm--pdf-create-capture-context-menu (id)
   "Create a context menu for capture highlight ID."
@@ -4145,8 +4148,7 @@ set only (not let)."
              (lambda (&rest _)
                (when capture-on-success
                  (funcall capture-on-success))
-               (org-ilm--pdf-add-square-annotation
-                current-page-real region extract-org-id)
+               (org-ilm--pdf-captures 'reparse)
                (when (eq major-mode 'pdf-virtual-view-mode)
                  (org-ilm-pdf-virtual-refresh)))
              capture-data))))
@@ -4454,9 +4456,7 @@ This is used to keep track of changes in priority and scheduling.")
          (setf (plist-get org-ilm--data :size)
                (save-restriction
                  (widen)
-                 (- (point-max) (point-min)))))
-        ((or 'pdf-view-mode 'pdf-virtual-view-mode)
-         (setq-local org-ilm--pdf-captured-specs (org-ilm--pdf-gather-captured-specs))))
+                 (- (point-max) (point-min))))))
       )))
 
 (defun org-ilm--attachment-ensure-data-object ()
