@@ -1766,31 +1766,29 @@ wasteful if headline does not match query."
 
 ;;;;; Querying
 
-(defun org-ilm--element-children (id &optional return-type include-self)
+(defun org-ilm--element-children (id &optional return-type include-self all-descendants)
   "Return child elements of element with ID."
   (cl-assert (member return-type '(entry element headline)))
-  (let ((marker (org-id-find id 'marker)))
+  (let ((marker (org-id-find id 'marker))
+        (parent (if all-descendants 'ancestors 'parent)))
     (unless marker
       (error "No entry with ID %s" id))
-    (with-current-buffer (marker-buffer marker)
-      (save-restriction
-        (save-excursion
-          (goto-char marker)
-          (org-narrow-to-subtree)
-          (org-ql-select (list (current-buffer))
-            `(and
-              (property "ID")
-              ,@(unless include-self `((not (property "ID" ,id))))
-              (property "ILM_PDF")
-              (or ,(cons 'todo org-ilm-material-states)
-                  ,(cons 'todo org-ilm-card-states)))
-            :narrow t
-            :action
-            (pcase (or return-type 'headline)
-              ('headline) ;; default: org headline element
-              ('entry #'org-node-at-point)
-              ('element #'org-ilm-element-at-point)
-              (_ (error "Unrecognized return type")))))))))
+    (org-ql-select (list (marker-buffer marker))
+      `(and
+        ,@(if include-self
+              `((or (property "ID" ,id) (,parent (property "ID" ,id))))
+            `((,parent (property "ID" ,id))))
+        (property "ID")
+        (property "ILM_PDF")
+        (or ,(cons 'todo org-ilm-material-states)
+            ,(cons 'todo org-ilm-card-states)))
+      :narrow t
+      :action
+      (pcase (or return-type 'headline)
+        ('headline) ;; default: org headline element
+        ('entry #'org-node-at-point)
+        ('element #'org-ilm-element-at-point)
+        (_ (error "Unrecognized return type"))))))
 
 ;;;;; Priority
 
