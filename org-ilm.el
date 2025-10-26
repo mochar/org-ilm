@@ -153,8 +153,8 @@ be due starting 2am."
   (if org-ilm-global-minor-mode
       ;; Enable
       (progn
-        ;; (add-hook 'after-change-major-mode-hook #'org-ilm--attachment-prepare-buffer)
-        (add-hook 'org-mode-hook #'org-ilm--attachment-prepare-buffer)
+        (add-hook 'after-change-major-mode-hook
+                  #'org-ilm--attachment-prepare-buffer)
         (add-hook 'org-mem-post-full-scan-functions
                   #'org-ilm--org-mem-hook)
         (add-hook 'org-mem-post-targeted-scan-functions
@@ -164,7 +164,8 @@ be due starting 2am."
                     :around #'org-ilm--pdf-annot-create-context-menu-advice)
         )
     ;; Disable
-    (add-hook 'after-change-major-mode-hook #'org-ilm--attachment-prepare-buffer)
+    (remove-hook 'after-change-major-mode-hook
+                 #'org-ilm--attachment-prepare-buffer)
     (remove-hook 'org-mem-post-full-scan-functions
               #'org-ilm--org-mem-hook)
     (remove-hook 'org-mem-post-targeted-scan-functions
@@ -270,6 +271,17 @@ be due starting 2am."
      ((org-ilm--pdf-mode-p)
       (call-interactively #'org-ilm-pdf-extract)))
     (user-error "Extracts can only be made from within an attachment")))
+
+(defun org-ilm-cloze ()
+  "Create a cloze card"
+  (interactive)
+  (if (eq 'attachment (car (org-ilm--where-am-i)))
+      (cond
+       ((eq major-mode 'org-mode)
+        (call-interactively #'org-ilm-org-cloze))
+       ((org-ilm--pdf-mode-p)
+        (call-interactively #'org-ilm-pdf-cloze)))
+    (user-error "Clozes can only be made from within an attachment")))
 
 (defun org-ilm-split ()
   "Split document by section."
@@ -1754,7 +1766,7 @@ wasteful if headline does not match query."
 
 ;;;;; Querying
 
-(defun org-ilm--element-children (id &optional return-type)
+(defun org-ilm--element-children (id &optional return-type include-self)
   "Return child elements of element with ID."
   (cl-assert (member return-type '(entry element headline)))
   (let ((marker (org-id-find id 'marker)))
@@ -1768,7 +1780,7 @@ wasteful if headline does not match query."
           (org-ql-select (list (current-buffer))
             `(and
               (property "ID")
-              (not (property "ID" ,id))
+              ,@(unless include-self `((not (property "ID" ,id))))
               (property "ILM_PDF")
               (or ,(cons 'todo org-ilm-material-states)
                   ,(cons 'todo org-ilm-card-states)))
@@ -3039,7 +3051,7 @@ Will become an attachment Org file that is the child heading of current entry."
                (org-ilm-recreate-overlays region-begin (point))))))
        ))))
 
-(defun org-ilm-cloze ()
+(defun org-ilm-org-cloze ()
   "Create a cloze card.
 A cloze is made automatically of the element at point or active region."
   (interactive)
@@ -3235,8 +3247,10 @@ A cloze is made automatically of the element at point or active region."
   :doc "Keymap for PDF attachments."
   "d" #'org-ilm-pdf-open-full-document
   "x" #'org-ilm-pdf-extract
+  "z" #'org-ilm-pdf-cloze
   "c" #'org-ilm-pdf-convert
-  "n" #'org-ilm-pdf-toggle-narrow)
+  "n" #'org-ilm-pdf-toggle-narrow
+  "h" #'org-ilm-pdf-toggle-highlights)
 
 (defcustom org-ilm-pdf-minimum-virtual-page-size '(1 . 1)
   "The minimum size of the area to create a virtual PDF extract."
@@ -3294,6 +3308,12 @@ TODO Cute if we can use numeric prefix to jump to that page number"
     (org-ilm--pdf-with-point-on-collection-headline nil
      (org-ilm--attachment-open :pdf-no-region region)
      (pdf-view-goto-page virtual-page))))
+
+(defun org-ilm-pdf-toggle-highlights ()
+  "Toggle render of extract and cloze highlights."
+  (interactive)
+  (setq org-ilm-pdf-highlight-captures-p (not org-ilm-pdf-highlight-captures-p))
+  (pdf-view-redisplay))
 
 ;;;;; Utilities
 
@@ -3543,19 +3563,23 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
 
 ;;;;; Capture highlights
 
+(defvar-local org-ilm-pdf-highlight-captures-p t)
 (defvar-local org-ilm--pdf-captures nil)
 
 (defun org-ilm--pdf-gather-captures ()
   "Return list of elements (id type spec) for all child elements of PDF element."
-  (pcase-let* ((`(,id ,collection ,file) (org-ilm--attachment-data))
-               (captures (org-ilm--element-children id 'headline)))
+  (let* ((data (org-ilm--pdf-data))
+         (id (nth 0 data))
+         (headline (nth 4 data))
+         (include-self (eq (org-ilm-type headline) 'card))
+         (captures (org-ilm--element-children id 'headline include-self)))
     (seq-keep
      (lambda (headline)
        (when-let* ((id (org-element-property :ID headline))
                    (type (org-ilm-type headline))
                    (range (org-element-property :ILM_PDF headline))
                    (range (org-ilm--pdf-range-from-string range))
-                   (spec (org-ilm--pdf-parse-spec (cons nil range))))
+                   (spec (org-ilm--pdf-parse-spec range)))
          (list id type spec)))
      captures)))
 
@@ -3651,30 +3675,50 @@ buffer-local `pdf-view--hotspot-functions'."
   ;; list of commands that it goes through sequantilally and applies. The
   ;; important commands are setting the current style (:alpha :background
   ;; :foreground) and creating a highlight (:highlight-region).
-  (let* ((cmds (list :alpha org-ilm-pdf-highlight-alpha))
+  (let* ((this-id (car (org-ilm--attachment-data)))
+         cmds
          (capture-cmds
-          (lambda (captures color)
+          (lambda (captures color &optional fg-color)
             (apply #'append
                    cmds
-                   (list :background color :foreground color)
+                   (list :background color :foreground (or fg-color color))
                    (seq-keep
                     (lambda (capture)
                       (when (eq (plist-get (nth 2 capture) :type) 'area-page)
                         (list :highlight-region
                               (org-ilm--pdf-region-denormalized
                                (plist-get (nth 2 capture) :begin-area)))))
-                    captures)))))
-    
-    (when-let* ((extracts (seq-filter (lambda (c) (eq (nth 1 c) 'material)) captures))
-                (color (face-background 'org-ilm-face-extract))
-                (color (color-darken-name color 10.)))
-      (setq cmds (funcall capture-cmds extracts color)))
+                    captures))))
+         (extract-color (color-darken-name
+                         (face-background 'org-ilm-face-extract) 10.))
+         (cloze-color (color-darken-name
+                         (face-background 'org-ilm-face-card) 10.))
+         this-capture extracts clozes)
 
-    (when-let* ((clozes (seq-filter (lambda (c) (eq (nth 1 c) 'card)) captures))
-                (color (face-background 'org-ilm-face-card))
-                (color (color-darken-name color 10.)))
-      (setq cmds (funcall capture-cmds clozes color)))
-    
+    (dolist (capture captures)
+      (cond
+       ((equal (car capture) this-id)
+        (setq this-capture capture))
+       ((eq (nth 1 capture) 'material)
+        (push capture extracts))
+       ((eq (nth 1 capture) 'card)
+        (push capture clozes))))
+
+    (setq cmds
+          (append
+           (list :alpha org-ilm-pdf-highlight-alpha)
+           (funcall capture-cmds extracts extract-color)
+           (funcall capture-cmds clozes cloze-color)
+           (pcase (nth 1 this-capture)
+             ('material
+              (funcall capture-cmds (list this-capture) extract-color))
+             ('card
+              (append
+               (when (and (org-ilm-reviewing-p)
+                          (not (plist-get org-ilm--review-data :card-revealed)))
+                 (list :alpha 1))
+               (funcall capture-cmds (list this-capture) cloze-color "#000000"))))))
+
     (apply #'pdf-info-renderpage
            page width file-or-buffer cmds)))
 
@@ -3685,7 +3729,8 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; `pdf-view-display-region' to create the regions but it gets overwritten as
 ;; soon as the image needs to be generated again.
 (defun org-ilm--advice--pdf-view-create-page (page &optional window)
-  (let* ((captures (org-ilm--pdf-page-captures))
+  (let* ((captures (when org-ilm-pdf-highlight-captures-p
+                     (org-ilm--pdf-page-captures)))
          
          ;; Replicate logic from pdf-view-display-region
          (size (pdf-view-desired-image-size page window))
@@ -3813,11 +3858,10 @@ attachment from its highlight."
            (and (listp (cadr area))
                 (= (length (cadr area)) 4)))))
 
-(defun org-ilm--pdf-parse-spec (spec)
-  "Parse SPEC for viewing in virtual PDF buffers."
-  (let ((file (car spec))
-        (first (or (car-safe (cdr spec)) (cdr spec)))
-        (second (cdr-safe (cdr spec)))
+(defun org-ilm--pdf-parse-spec (range &optional file)
+  "Parse RANGE as spec for viewing in virtual PDF buffers."
+  (let ((first (or (car-safe range) range))
+        (second (cdr-safe range))
         type begin-page begin-area end-page end-area)
     (cond
      ;; Page
@@ -3832,7 +3876,7 @@ attachment from its highlight."
             end-page second))
      ;; Area
      ;; (page . (left top right bottom))
-     ((org-ilm--pdf-area-p (cdr spec))
+     ((org-ilm--pdf-area-p range)
       (setq type 'area-page
             begin-page first
             begin-area second))
@@ -3858,7 +3902,7 @@ attachment from its highlight."
             begin-area (cdr first)
             end-page (car second)
             end-area (cdr second)))
-     (t (error "Spec invalid")))
+     (t (error "Spec range invalid")))
 
     (list :file file
           :type type
@@ -3867,7 +3911,21 @@ attachment from its highlight."
           :end-page end-page
           :end-area end-area)))
 
-(defun org-ilm--pdf-open-ranges (specs buffer-name &optional no-region)
+(defun org-ilm--pdf-open-virtual (&optional no-region)
+  "Open virtual page given by ILM_PDF spec, return buffer if found."
+  (when-let* ((el-type (ignore-errors (org-ilm-type)))
+              (pdf-range (save-excursion
+                           (when (eq el-type 'card)
+                             (org-up-heading 1))
+                           (org-entry-get nil "ILM_PDF")))
+              (attachment (org-ilm--attachment-find-ancestor "pdf"))
+              (spec (org-ilm--pdf-parse-spec
+                     (org-ilm--pdf-range-from-string pdf-range)
+                     attachment))
+              (buffer-name (concat (org-id-get) ".pdf")))
+    (org-ilm--pdf-open-specs (list spec) buffer-name no-region)))
+
+(defun org-ilm--pdf-open-specs (specs buffer-name &optional no-region)
   "Open a virtual pdf buffer with the given SPECS.
 With NO-REGION non-nil, view entire page instead of zooming to specified region.
 
@@ -3884,10 +3942,11 @@ TODO Handle two column layout"
   (insert ";; %VPDF 1.0\n\n")  
   (insert "(")
   (dolist (spec specs)
-    (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area)
-        (org-ilm--pdf-parse-spec spec)
+    (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area) spec
       (insert "(\"" file "\"")
       (pcase type
+        ('page
+         (insert (number-to-string begin-page)))
         ('range-pages
          (insert (format "(%s . %s)" begin-page end-page)))
         ('area-page
@@ -3912,18 +3971,6 @@ TODO Handle two column layout"
   ;; (pdf-virtual-edit-mode)
   (pdf-virtual-view-mode)
   (current-buffer))
-
-(defun org-ilm--pdf-open-virtual (pdf-path buffer-name)
-  "Open PDF in virtual view mode.
-The main purpose is to toggle into a widened (this func) and narrowed
-view (`org-ilm--pdf-open-ranges')."
-  (with-current-buffer (get-buffer-create buffer-name)
-    (erase-buffer)
-    (insert ";; %VPDF 1.0\n\n")  
-    (insert "((" pdf-path "))")
-    (pdf-virtual-view-mode)
-    (pop-to-buffer (current-buffer))
-    (current-buffer)))
 
 (defun org-ilm--pdf-open-page (pdf-path page-number buffer-name)
   "Open a virtual pdf buffer with a single page."
@@ -4137,10 +4184,12 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 ;; TODO When extracting text, use add-variable-watcher to watch for changes in
 ;; pdf-view-active-region as it has no hooks. it allow buffer local and set only
 ;; (not let).
-(defun org-ilm-pdf-region-extract (output-type)
+(defun org-ilm-pdf-region-extract (output-type &optional card-p)
   "Turn selected PDF region into an extract."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'region)))
   (cl-assert (pdf-view-active-region-p) nil "No active region")
+  (when (and card-p (not (eq output-type 'virtual)))
+    (error "Can only create virtual PDF card extracts"))
   
   (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
                 (org-ilm--pdf-data))
@@ -4171,8 +4220,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
       (user-error "Region smaller than minimum size. Try extracting as text or image."))
 
     (pcase output-type
-      ('virtual
-       )
+      ('virtual)
       ('text
        (setf (plist-get capture-data :content) region-text
              (plist-get capture-data :ext) "org"))
@@ -4202,7 +4250,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     ;;   org-link--try-link-store-functions(nil)
     ;;   org-store-link(nil)
     (let ((org-link-parameters nil))
-      (apply #'org-ilm--capture-extract
+      (apply (if card-p #'org-ilm--capture-cloze #'org-ilm--capture-extract)
              :on-success
              (lambda (&rest _)
                (when capture-on-success
@@ -4327,6 +4375,11 @@ See also `org-ilm-pdf-convert-org-respect-area'."
            :title (concat "Section: " (alist-get 'title section))
            :props (list :ILM_PDF (alist-get 'range section))))))))
 
+;;;;; Cloze
+
+(defun org-ilm-pdf-cloze ()
+  (interactive)
+  (org-ilm-pdf-region-extract 'virtual 'card-p))
 
 
 ;;;; Image attachment
@@ -4439,19 +4492,9 @@ This is used to keep track of changes in priority and scheduling.")
        ;; Open org file
        (run-hook-with-args 'org-attach-open-hook path)
        (find-file path)))
-    ;; Check if headline represents a virtual view of a parent PDF element by
-    ;; looking at the ILM_PDF property.
-    ([pdf-range (org-entry-get nil "ILM_PDF")]
-     ;; Returns 0 if not a number
-     [pdf-page-maybe (string-to-number pdf-range)]
-     [attachment (org-ilm--attachment-find-ancestor "pdf")]
-     [buffer-name (concat (org-id-get) ".pdf")]
-     (if (not (= pdf-page-maybe 0))
-         (org-ilm--pdf-open-page attachment pdf-page-maybe buffer-name)
-       (org-ilm--pdf-open-ranges
-        (list (cons attachment (org-ilm--pdf-range-from-string pdf-range)))
-        buffer-name
-        pdf-no-region)))
+    ;; Check if headline represents a virtual view of a parent PDF element.
+    ([virtual-pdf-buffer (org-ilm--pdf-open-virtual pdf-no-region)]
+     virtual-pdf-buffer)
     ;; Check if attachment is in the process of being generated with a conversion
     ;; tool.
     ([org-id (org-id-get)]
@@ -4517,7 +4560,8 @@ This is used to keep track of changes in priority and scheduling.")
          (setf (plist-get org-ilm--data :size)
                (save-restriction
                  (widen)
-                 (- (point-max) (point-min))))))
+                 (- (point-max) (point-min)))))
+        )
       )))
 
 (defun org-ilm--attachment-ensure-data-object ()
@@ -5392,7 +5436,7 @@ If point on subject, add all headlines of subject."
 (defvar-keymap org-ilm-queue-map
   :doc "Keymap for the queue buffer."
   :parent org-ilm-queue-base-map
-  "r" #'org-ilm-review-start
+  "r" #'org-ilm-queue-review
   "e" #'org-ilm-element-actions
   "v" #'org-ilm-queue-sort
   "m" #'org-ilm-queue-object-mark
@@ -5755,6 +5799,11 @@ A lot of formatting code from org-ql."
 (defvar org-ilm--queue-transient-buffer nil)
 
 ;;;;; Actions
+
+(defun org-ilm-queue-review ()
+  "Start reviewing current queue."
+  (interactive)
+  (org-ilm-review-start :queue-buffer (current-buffer)))
 
 (defun org-ilm-queue-set-priority ()
   "Set the priority of the element at point, or bulk spread of marked elements."
@@ -7587,9 +7636,22 @@ needs the attachment buffer."
         (org-ilm--attachment-ensure-data-object)
         (setf (plist-get org-ilm--data :start) (current-time))
 
+        ;; TODO Run hook here so that individual components can run their own
+        ;; preparation without doing it all here.
+
         ;; If card, hide clozes
         (when (org-ilm-element-card-p element)
-          (org-ilm--card-hide-clozes))))
+          (org-ilm--card-hide-clozes)
+
+          ;; PDF clozes
+          (pdf-view-redisplay)
+          (when (org-ilm--pdf-mode-p)
+            (add-hook 'org-ilm-review-reveal-hook
+                      (lambda ()
+                        ;; TODO Need a stupid wait here, fix
+                        (run-at-time .1 nil 'pdf-view-redisplay))
+                      nil 'local)))
+          ))
 
     (setq org-ilm--review-data
           (list :element element
