@@ -1753,6 +1753,33 @@ wasteful if headline does not match query."
                  t))))
         (_ (org-ilm-element-at-point))))))
 
+;;;;; Querying
+
+(defun org-ilm--element-children (id &optional return-type)
+  "Return child elements of element with ID."
+  (cl-assert (member return-type '(entry element headline)))
+  (let ((marker (org-id-find id 'marker)))
+    (unless marker
+      (error "No entry with ID %s" id))
+    (with-current-buffer (marker-buffer marker)
+      (save-restriction
+        (save-excursion
+          (goto-char marker)
+          (org-narrow-to-subtree)
+          (org-ql-select (list (current-buffer))
+            `(and
+              (property "ID")
+              (property "ILM_PDF")
+              (or ,(cons 'todo org-ilm-material-states)
+                  ,(cons 'todo org-ilm-card-states)))
+            :narrow t
+            :action
+            (pcase (or return-type 'headline)
+              ('headline) ;; default: org headline element
+              ('entry #'org-node-at-point)
+              ('element #'org-ilm-element-at-point)
+              (_ (error "Unrecognized return type")))))))))
+
 ;;;;; Priority
 
 (cl-defun org-ilm-element-priority (element &key rank quantile)
@@ -3215,14 +3242,19 @@ A cloze is made automatically of the element at point or active region."
   "The minimum size of the area to create a virtual PDF extract."
   :type '(cons (symbol :tag "Width")
                (symbol :tag "Height"))
-  :group 'org-ilm)
+  :group 'org-ilm-pdf)
 
 (defcustom org-ilm-pdf-convert-org-respect-area t
   "When virtual view is an area of a single page, convert just that area.
 
 This is done by converting the area to an image first. Note that this will likely effect the quality of the conversion output, probably for the worse if it contains complex objects other than text."
   :type 'boolean
-  :group 'org-ilm)
+  :group 'org-ilm-pdf)
+
+(defcustom org-ilm-pdf-highlight-alpha 0.35
+  "The alpha value of the extract highlights on the PDF page."
+  :type 'number
+  :group 'org-ilm-pdf)
 
 (defconst org-ilm--pdf-output-types
   '((virtual . "PDF (virtual)")
@@ -3465,15 +3497,20 @@ When not specified, REGION is active region."
 ;; TODO on caputre hook: reparse extracts
 
 (defun org-ilm--pdf-gather-captured-specs ()
-  "Return alist (element-id . spec) for all child elements of PDF element."
-  (let (highlights)
-    (dolist (entry (org-ilm--attachment-child-element-entries))
-      (when-let* ((id (org-mem-entry-id entry))
-                  (range (org-mem-entry-property "ILM_PDF" entry))
-                  (range (org-ilm--pdf-range-from-string range))
-                  (spec (org-ilm--pdf-parse-spec (cons nil range))))
-        (push (cons id spec) highlights)))
-    highlights))
+"Return alist (element-id . spec) for all child elements of PDF element.
+
+This is called in `org-ilm--attachment-prepare-buffer' to set the
+buffer-local `org-ilm--pdf-captured-specs'."
+  (pcase-let* ((`(,id ,collection ,file) (org-ilm--attachment-data))
+               (captures (org-ilm--element-children id 'headline)))
+    (seq-keep
+     (lambda (headline)
+       (when-let* ((id (org-element-property :ID headline))
+                   (range (org-element-property :ILM_PDF headline))
+                   (range (org-ilm--pdf-range-from-string range))
+                   (spec (org-ilm--pdf-parse-spec (cons nil range))))
+         (cons id spec)))
+     captures)))
 
 (defun org-ilm--pdf-page-captured-specs (&optional page)
   "Return all specs in or part of PAGE."
@@ -3549,9 +3586,6 @@ buffer-local `pdf-view--hotspot-functions'."
                'help-echo (format "My Custom Highlight %s" id)))))
    captures))
 
-(defcustom org-ilm-pdf-highlight-alpha 0.35
-  "The alpha value of the extract highlights on the PDF page.")
-
 ;; Advice `pdf-view-create-page' to add highlights for our captures. The
 ;; function is responsible for generating an image of the PDF. During this
 ;; process, region rectangle and hotspots are created to generate the image,
@@ -3580,6 +3614,7 @@ buffer-local `pdf-view--hotspot-functions'."
                       ;; Standard hotspots for eg PDF annotations
                       (pdf-view-apply-hotspot-functions window page size)))
            (color (face-background 'org-ilm-face-extract))
+           (color (color-darken-name color 10.))
            (colors (cons color color))
            
            ;; Call the low-level renderer with highlight data
@@ -4468,18 +4503,6 @@ missing, something else is wrong, so throw an error."
        :beta (plist-get org-ilm--data :beta)
        :a (car update-params)
        :b (cdr update-params)))))
-
-(defun org-ilm--attachment-child-element-entries ()
-  "Return org-mem entries of child elements of current attachment."
-  (pcase-let* ((`(,id ,collection ,file) (org-ilm--attachment-data))
-               (element-entry (org-mem-entry-by-id id))
-               (element-level (org-mem-entry-level element-entry)))
-    (seq-filter
-     (lambda (entry)
-       (let ((crumbs (org-mem-entry-crumbs entry)))
-         (and (string= id (nth 4 (nth (- (length crumbs) element-level 1) crumbs)))
-              (member (org-ilm-type (org-mem-entry-todo-state entry)) '(material card)))))
-     (org-mem-entries-in-file file))))
 
 ;;;;; Transient
 
