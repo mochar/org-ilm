@@ -160,6 +160,7 @@ be due starting 2am."
         (add-hook 'org-mem-post-targeted-scan-functions
                   #'org-ilm--org-mem-hook)
         (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
+        (define-key image-mode-map (kbd "A") org-ilm-image-map)
         (advice-add 'pdf-annot-create-context-menu
                     :around #'org-ilm--pdf-annot-create-context-menu-advice)
         )
@@ -171,6 +172,7 @@ be due starting 2am."
     (remove-hook 'org-mem-post-targeted-scan-functions
                  #'org-ilm--org-mem-hook)
     (define-key pdf-view-mode-map (kbd "A") nil)
+    (define-key image-mode-map (kbd "A") nil)
     (advice-remove 'pdf-annot-create-context-menu
                    #'org-ilm--pdf-annot-create-context-menu-advice)
     ))
@@ -4408,6 +4410,11 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 
 ;;;; Image attachment
 
+(defvar-keymap org-ilm-image-map
+  :doc "Keymap for image attachments."
+  "c o" #'org-ilm-image-convert-to-org
+  "c p" #'org-ilm-image-convert-to-pdf)
+
 (cl-defun org-ilm--image-convert-attachment-to-org (image-path org-id &key on-success on-error)
   "Convert an attachment image to Org with Marker."
   (let ((headline (org-ilm--org-headline-element-from-id org-id)))
@@ -4430,9 +4437,26 @@ See also `org-ilm-pdf-convert-org-respect-area'."
    buffer-file-name
    (car (org-ilm--attachment-data))
    :on-success
-   (lambda () 
+   (lambda (&rest _) 
      (when (yes-or-no-p "Conversion finished. Use as main attachment?")
        (org-entry-put nil "ILM_EXT" "org")))))
+
+(defun org-ilm-image-convert-to-pdf ()
+  "Convert image attachment to a PDF file."
+  (interactive)
+  (unless (eq major-mode 'image-mode)
+    (user-error "Not in image buffer."))
+  (pcase-let* ((`(,id ,collection ,file) (org-ilm--attachment-data))
+               (from-file buffer-file-name)
+               (to-file (concat (file-name-sans-extension from-file) ".pdf" ))
+               (cmd (format "convert %s %s" from-file to-file)))
+    (unless id (user-error "Not in an attachment buffer."))
+    (let ((status (call-process-shell-command cmd)))
+      (if (zerop status)
+          (when (yes-or-no-p "Conversion finished. Use as main attachment?")
+            (org-ilm--org-with-point-at id
+              (org-entry-put nil "ILM_EXT" "pdf")))
+        (user-error "Conversion failed with code %d" status)))))
 
 ;;;; Attachments
 
@@ -7668,8 +7692,8 @@ needs the attachment buffer."
           (org-ilm--card-hide-clozes)
 
           ;; PDF clozes
-          (pdf-view-redisplay)
           (when (org-ilm--pdf-mode-p)
+            (pdf-view-redisplay)
             (add-hook 'org-ilm-review-reveal-hook
                       (lambda ()
                         ;; TODO Need a stupid wait here, fix
