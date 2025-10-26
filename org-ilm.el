@@ -121,8 +121,10 @@ be due starting 2am."
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract
   "z" #'org-ilm-cloze
+  "c" #'org-ilm-cloze-toggle
   "t" #'org-ilm-attachment-transclude
   "j" #'org-ilm-subject-dwim
+  "d" #'org-ilm-element-delete
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim
@@ -2989,6 +2991,26 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
 
 ;;;; Org attachment
+
+(defun org-ilm--org-new (type)
+  (let* ((tmp-file (make-temp-file "" nil ".org"))
+         (after-finalize (lambda ()
+                           (unless org-note-abort
+                             (org-ilm--capture-capture
+                              type :target (org-ilm--active-collection)
+                              :file tmp-file :method 'mv)))))
+    (cl-letf (((symbol-value 'org-capture-templates)
+               (list (list "n" "New" 'plain (list 'file tmp-file) ""
+                           :after-finalize after-finalize))))
+      (org-capture nil "n"))))
+
+(defun org-ilm-org-new-material ()
+  (interactive)
+  (org-ilm--org-new 'extract))
+
+(defun org-ilm-org-new-card ()
+  (interactive)
+  (org-ilm--org-new 'card))
 
 (cl-defun org-ilm-org-extract (&key title dont-update-priority)
   "Extract text in region.
@@ -6252,16 +6274,26 @@ A lot of formatting code from org-ql."
 
 (transient-define-prefix org-ilm--import-transient ()
   :refresh-suffixes t
-  ["Ilm import"
+  ["Ilm"
    ("C" "Collection" org-ilm--import-transient-collection)
-   ("r" "Resource" org-ilm--import-resource-transient
-    :inapt-if-nil org-ilm--active-collection)
-   ("f" "File" org-ilm--import-file-transient
-    :inapt-if-nil org-ilm--active-collection)
-   ("m" "Media" org-ilm--import-media-transient
-    :inapt-if-nil org-ilm--active-collection)
-   ("g" "Registry" org-ilm--import-registry-transient
-    :inapt-if-nil org-ilm--active-collection)
+   ]
+
+  [
+   ["Import"
+    ("r" "Resource" org-ilm--import-resource-transient
+     :inapt-if-nil org-ilm--active-collection)
+    ("f" "File" org-ilm--import-file-transient
+     :inapt-if-nil org-ilm--active-collection)
+    ("m" "Media" org-ilm--import-media-transient
+     :inapt-if-nil org-ilm--active-collection)
+    ("g" "Registry" org-ilm--import-registry-transient
+     :inapt-if-nil org-ilm--active-collection)
+    ]
+   ["New"
+    ("o" "Org" org-ilm-org-new-material)
+    ("b" "Buffer" org-ilm-import-buffer)
+    ("c" "Card" org-ilm-org-new-card)
+    ]
    ]
   )
 
@@ -6269,6 +6301,14 @@ A lot of formatting code from org-ql."
   "Import an item into your Ilm collection."
   (interactive)
   (org-ilm--import-transient))
+
+;;;;; Buffer
+
+(defun org-ilm-import-buffer ()
+  (interactive)
+  (org-ilm--capture-capture
+   'source :content (buffer-string)
+   :target (org-ilm--active-collection)))
 
 ;;;;; File
 
