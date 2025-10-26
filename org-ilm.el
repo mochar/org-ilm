@@ -3727,7 +3727,8 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; `pdf-view-display-region' to create the regions but it gets overwritten as
 ;; soon as the image needs to be generated again.
 (defun org-ilm--advice--pdf-view-create-page (page &optional window)
-  (let* ((captures (when org-ilm-pdf-highlight-captures-p
+  (let* ((captures (when (and (org-ilm--attachment-data)
+                              org-ilm-pdf-highlight-captures-p)
                      (org-ilm--pdf-page-captures)))
          
          ;; Replicate logic from pdf-view-display-region
