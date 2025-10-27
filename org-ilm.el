@@ -79,8 +79,8 @@
   :type 'string
   :group 'org-ilm)
 
-(defcustom org-ilm-subject-states '("SUBJ")
-  "TODO state of subjects."
+(defcustom org-ilm-concept-states '("CONC")
+  "TODO state of concepts."
   :type '(repeat string)
   :group 'org-ilm)
 
@@ -123,7 +123,7 @@ be due starting 2am."
   "z" #'org-ilm-cloze
   "c" #'org-ilm-cloze-toggle
   "t" #'org-ilm-attachment-transclude
-  "j" #'org-ilm-subject-dwim
+  "n" #'org-ilm-concept-dwim
   "d" #'org-ilm-element-delete
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
@@ -142,7 +142,7 @@ be due starting 2am."
 (defun org-ilm--org-mem-hook (parse-results)
   ;; (seq-let (bad-paths file-data entries) parse-results
   ;;   )
-  (org-ilm-subject-cache-reset))
+  (org-ilm-concept-cache-reset))
 
 ;;;###autoload
 (define-minor-mode org-ilm-global-minor-mode
@@ -1625,12 +1625,12 @@ DUE is the new scheduled review timestamp."
 
 ;;;; Types
 
-;; There are three headline types: Subjects, Materials, and Cards.
+;; There are three headline types: Concepts, Materials, and Cards.
 
 (defun org-ilm-type (&optional headline-or-state)
   "Return ilm type from an org headline or its todo state.
 
-See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-subject-states'."
+See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-states'."
   (when-let ((state (cond
                      ((org-element-type-p headline-or-state 'headline)
                       (org-element-property :todo-keyword headline-or-state))
@@ -1643,14 +1643,14 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-subject-state
     (cond
      ((member state org-ilm-card-states) 'card)
      ((member state org-ilm-material-states) 'material)
-     ((member state org-ilm-subject-states) 'subject))))
+     ((member state org-ilm-concept-states) 'concept))))
 
 ;;;; Element
 
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
   id collection state level pcookie rawval title tags sched
-  type subjects registry media)
+  type concepts registry media)
 
 (defun org-ilm-element-schedrel (element)
   (when-let ((scheduled (org-ilm-element-sched element)))
@@ -1679,7 +1679,7 @@ wasteful if headline does not match query."
            (todo-keyword (org-element-property :todo-keyword headline))
            (type (org-ilm-type todo-keyword))
            (is-card (eq type 'card))
-           (subject-data (org-ilm--subject-cache-gather headline))
+           (concept-data (org-ilm--concept-cache-gather headline))
            (scheduled (when-let ((s (org-element-property :scheduled headline)))
                         (ts-parse-org-element s)))
            (entry (org-node-at-point)))
@@ -1703,7 +1703,7 @@ wasteful if headline does not match query."
          :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
          :media (org-ilm--media-compile entry)
          ;; cdr to get rid of headline priority in the car - redundant
-         :subjects subject-data)))))
+         :concepts concept-data)))))
 
 (defun org-ilm-element-from-id (id)
   (org-ilm--org-with-point-at id
@@ -5189,15 +5189,15 @@ See `org-ilm-attachment-transclude'."
     :action #'org-ilm-element-at-point
     :narrow narrow))
 
-(defun org-ilm--query-subjects (&optional collection)
-  "Return list of subjects from COLLECTION.
+(defun org-ilm--query-concepts (&optional collection)
+  "Return list of concepts from COLLECTION.
 
-TODO parse-headline pass arg to not sample priority to prevent recusrive subject search?"
+TODO parse-headline pass arg to not sample priority to prevent recusrive concept search?"
   (let ((collection (or collection (plist-get org-ilm-queue :collection))))
     (cl-assert collection)
     (org-ql-select (org-ilm--collection-files collection)
       `(and (property "ID")
-            ,(cons 'todo org-ilm-subject-states))
+            ,(cons 'todo org-ilm-concept-states))
       :action #'org-ilm-element-at-point)))
 
 (defun org-ilm-query-all ()
@@ -5228,8 +5228,8 @@ The queries are stored in `org-ilm-queries'."
 ;; to build it. However, on review start, it forms the review queue, so in that
 ;; sense it is a queue.
 
-(defcustom org-ilm-queue-subject-nchar 6
-  "Truncation size of subject names as displayed in the queue.
+(defcustom org-ilm-queue-concept-nchar 6
+  "Truncation size of concept names as displayed in the queue.
 If available, the last alias in the ROAM_ALIASES property will be used."
   :type 'integer
   :group 'org-ilm)
@@ -5599,7 +5599,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
   "Add element at point to queue. With ARG, add to new queue.
 
 If point on headline, add headline and descendants.
-If point on subject, add all headlines of subject."
+If point on concept, add all headlines of concept."
   (interactive "P")
   (when-let* ((headline (org-ilm--org-headline-at-point))
               (type (org-ilm-type headline))
@@ -5618,11 +5618,11 @@ If point on subject, add all headlines of subject."
                                (format "[%s] %s" (upcase (symbol-name type))
                                        (org-element-property :title headline))))))))
               (n-added 0))
-    (if (eq type 'subject)
+    (if (eq type 'concept)
         (dolist (entry (org-ilm--collection-entries collection))
           (when-let* ((element (org-ilm-element-from-id (org-mem-entry-id entry)))
-                      (subjects (car (org-ilm-element-subjects element)))
-                      (ancestor-ids (mapcar #'car subjects)))
+                      (concepts (car (org-ilm-element-concepts element)))
+                      (ancestor-ids (mapcar #'car concepts)))
             (when (member (org-element-property :ID headline) ancestor-ids)
               (when (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
                 (cl-incf n-added)))))
@@ -5671,10 +5671,10 @@ If point on subject, add all headlines of subject."
   "RET" #'org-ilm-queue-open-attachment
   "SPC" #'org-ilm-queue-open-element
   "P" #'org-ilm-queue-set-priority
-  "N" #'org-ilm-queue-set-position
+  "#" #'org-ilm-queue-set-position
   "S" #'org-ilm-queue-set-schedule
   "D" #'org-ilm-queue-delete
-  "M j" #'org-ilm-queue-mark-by-subject
+  "M n" #'org-ilm-queue-mark-by-concept
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
   "M u" #'org-ilm-queue-mark-unmark-all
@@ -5748,20 +5748,20 @@ If point on subject, add all headlines of subject."
     (next-line)
     (when (eobp) (previous-line))))
 
-(defun org-ilm-queue-mark-by-subject (subject-id)
-  "Mark all elements in queue that are part of subject with id SUBJECT-ID."
+(defun org-ilm-queue-mark-by-concept (concept-id)
+  "Mark all elements in queue that are part of concept with id CONCEPT-ID."
   (interactive
    (list
-    (org-mem-entry-id (org-ilm--subject-select-entry))))
+    (org-mem-entry-id (org-ilm--concept-select-entry))))
 
   ;; Alternatively, we could have used
-  ;; `org-ilm--subjects-get-with-descendant-subjects' to precompute the
+  ;; `org-ilm--concepts-get-with-descendant-concepts' to precompute the
   ;; descendancy, but this would require a list-to-list comparison eg with
   ;; `seq-some' per object, instead of just an `assoc'.
   (dolist (object (org-ilm--queue-elements))
     (when (org-ilm-element-p object)
-      (let ((ancestor-ids (car (org-ilm-element-subjects object))))
-        (when (member subject-id ancestor-ids)
+      (let ((ancestor-ids (car (org-ilm-element-concepts object))))
+        (when (member concept-id ancestor-ids)
           (org-ilm--queue-mark-objects object)))))
   (org-ilm-queue-revert))
 
@@ -5936,22 +5936,22 @@ A lot of formatting code from org-ql."
      ;;           marked)
      ;;        ""))))
      (:name
-      "Subjects"
+      "Concepts"
       :max-width 15
       :formatter
       (lambda (data)
-        (pcase-let ((`(,marked ,subjects ,missing) data)
+        (pcase-let ((`(,marked ,concepts ,missing) data)
                     (names))
-          (when subjects
+          (when concepts
             (setq names
                   (mapcar
-                   (lambda (subject)
+                   (lambda (concept)
                      (let ((title (or
-                                   (car (last (org-mem-entry-roam-aliases subject)))
-                                   (org-mem-entry-title subject))))
+                                   (car (last (org-mem-entry-roam-aliases concept)))
+                                   (org-mem-entry-title concept))))
                        (substring title 0 (min (length title)
-                                               org-ilm-queue-subject-nchar))))
-                   subjects)))
+                                               org-ilm-queue-concept-nchar))))
+                   concepts)))
           (org-ilm--vtable-format-cell
            (cond
             (names (org-add-props (s-join "," names) nil 'face 'org-tag))
@@ -5972,7 +5972,7 @@ A lot of formatting code from org-ql."
             (marked (member id org-ilm--queue-marked-objects)))
        (cond
         ((org-ilm-element-p object)
-         (let ((subjects (org-ilm-element-subjects object))
+         (let ((concepts (org-ilm-element-concepts object))
                (priority (org-ilm-element-priority object)))
            (pcase (vtable-column vtable column)
              ("Index" (list marked row))
@@ -5982,11 +5982,11 @@ A lot of formatting code from org-ql."
              ("Title" (list marked (org-ilm-element-title object)))
              ("Due" (list marked (org-ilm-element-schedrel object)))
              ;; ("Tags" (list marked (org-ilm-element-tags object)))
-             ("Subjects"
+             ("Concepts"
               (list marked
                     (mapcar #'org-mem-entry-by-id
-                            ;; Only direct subjects
-                            (last (car subjects) (cdr subjects))))))))
+                            ;; Only direct concepts
+                            (last (car concepts) (cdr concepts))))))))
         ((stringp object)
          (pcase (vtable-column vtable column)
            ("Index" (list marked row t))
@@ -7194,28 +7194,28 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
        (/ (- k-max k-min)
           (1+ (exp (- (* kappa (- (/ n n-max) 0.5)))))))))
 
-(defun org-ilm--priority-adjusted-from-subjects (params subjects)
-  "Average the priority out over the subject priorities."
-  (let ((ancestors (nth 1 subjects)))
+(defun org-ilm--priority-adjusted-from-concepts (params concepts)
+  "Average the priority out over the concept priorities."
+  (let ((ancestors (nth 1 concepts)))
     (if (= 0 (length ancestors))
         params
       (apply #'org-ilm--priority-combine-betas params
-             ;; Tighter variance for subjects
+             ;; Tighter variance for concepts
              (mapcar (lambda (p) (org-ilm--priority-to-beta p 10.))
                      (mapcar #'cdr ancestors))))))
 
-(defun org-ilm--priority-beta-compile (priority subjects logbook)
-  "Compile the finale beta parameters from priority value, subjects, and logbook history."
+(defun org-ilm--priority-beta-compile (priority concepts logbook)
+  "Compile the finale beta parameters from priority value, concepts, and logbook history."
   (let* ((k (org-ilm--priority-spread-from-logbook logbook))
          (params (org-ilm--priority-to-beta priority)))
-    (setq params (org-ilm--priority-adjusted-from-subjects params subjects))))
+    (setq params (org-ilm--priority-adjusted-from-concepts params concepts))))
 
 (defun org-ilm--priority-get-params (&optional headline)
   "Calculate the beta parameters of the heading at point."
   (let ((priority (cdr (org-ilm--get-priority headline)))
         (logbook (org-ilm--org-logbook-read headline))
-        (subjects (org-ilm--subject-cache-gather headline)))
-    (org-ilm--priority-beta-compile priority subjects logbook)))
+        (concepts (org-ilm--concept-cache-gather headline)))
+    (org-ilm--priority-beta-compile priority concepts logbook)))
 
 (defun org-ilm--priority-sample (beta &optional seed)
   "Sample a priority value given the beta params and a seed."
@@ -7327,32 +7327,32 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   (unless element (user-error "No ilm element at point"))
   (org-ilm--schedule :timestamp timestamp))
 
-;;;; Subjects
+;;;; Concepts
 
 ;; TODO Probably still incredibly inefficient as we have to go up the hierarchy
 ;; everytime. A better option might be to use org-ql to find all headlines with
-;; a SUBJECTS property and store mapping org-id -> subjects in a cache. Then use
+;; a CONCEPTS property and store mapping org-id -> concepts in a cache. Then use
 ;; org-mem's cached ancestry to do the lookup, without having to go up each
 ;; time.
 
-(defun org-ilm--subjects-get-parent-subjects (&optional headline-thing all-ancestors)
-  "Retrieve parent subjects of a headline, either in outline or through property.
+(defun org-ilm--concepts-get-parent-concepts (&optional headline-thing all-ancestors)
+  "Retrieve parent concepts of a headline, either in outline or through property.
 When ALL-ANCESTORS, retrieve full ancestry recursively.
 
 Eeach call of this function (recursive or not) only retrives _direct_
-parents, which is defined differently for subjects and extracts/cards:
-- Subject: First outline parent + _not_ inherited property links
-- Others: First outline parent + property links of itself or inherited from _non-subject_ ancestors only"
+parents, which is defined differently for concepts and extracts/cards:
+- Concept: First outline parent + _not_ inherited property links
+- Others: First outline parent + property links of itself or inherited from _non-concept_ ancestors only"
   (let* ((headline (org-ilm--org-headline-from-thing headline-thing 'assert))
          (headline-id (org-element-property :ID headline))
          (headline-entry (org-mem-entry-by-id headline-id))
          (headline-ancestry (org-ilm--org-mem-ancestry-ids headline-entry))
-         (headline-is-subj (member (org-element-property :todo-keyword headline) org-ilm-subject-states))
-         (property-subjects-str "")
-         outline-parent-subject subject-ids)
+         (headline-is-concept (member (org-element-property :todo-keyword headline) org-ilm-concept-states))
+         (property-concepts-str "")
+         outline-parent-concept concept-ids)
 
-    ;; Check for ancestor subject headline in outline hierarchy. As we explore
-    ;; up the hierarchy, store linked subjects of extracts.
+    ;; Check for ancestor concept headline in outline hierarchy. As we explore
+    ;; up the hierarchy, store linked concepts of extracts.
     (cl-block nil
       (dolist (ancestor (org-mem-entry-crumbs headline-entry))
         (let* ((id (nth 4 ancestor))
@@ -7361,35 +7361,35 @@ parents, which is defined differently for subjects and extracts/cards:
                (state (when entry (org-mem-entry-todo-state entry)))
                (type (when state (org-ilm-type state))))
           (cond
-           ;; Headline is self or incremental ancestor, store linked subjects
+           ;; Headline is self or incremental ancestor, store linked concepts
            ((or is-self
-                (and (not headline-is-subj) ; Subject never inherit!
+                (and (not headline-is-concept) ; Concept never inherit!
                      (eq type 'material)))
-            (when-let ((prop (org-mem-entry-property "SUBJECTS+" entry)))
-              (setq property-subjects-str
-                    (concat property-subjects-str " " prop))))
+            (when-let ((prop (org-mem-entry-property "CONCEPTS+" entry)))
+              (setq property-concepts-str
+                    (concat property-concepts-str " " prop))))
            
-           ;; Headline is subject, store as outline parent subject
-           ((eq type 'subject)
-            (cl-pushnew id subject-ids :test #'equal)
-            (unless outline-parent-subject
-              (setq outline-parent-subject id))
+           ;; Headline is concept, store as outline parent concept
+           ((eq type 'concept)
+            (cl-pushnew id concept-ids :test #'equal)
+            (unless outline-parent-concept
+              (setq outline-parent-concept id))
             (unless all-ancestors (cl-return)))))))
 
-    ;; Process inherited SUBJECTS property.
+    ;; Process inherited CONCEPTS property.
 
-    ;; This is tricky because linked subjects may themselves link to other
-    ;; subjects, requiring this to be done recursively if we need all
-    ;; subjects. Furthermore test for invalid linking, eg to a descendant or
+    ;; This is tricky because linked concepts may themselves link to other
+    ;; concepts, requiring this to be done recursively if we need all
+    ;; concepts. Furthermore test for invalid linking, eg to a descendant or
     ;; circular links.
     (let ((link-match-pos 0)
-          property-subject-ids property-subject-ancestors)
-      (while-let ((_ (string-match org-link-any-re property-subjects-str link-match-pos))
-                  (subject-string (match-string 1 property-subjects-str)))
+          property-concept-ids property-concept-ancestors)
+      (while-let ((_ (string-match org-link-any-re property-concepts-str link-match-pos))
+                  (concept-string (match-string 1 property-concepts-str)))
         (setq link-match-pos (match-end 1))
 
-        ;; First we gather valid subject-ids as well as their individual ancestries
-        (when-let* ((org-id (org-ilm--org-id-from-string subject-string))
+        ;; First we gather valid concept-ids as well as their individual ancestries
+        (when-let* ((org-id (org-ilm--org-id-from-string concept-string))
                     ;; Skip if linked to itself
                     (_ (not (string= org-id headline-id)))
                     ;; Skip if ancestor of headline
@@ -7398,71 +7398,71 @@ parents, which is defined differently for subjects and extracts/cards:
                     (_ (not (member org-id headline-ancestry)))
                     ;; Should have org id and therefore cached by org-mem
                     (entry (org-mem-entry-by-id org-id))
-                    ;; Should be subject todo state
+                    ;; Should be concept todo state
                     (_ (member (org-mem-entry-todo-state entry)
-                               org-ilm-subject-states))
-                    ;; Skip if is subject is descendant of headline - this
+                               org-ilm-concept-states))
+                    ;; Skip if is concept is descendant of headline - this
                     ;; will lead to circular DAG, causing infinite loops, and
                     ;; doesn't make sense anyway. Add a root string so
-                    ;; subjects with no org-id parents don't return nil,
+                    ;; concepts with no org-id parents don't return nil,
                     ;; terminating the when-let.
                     (ancestry (org-ilm--org-mem-ancestry-ids entry 'with-root-str))
                     (_ (not (member headline-id ancestry))))
-          (cl-pushnew org-id property-subject-ids :test #'equal)
-          (cl-pushnew ancestry property-subject-ancestors)
+          (cl-pushnew org-id property-concept-ids :test #'equal)
+          (cl-pushnew ancestry property-concept-ancestors)
 
-          ;; Recursively handle case where property derived subjects
-          ;; themselves might link to other subjects in their properties.
+          ;; Recursively handle case where property derived concepts
+          ;; themselves might link to other concepts in their properties.
           ;; Note, no need to do this for outline ancestors (previous step),
           ;; as properties are inherited.
           (when all-ancestors
-            (dolist (parent-id (cdr (org-ilm--subjects-get-parent-subjects org-id all-ancestors)))
-              (cl-pushnew parent-id property-subject-ids :test #'equal)
-              (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-subject-ancestors))))
+            (dolist (parent-id (cdr (org-ilm--concepts-get-parent-concepts org-id all-ancestors)))
+              (cl-pushnew parent-id property-concept-ids :test #'equal)
+              (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-concept-ancestors))))
 
-        ;; Filter if subject-id is ancestor of any other subject-id
-        (let ((ancestries (apply #'append property-subject-ancestors)))
-          (dolist (subject-id property-subject-ids)
-            (unless (member subject-id ancestries)
-              (cl-pushnew subject-id subject-ids :test #'equal))))))
+        ;; Filter if concept-id is ancestor of any other concept-id
+        (let ((ancestries (apply #'append property-concept-ancestors)))
+          (dolist (concept-id property-concept-ids)
+            (unless (member concept-id ancestries)
+              (cl-pushnew concept-id concept-ids :test #'equal))))))
 
-    (cons headline subject-ids)))
+    (cons headline concept-ids)))
 
-(defun org-ilm--subjects-get-with-descendant-subjects (subject)
-  "Retrieve descendant subjects of a headline.
+(defun org-ilm--concepts-get-with-descendant-concepts (concept)
+  "Retrieve descendant concepts of a headline.
 Descendants can be directly in outline or indirectly through property linking."
-  (let ((id (plist-get subject :id)))
+  (let ((id (plist-get concept :id)))
     (seq-filter
-     (lambda (subj)
-       (let ((ancestory (nth 2 (org-ilm--subject-cache-gather (plist-get subj :id)))))
+     (lambda (concept)
+       (let ((ancestory (nth 2 (org-ilm--concept-cache-gather (plist-get concept :id)))))
          (member id ancestory)))
-     (org-ilm--query-subjects))))
+     (org-ilm--query-concepts))))
 
-(defun org-ilm--subjects-get-with-descendant-subjects--deprecated (subject)
+(defun org-ilm--concepts-get-with-descendant-concepts--deprecated (concept)
   "DEPRECATED now that we save full ancestor list in cache.
 
-Retrieve descendant subjects of a headline.
+Retrieve descendant concepts of a headline.
 
 Descendants can be directly in outline or indirectly through property linking.
 
 This function does not have to be fast: Currently only called every now
-and again by `org-ilm-queue-mark-by-subject'."
-  (let ((all-subjects (mapcar (lambda (s)
+and again by `org-ilm-queue-mark-by-concept'."
+  (let ((all-concepts (mapcar (lambda (s)
                                 (cons (plist-get s :id) s))
                               ;; Cached:
-                              (org-ilm--query-subjects)))
-        (queue (list (plist-get subject :id)))
-        (subject-and-descendants (list (cons (plist-get subject :id) subject))))
+                              (org-ilm--query-concepts)))
+        (queue (list (plist-get concept :id)))
+        (concept-and-descendants (list (cons (plist-get concept :id) concept))))
     
     (org-ilm--debug-all
-     all-subjects
+     all-concepts
      (lambda (s) (list (plist-get (cdr s) :title)
                        (car s)
-                       (nth 3 (plist-get (cdr s) :subjects))))
-     "-- Subject: %s (%s)\n       Parents: %s")
+                       (nth 3 (plist-get (cdr s) :concepts))))
+     "-- Concept: %s (%s)\n       Parents: %s")
 
-    ;; Queue will contain org-ids of SUBJECT and any of its descendants. For
-    ;; each element in the queue, loop over subjects and when one has been found
+    ;; Queue will contain org-ids of CONCEPT and any of its descendants. For
+    ;; each element in the queue, loop over concepts and when one has been found
     ;; that has as direct parent this queue element, it is a descendant and thus
     ;; added to the queue. When the loop for the current queue element is
     ;; finished, we found all its direct children and we thus remove it from the
@@ -7471,55 +7471,55 @@ and again by `org-ilm-queue-mark-by-subject'."
       (org-ilm--debug "Queue: %s" queue)
       (let ((current (pop queue)))
         (org-ilm--debug "-- Queue current: %s" current)
-        (dolist (subj all-subjects)
-          (let ((subj-id (car subj))
-                (subj-parents (nth 3 (plist-get (cdr subj) :subjects))))
-            (org-ilm--debug "-- Subject %s: %s" subj-id subj-parents)
-            (when (and (member current subj-parents)
-                       (not (assoc subj-id subject-and-descendants)))
-              (push subj subject-and-descendants)
-              (push subj-id queue))))))
+        (dolist (concept all-concepts)
+          (let ((concept-id (car concept))
+                (concept-parents (nth 3 (plist-get (cdr concept) :concepts))))
+            (org-ilm--debug "-- Concept %s: %s" concept-id concept-parents)
+            (when (and (member current concept-parents)
+                       (not (assoc concept-id concept-and-descendants)))
+              (push concept concept-and-descendants)
+              (push concept-id queue))))))
 
-    subject-and-descendants))
+    concept-and-descendants))
 
 ;;;;; Functions
 
-(defun org-ilm--subject-select-entry (&optional collection)
+(defun org-ilm--concept-select-entry (&optional collection)
   (setq collection
         (or collection
             (org-ilm--collection-from-context)
             (org-ilm--active-collection)))
   (let ((choice
          (org-node-read-candidate
-          "Subject: " nil
+          "Concept: " nil
           (lambda (name entry)
             (when-let ((state (org-mem-todo-state entry))
                        (file (org-mem-entry-file entry)))
               (and
-               (eq 'subject (org-ilm-type state))
+               (eq 'concept (org-ilm-type state))
                (org-ilm--collection-file file collection))))
           'require-match)))
     (gethash choice org-node--candidate<>entry)))
 
 ;;;;; Commands
 
-(defun org-ilm-subject-dwim ()
-  "Add subject if point in ilm element, otherwise create a new subject."
+(defun org-ilm-concept-dwim ()
+  "Add concept if point in ilm element, otherwise create a new concept."
   (interactive)
   (if (eq major-mode 'org-mode)
       (let* ((at-heading-p (org-at-heading-p))
              (state (when at-heading-p (org-get-todo-state)))
              (ilm-type (org-ilm-type state)))
         (cond
-         ((and ilm-type (not (eq ilm-type 'subject)))
-          (call-interactively #'org-ilm-subject-add))
+         ((and ilm-type (not (eq ilm-type 'concept)))
+          (call-interactively #'org-ilm-concept-add))
          ((and at-heading-p (null state))
-          (call-interactively #'org-ilm-subject-into))
-         (t (call-interactively #'org-ilm-subject-new))))
-    (call-interactively #'org-ilm-subject-new)))
+          (call-interactively #'org-ilm-concept-into))
+         (t (call-interactively #'org-ilm-concept-new))))
+    (call-interactively #'org-ilm-concept-new)))
 
-(defun org-ilm-subject-new (&optional select-collection-p)
-  "Create a new subject."
+(defun org-ilm-concept-new (&optional select-collection-p)
+  "Create a new concept."
   (interactive "P")
   (let* ((collection (org-ilm--collection-from-context))
          (collection (if (or select-collection-p (null collection))
@@ -7529,12 +7529,12 @@ and again by `org-ilm-queue-mark-by-subject'."
     (cl-letf (((symbol-value 'org-capture-templates)
                (list
                 (list
-                 "s" "Subject" 'entry (list 'file file) "* SUBJ %?"
+                 "s" "Concept" 'entry (list 'file file) "* CONC %?"
                  :hook (lambda () (org-node-nodeify-entry))))))
       (org-capture nil "s"))))
 
-(defun org-ilm-subject-into ()
-  "Convert headline at point to a subject."
+(defun org-ilm-concept-into ()
+  "Convert headline at point to a concept."
   (interactive)
   (cond
    ((not (and (eq major-mode 'org-mode) (org-at-heading-p)))
@@ -7542,70 +7542,70 @@ and again by `org-ilm-queue-mark-by-subject'."
    ((org-get-todo-state)
     (user-error "Headline already has a TODO state!"))
    (t
-    (org-todo (car org-ilm-subject-states))
+    (org-todo (car org-ilm-concept-states))
     (org-node-nodeify-entry))))
 
-(defun org-ilm-subject-add ()
-  "Annotate headline at point with a subject.
+(defun org-ilm-concept-add ()
+  "Annotate headline at point with a concept.
 
 TODO Skip if self or descendant."
   (interactive)
-  (let* ((subject-entry (org-ilm--subject-select-entry))
-         (subject-id (org-mem-entry-id subject-entry))
-         (cur-subjects (org-entry-get nil "SUBJECTS" t)))
-    (if (and cur-subjects
-             (string-match subject-id cur-subjects))
+  (let* ((concept-entry (org-ilm--concept-select-entry))
+         (concept-id (org-mem-entry-id concept-entry))
+         (cur-concepts (org-entry-get nil "CONCEPTS" t)))
+    (if (and cur-concepts
+             (string-match concept-id cur-concepts))
         ;; TODO offer option to remove
-        (message "Subject already added")
-      (let* ((subject-desc (org-mem-entry-title subject-entry))
-             (subject-link (org-link-make-string
-                            (concat "id:" subject-id) subject-desc)))
-        (org-entry-put nil "SUBJECTS+"
-                       (concat cur-subjects " " subject-link))))))
+        (message "Concept already added")
+      (let* ((concept-desc (org-mem-entry-title concept-entry))
+             (concept-link (org-link-make-string
+                            (concat "id:" concept-id) concept-desc)))
+        (org-entry-put nil "CONCEPTS+"
+                       (concat cur-concepts " " concept-link))))))
 
-;;;;; Subject cache
+;;;;; Concept cache
 
-(defvar org-ilm-subject-cache (make-hash-table :test 'equal)
-  "Map subject org-id -> ('(ancestor-subject-ids..) . num-direct-parents)
+(defvar org-ilm-concept-cache (make-hash-table :test 'equal)
+  "Map concept org-id -> ('(ancestor-concept-ids..) . num-direct-parents)
 
-The direct parent ids are the last num-direct-parents ids in ancestor-subject-ids.
+The direct parent ids are the last num-direct-parents ids in ancestor-concept-ids.
 
 Gets reset after org-mem refreshes.")
 
-(defun org-ilm-subject-cache-reset ()
-  (setq org-ilm-subject-cache (make-hash-table :test 'equal)))
+(defun org-ilm-concept-cache-reset ()
+  (setq org-ilm-concept-cache (make-hash-table :test 'equal)))
 
-(defun org-ilm--subject-cache-gather (headline-or-id)
-  "Gather recursively headline's priority and parent subject priorities.
-Headline can be a subject or not."
+(defun org-ilm--concept-cache-gather (headline-or-id)
+  "Gather recursively headline's priority and parent concept priorities.
+Headline can be a concept or not."
   (let ((id (if (stringp headline-or-id)
                 headline-or-id
               (org-element-property :ID headline-or-id))))
-    ;; (org-ilm--debug "Gathering subjects for:" id)
+    ;; (org-ilm--debug "Gathering concepts for:" id)
     
-    (or (gethash id org-ilm-subject-cache)
+    (or (gethash id org-ilm-concept-cache)
         (let* ((parents-data
                 ;; Non-recursively, just direct parents in DAG
-                (org-ilm--subjects-get-parent-subjects headline-or-id))
+                (org-ilm--concepts-get-parent-concepts headline-or-id))
                (headline (car parents-data))
                (type (org-ilm-type headline))
-               (is-subject (eq type 'subject))
+               (is-concept (eq type 'concept))
                (parent-ids (cdr parents-data))
                (entry (org-mem-entry-by-id id))
                (ancestor-ids (copy-sequence parent-ids)))
 
-          ;; Recursively call this function on all direct parent subjects to get
+          ;; Recursively call this function on all direct parent concepts to get
           ;; entire ancestory.
           (dolist (parent-id parent-ids)
-            (let ((parent-data (org-ilm--subject-cache-gather parent-id)))
+            (let ((parent-data (org-ilm--concept-cache-gather parent-id)))
               (dolist (parent-ancestor (car parent-data))
                 (cl-pushnew parent-ancestor ancestor-ids :test #'equal))))
 
-          ;; Compile data in a list. If this headline is also a subject, add it
+          ;; Compile data in a list. If this headline is also a concept, add it
           ;; to the cache as well.
           (let ((data (when ancestor-ids (cons ancestor-ids (length parent-ids)))))
-            (when is-subject
-              (puthash id data org-ilm-subject-cache))
+            (when is-concept
+              (puthash id data org-ilm-concept-cache))
             ;; Return data
             data)))))
 
