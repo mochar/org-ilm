@@ -3195,7 +3195,78 @@ A cloze is made automatically of the element at point or active region."
         (setq end (match-string-no-properties 0))))
     (when start (if end (concat start "-" end) start))))
 
+(defun org-ilm--media-subtitles-from-dir ()
+  "Return subtitle file contents from current dir."
+  (when-let ((files (directory-files default-directory nil "\\.\\(srt\\|ass\\|vtt\\)\\'"))
+             (file (cdr
+                    (org-ilm--select-alist
+                     (mapcar
+                      (lambda (f)
+                        (cons (cl-subseq (string-split f "\\.") 1) f))
+                      files)
+                     "File: ")))
+             (codec (file-name-extension file)))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (cons codec (buffer-string)))))
+
+(defun org-ilm--media-subtitles-from-media ()
+  "Return the subtitle file contents that were detected by MPV for the
+currently playing media.
+
+MPV finds local subtitles by matching the video file's name with the
+subtitle file's name, while ignoring file extensions and language
+codes. This is not terribly useful for us as we can do this part
+ourselves for locally installed media and subtitles. For online videos,
+MPV can also get the subtitles itself, but it requires manually setting
+the ytdlp flags which I don't care to do atm."
+  (when-let* ((tracks (seq-keep
+                       (lambda (track)
+                         ;; TODO `org-media-note--convert-from-subtitle' supports
+                         ;; vvts but `org-media-note--is-subtitle-track' excludes
+                         ;; them, make PR.
+                         ;; (when (org-media-note--is-subtitle-track track)
+                         (let ((codec (alist-get 'codec track))
+                               (title (alist-get 'title track))
+                               (type (alist-get 'type track)))
+                           (when (and (string= type "sub")
+                                      (or (member codec '("srt" "ass" "subrip" "vtt"))
+                                          (member title '("srt" "ass" "vtt"))
+                                          (string-suffix-p ".srt" title)
+                                          (string-suffix-p ".ass" title)
+                                          (string-suffix-p ".vtt" title)))
+                             (cons (or (alist-get 'lang track) (alist-get 'title track))
+                                   track))))
+                       (mpv-get-property "track-list")))
+              (choice (completing-read "Track: " (mapcar #'car tracks) nil t))
+              (track (cdr (assoc choice tracks)))
+              (track-file (alist-get 'external-filename track)))
+    ;; TODO From `org-media-note--selected-subtitle-content' it seems
+    ;; `external-filename' can contain the subtitle contents? Hence the "else"
+    ;; part of the if below. Currently not bothering with it (see docstring this
+    ;; func).
+    (if (file-exists-p track-file)
+        (with-temp-buffer
+          (insert-file-contents track-file)
+          (cons (alist-get 'codec track) (buffer-string)))
+      ;; TODO Make cons (codec . content)
+      (let* ((srt-lines (split-string track-file "\n"))
+             (processed-srt-lines (cons "1" (cdr srt-lines))))
+        (mapconcat 'identity processed-srt-lines "\n")))))
+
+(defun org-ilm--media-insert-subtitles ()
+  ;; TODO We can also use `org-ilm--media-subtitles-from-media'???
+  (let ((subtitles (org-ilm--media-subtitles-from-dir)))
+    (insert (org-media-note--convert-from-subtitle
+             (cdr subtitles) "time1-time2"
+             org-ilm-media-link ""))))
+
 ;;;;; Custom link
+
+;; Will get the media file name from ILM_MEDIA property so that we only have to
+;; store the timestamps in the link.
+;; Format:
+;; [[ilmmedia:ts(-ts)]] or [[ilmmedia:#ts(-ts)]] to deal with org-media-note #
 
 (defconst org-ilm-media-link "ilmmedia")
 
@@ -3203,7 +3274,8 @@ A cloze is made automatically of the element at point or active region."
   (if-let* ((element-id (car (org-ilm--attachment-data)))
             (entry (org-mem-entry-by-id element-id))
             (source (car (org-ilm--media-compile entry))))
-      (pcase-let* ((`(,start ,end) (string-split link "-")))
+      (pcase-let* ((ts (car (nreverse (string-split link "#"))))
+                   (`(,start ,end) (string-split ts "-")))
         ;; (string-match org-timer-re start)
         (org-media-note--follow-link source start end))
     (user-error "Cannot find element or its ILM_MEDIA property")))
@@ -4675,32 +4747,45 @@ missing, something else is wrong, so throw an error."
   "Open menu with actions to be applied on current element attachment."
   (interactive)
   (if (eq (car (org-ilm--where-am-i)) 'attachment)
-      (org-ilm--attachment-transient)
+      (if-let ((element (org-ilm-element-from-context)))
+          (org-ilm--attachment-transient element)
+        (user-error "Element not found"))
     (user-error "Not in an element attachment!")))
 
-(transient-define-prefix org-ilm--attachment-transient ()
+(transient-define-prefix org-ilm--attachment-transient (scope)
   ["Attachment"
    (:info*
     (lambda ()
       (propertize
-       (org-ilm-element-title (org-ilm-element-from-context))
+       (org-ilm-element-title (transient-scope))
        'face 'italic)))
    ]
   
   [
-   ("x" "Extract" org-ilm-extract
-    :inapt-if
-    (lambda ()
-      (pcase major-mode
-        ('org-mode (not (region-active-p)))
-        ((or 'pdf-view-mode 'pdf-virtual-view-mode))
-        (_ t))))
-   ("c" "Cloze" org-ilm-cloze
-    :inapt-if-not-mode org-mode)
-   ("s" "Split" org-ilm-split
-    :inapt-if-not-mode (org-mode pdf-view-mode pdf-virtual-view-mode))
+   ["Actions"
+    ("x" "Extract" org-ilm-extract
+     :inapt-if
+     (lambda ()
+       (pcase major-mode
+         ('org-mode (not (region-active-p)))
+         ((or 'pdf-view-mode 'pdf-virtual-view-mode))
+         (_ t))))
+    ("c" "Cloze" org-ilm-cloze
+     :inapt-if-not-mode org-mode)
+    ("s" "Split" org-ilm-split
+     :inapt-if-not-mode (org-mode pdf-view-mode pdf-virtual-view-mode))
+    ]
+   ["Media"
+    :if (lambda () (org-ilm-element-media (transient-scope)))
+    ("ms" "Insert subtitles"
+     (lambda ()
+       (interactive)
+       (org-ilm--media-insert-subtitles)))
+    ]
    ]
-  )
+
+  (interactive "P")
+  (transient-setup 'org-ilm--attachment-transient nil nil :scope scope))
 
 
 ;;;; Transclusion
@@ -6642,9 +6727,12 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            ;; Create an org attachment when downloading media for note
            ;; taking. HTML download is inactive when type is media, so no clash
            ;; with org file generated by it.
-           :content (when media-download "")
+           :content (when (string= type "media") "")
            :props
-           (list :ROAM_REFS (if key (concat source " @" key) source))
+           (append
+            (list :ROAM_REFS (if key (concat source " @" key) source))
+            (when (and (string= type "media") (not media-download))
+              (list :ILM_MEDIA source)))
            :on-success
            (lambda (id attach-dir collection)
              (when (or html-download media-download paper-download)
