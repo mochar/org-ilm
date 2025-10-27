@@ -2726,8 +2726,7 @@ The callback ON-ABORT is called when capture is cancelled."
           (setq ext (file-name-extension file))
         (error "Cannot infer extension when no file provided (:ext=t)")))
 
-    ;; Either file, content, or neither is given.
-    (cl-assert (not (and file content)))
+    ;; When no file but content, place content in tmp file for import
     (when (and (not file) content)
       (setq file (expand-file-name
                   (format "%s.%s" id (or ext "org"))
@@ -3092,7 +3091,7 @@ content in a capture buffer."
            ;; If region end is beginning of line, reposition to end of previous
            ;; line. This avoids formatting problems.
            (region-end (if (save-excursion (goto-char region-end) (bolp))
-                           (max (- region-end 1) 0)
+                           (max (- region-end 1) 1)
                          region-end))
            (region-text (org-ilm--buffer-text-prepare region-begin region-end))
            (extract-org-id (org-id-new))
@@ -3117,14 +3116,16 @@ content in a capture buffer."
          (with-current-buffer file-buf
            (save-excursion
              (let* ((target-template (format "<<extr:%s:%s>>" "%s" extract-org-id))
-                    (begin-is-bolp (save-excursion
-                                     (goto-char region-begin)
-                                     (bolp)))
                     (target-begin (concat
                                    (format target-template "beg")
-                                   ;; Region starts at beginning of line: insert
-                                   ;; on new line above
-                                   (when begin-is-bolp "\n")))
+                                   ;; Region starts at beginning of line that
+                                   ;; contains header or org element that starts
+                                   ;; with #. These need to start at beginning
+                                   ;; of line so we enter the target at the line
+                                   ;; before it.
+                                   (when (and (member (char-before region-begin) (list nil ?\n))
+                                              (member (char-after region-begin) (list ?* ?#)))
+                                     "\n")))
                     (target-end (format target-template "end")))
                ;; Insert target before region
                (goto-char region-begin)
@@ -4763,6 +4764,7 @@ This is used to keep track of changes in priority and scheduling.")
 
       (pcase major-mode
         ('org-mode
+         (cursor-intangible-mode 1)
          (org-ilm-recreate-overlays)
          (setf (plist-get org-ilm--data :size)
                (save-restriction
@@ -5034,7 +5036,8 @@ See `org-ilm-attachment-transclude'."
 (defun org-ilm--target-ov-block-edit (ov after-change-p beg end &optional len-pre)
   ;; The hook functions are called both before and after each change. If the functions save the information they receive, and compare notes between calls, they can determine exactly what change has been made in the buffer text.
   ;; When called before a change, each function receives four arguments: the overlay, nil, and the beginning and end of the text range to be modified.
-  ;; When called after a change, each function receives five arguments: the overlay, t, the beginning and end of the text range just modified, and the length of the pre-change text replaced by that range. (For an insertion, the pre-change length is zero; for a deletion, that length is the number of characters deleted, and the post-change beginning and end are equal.) 
+  ;; When called after a change, each function receives five arguments: the overlay, t, the beginning and end of the text range just modified, and the length of the pre-change text replaced by that range. (For an insertion, the pre-change length is zero; for a deletion, that length is the number of characters deleted, and the post-change beginning and end are equal.)
+  (message "%s" ov)
   (unless (or after-change-p org-ilm--targets-editable)
     (user-error "Cannot modify this region")))
 
@@ -5048,32 +5051,37 @@ See `org-ilm-attachment-transclude'."
     (let ((begin (plist-get target :begin))
           (end (plist-get target :end))
           (begin-p (string= "beg" (plist-get target :pos))))
+
+      ;; Previously this overlay was invisible, but it ran into some
+      ;; difficulties which i am too tired to recall now.
       (let ((ov (make-overlay
-                 begin
-                 ;; If next character is newline, include it.  Otherwise hitting
-                 ;; backspace on header will look like header is still on
-                 ;; newline but is in fact after the target.
-                 ;; (if (eq (char-after end) ?\n) (+ end 1) end)
-                 (if (and (eq (char-after end) ?\n)
-                          (or (= begin (point-min)) (eq (char-before begin) ?\n)))
-                     (+ end 1)
-                 end)
-                 nil ;; buffer
+                 begin end nil ;; buffer
                  ;; FRONT-ADVANCE: if non-nil, makes the marker for the front of
                  ;; the overlay advance when text is inserted there (which means
                  ;; the text *is not* included in the overlay).
-                 t
+                 ;; t
                  ;; REAR-ADVANCE: if non-nil, makes the marker for the rear of
                  ;; the overlay advance when text is inserted there (which means
                  ;; the text *is* included in the overlay).
-                 t)))
+                 t
+                 )))
         (overlay-put ov 'org-ilm-target t)
-        (overlay-put ov 'invisible t)
-        ;; (overlay-put ov 'display "|")
-        ;; (overlay-put ov 'cursor-intangible t)
-        (overlay-put ov 'modification-hooks '(org-ilm--target-ov-block-edit))
-        )
-    ))
+        ;; (overlay-put ov 'invisible t)
+        (overlay-put ov 'display
+                     (propertize (if begin-p "«" "»")
+                                 'face '(:foreground "dim gray")))
+        (overlay-put ov 'cursor-intangible t)
+        (overlay-put ov 'modification-hooks '(org-ilm--target-ov-block-edit)))
+
+      ;; If next character is newline, prevent it from being edited.  Otherwise
+      ;; hitting backspace on header will move the header to the front of the
+      ;; target, and then no longer is a valid header. The has to be a seperate
+      ;; overlay, because the display and/or invisible property makes headlines
+      ;; invalid if the newline before them is included.
+      (when (eq (char-after end) ?\n)
+        (let ((ov (make-overlay end (1+ end))))
+          (overlay-put ov 'org-ilm-target t)
+          (overlay-put ov 'modification-hooks '(org-ilm--target-ov-block-edit))))))
   
   ;; Highlight region
   (let* ((id (plist-get target-begin :id))
@@ -5083,11 +5091,11 @@ See `org-ilm-attachment-transclude'."
                  ("card" 'org-ilm-face-card)))
          (begin (plist-get target-begin :begin))
          (end (plist-get target-end :end))
-         ;; (begin (1+ (plist-get target-begin :end)))
-         ;; (end (plist-get target-end :begin))
+         ;; (begin (plist-get target-begin :end))
+         ;; (end (1+ (plist-get target-end :begin)))
          ov)
     (unless (= begin end)
-      (setq ov (make-overlay begin end nil t t))
+      (setq ov (make-overlay begin end));; nil t t))
       (unless no-face
         (overlay-put ov 'face face))
       (overlay-put ov 'org-ilm-highlight t)
