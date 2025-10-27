@@ -2097,16 +2097,13 @@ ELEMENT may be nil, in which case try to read it from point."
     ("C" "New card"
      (lambda ()
        (interactive)
-       (org-ilm--capture-cloze
-        :target (org-ilm-element-id org-ilm--element-transient-element)
-        :content "")
-       ))
+       (org-ilm--org-new 'card
+                         (org-ilm-element-id org-ilm--element-transient-element))))
     ("X" "New extract"
      (lambda ()
        (interactive)
-       (org-ilm--capture-extract
-        :target (org-ilm-element-id org-ilm--element-transient-element)
-        :content "")))
+       (org-ilm--org-new 'extract
+                         (org-ilm-element-id org-ilm--element-transient-element))))
     ]
    ]
   )
@@ -2992,12 +2989,13 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
 ;;;; Org attachment
 
-(defun org-ilm--org-new (type)
+(defun org-ilm--org-new (type &optional target)
   (let* ((tmp-file (make-temp-file "" nil ".org"))
          (after-finalize (lambda ()
                            (unless org-note-abort
                              (org-ilm--capture-capture
-                              type :target (org-ilm--active-collection)
+                              type
+                              :target (or target (org-ilm--active-collection))
                               :file tmp-file :method 'mv)))))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list (list "n" "New" 'plain (list 'file tmp-file) ""
