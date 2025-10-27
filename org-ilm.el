@@ -1664,7 +1664,8 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
 
 Was thinking of org-ql--value-at this whole function, but this is
 wasteful if headline does not match query."
-  (when-let ((headline (org-ilm--org-headline-at-point)))
+  ;; (when-let ((headline (org-ilm--org-headline-at-point)))
+  (when-let ((headline (ignore-errors (org-element-headline-parser))))
     (let* (;; `headline' looses the priority property which is set manually in
            ;; `org-ilm--org-headline-at-point', after I access the :todo-keyword
            ;; property below. I think it is because it is a deferred value, which
@@ -1677,13 +1678,9 @@ wasteful if headline does not match query."
            (id (org-element-property :ID headline))
            (todo-keyword (org-element-property :todo-keyword headline))
            (type (org-ilm-type todo-keyword))
-           (is-card (eq type 'card))
-           (concept-data (org-ilm--concept-cache-gather headline))
-           (scheduled (when-let ((s (org-element-property :scheduled headline)))
-                        (ts-parse-org-element s)))
            (entry (org-node-at-point)))
       
-      (when type ; non-nil only when org-ilm type
+      (when (and type id)
         (make-org-ilm-element
          ;; Headline element properties
          :id id
@@ -1697,12 +1694,13 @@ wasteful if headline does not match query."
 
          ;; Ilm stuff
          :collection (org-ilm--collection-file)
-         :sched scheduled
+         :sched (when-let ((s (org-element-property :scheduled headline)))
+                        (ts-parse-org-element s))
          :type type
          :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
          :media (org-ilm--media-compile entry)
          ;; cdr to get rid of headline priority in the car - redundant
-         :concepts concept-data)))))
+         :concepts (org-ilm--concept-cache-gather headline))))))
 
 (defun org-ilm-element-from-id (id)
   (org-ilm--org-with-point-at id
@@ -5610,7 +5608,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
 ;; - Exclude cards.
 ;; Replace current arg with double arg
 (defun org-ilm-queue-add-dwim (arg)
-  "Add element at point to queue. With ARG, add to new queue.
+  "Add element at point + descendants to queue. With ARG, add to new queue.
 
 If point on headline, add headline and descendants.
 If point on concept, add all headlines of concept."
@@ -5632,24 +5630,26 @@ If point on concept, add all headlines of concept."
                                (format "[%s] %s" (upcase (symbol-name type))
                                        (org-element-property :title headline))))))))
               (n-added 0))
-    (if (eq type 'concept)
-        (dolist (entry (org-ilm--collection-entries collection))
-          (when-let* ((element (org-ilm-element-from-id (org-mem-entry-id entry)))
-                      (concepts (car (org-ilm-element-concepts element)))
-                      (ancestor-ids (mapcar #'car concepts)))
-            (when (member (org-element-property :ID headline) ancestor-ids)
-              (when (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
-                (cl-incf n-added)))))
-
-      (save-excursion
-        (org-back-to-heading t)
-        (let ((end (save-excursion (org-end-of-subtree t)))
-              el)
-          (while (< (point) end)
-            (when (setq el (org-ilm-element-at-point))
-              (when (org-ilm--queue-insert el :buffer queue-buffer :exists-ok t)
-                (cl-incf n-added))
-              (outline-next-heading))))))
+    (pcase type
+      ('concept
+       ;; TODO This can prob be replaced with org-ql regex on CONCEPTS property
+       (dolist (entry (org-ilm--collection-entries collection))
+         (when-let* ((element (org-ilm-element-from-id (org-mem-entry-id entry)))
+                     (concepts (car (org-ilm-element-concepts element)))
+                     (ancestor-ids (mapcar #'car concepts)))
+           (when (member (org-element-property :ID headline) ancestor-ids)
+             (when (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
+               (cl-incf n-added))))))
+      (_
+       (save-excursion
+         (org-back-to-heading t)
+         (let ((end (save-excursion (org-end-of-subtree t)))
+               el)
+           (while (< (point) end)
+             (when (setq el (org-ilm-element-at-point))
+               (when (org-ilm--queue-insert el :buffer queue-buffer :exists-ok t)
+                 (cl-incf n-added)))
+             (outline-next-heading))))))
 
     (message "Added %s element(s) to the queue" n-added)
     
