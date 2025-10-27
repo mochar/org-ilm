@@ -1768,7 +1768,7 @@ wasteful if headline does not match query."
 
 ;;;;; Querying
 
-(defun org-ilm--element-children (id &optional return-type include-self all-descendants)
+(defun org-ilm--element-children (id &optional return-type include-self all-descendants more-query)
   "Return child elements of element with ID."
   (cl-assert (member return-type '(entry element headline)))
   (let ((marker (org-id-find id 'marker))
@@ -1781,9 +1781,9 @@ wasteful if headline does not match query."
               `((or (property "ID" ,id) (,parent (property "ID" ,id))))
             `((,parent (property "ID" ,id))))
         (property "ID")
-        (property "ILM_PDF")
         (or ,(cons 'todo org-ilm-material-states)
-            ,(cons 'todo org-ilm-card-states)))
+            ,(cons 'todo org-ilm-card-states))
+        ,@more-query)
       :narrow t
       :action
       (pcase (or return-type 'headline)
@@ -1866,10 +1866,18 @@ ELEMENT may be nil, in which case try to read it from point."
   (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
     (cond-let*
       ((org-entry-get nil "DIR")
-       (when (yes-or-no-p "Delete attachment directory?")
+       (when (yes-or-no-p "Delete ENTIRE attachment directory?")
          (org-attach-delete-all 'force)))
-      ([attachments (f-glob (file-name-concat (org-attach-dir)
-                                              (concat (org-ilm-element-id element) "*")))]
+      ([attachments
+        (apply #'append
+               (mapcar
+                (lambda (headline)
+                  (f-glob
+                   (file-name-concat
+                    (org-attach-dir)
+                    (concat (org-element-property :ID headline) "*"))))
+                (org-ilm--element-children
+                 (org-ilm-element-id element) 'headline t t)))]
        (when (yes-or-no-p (format "Delete element %s attachtment(s)?" (length attachments)))
          (dolist (file attachments)
            (delete-file file))))))
@@ -3659,7 +3667,8 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
          (id (nth 0 data))
          (headline (nth 4 data))
          (include-self (eq (org-ilm-type headline) 'card))
-         (captures (org-ilm--element-children id 'headline include-self)))
+         (captures (org-ilm--element-children
+                    id 'headline include-self nil '((property "ILM_PDF")))))
     (seq-keep
      (lambda (headline)
        (when-let* ((id (org-element-property :ID headline))
