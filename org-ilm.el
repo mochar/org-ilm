@@ -5688,6 +5688,7 @@ If point on concept, add all headlines of concept."
   "#" #'org-ilm-queue-set-position
   "S" #'org-ilm-queue-set-schedule
   "D" #'org-ilm-queue-delete
+  "-" #'org-ilm-queue-remove
   "M n" #'org-ilm-queue-mark-by-concept
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
@@ -6098,7 +6099,14 @@ A lot of formatting code from org-ql."
 (defun org-ilm-queue-remove ()
   "Remove current or selected elements from this queue."
   (interactive)
-  )
+  (let ((ids (copy-sequence
+              (or org-ilm--queue-marked-objects
+                  (list (org-ilm--vtable-get-object-id))))))
+    (when (yes-or-no-p (format "Remove %s element(s) from queue?" (length ids)))
+      (dolist (id ids)
+        (org-ilm--queue-remove id))
+      (org-ilm--queue-unmark-objects ids)
+      (org-ilm-queue-revert))))
 
 (defun org-ilm-queue-delete ()
   "Delete current or selected elements from the collection."
