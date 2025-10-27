@@ -981,7 +981,8 @@ should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
 ;;;; Collection
 
 (defcustom org-ilm-collections '((ilm . ((path . "~/ilm/")
-                                         (bib . "refs.bib"))))
+                                         (bib . "refs.bib")
+                                         (default . "inbox.org"))))
   "Alist mapping collection name symbol to its configuration alist.
 
 Properties:
@@ -1018,6 +1019,11 @@ Properties:
 (defun org-ilm--collection-path (collection)
   "Return path of COLLECTION."
   (alist-get 'path (alist-get collection org-ilm-collections)))
+
+(defun org-ilm--collection-default-file (collection)
+  "Return path of the default file in COLLECTION to place imports."
+  (or (alist-get 'default (alist-get collection org-ilm-collections))
+      (expand-file-name "inbox.org" (org-ilm--collection-path collection))))
 
 (defun org-ilm--collection-single-file-p (collection)
   "Return t if COLLECTION is a single file collection."
@@ -1070,21 +1076,28 @@ The collections are stored in `org-ilm-collections'."
       (directory-files file-or-dir 'full "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
-(defun org-ilm--select-collection-file (collection)
-  "Prompt user to select a file from COLLECTION."
+(defun org-ilm--select-collection-file (collection &optional relative-p)
+  "Prompt user to select a file from COLLECTION.
+With RELATIVE-P non-nil, return path truncated relative to collection directory."
   (cl-assert (assoc collection org-ilm-collections))
-  (let ((files (org-ilm--collection-files collection)))
+  (let ((col-path (org-ilm--collection-path collection))
+        (files (org-ilm--collection-files collection))
+        file)
     (cond
      ((= 1 (length files))
-      (car files))
+      (setq file (car files)))
      ((> (length files) 1)
-      (let* ((col-path (org-ilm--collection-path collection))
-             ;; TODO Make it work with nested files
-             (file (completing-read
-                    "Collection file: "
-                    (mapcar #'file-name-nondirectory files)
-                    nil 'require-match)))
-        (expand-file-name file col-path))))))
+      ;; TODO Make it work with nested files
+      (setq file (expand-file-name
+                  (completing-read
+                   "Collection file: "
+                   (mapcar (lambda (f)
+                             (file-relative-name f col-path))
+                           files)
+                   nil 'require-match)
+                  col-path))))
+    (when file
+      (if relative-p (file-relative-name file col-path) file))))
 
 (defun org-ilm--collection-entries (collection)
   "All org-mem entries in COLLECTION."
@@ -2603,7 +2616,7 @@ Arguments are: type, id, collection, parent-id")
   "Data for a capture (material or card)."
   type parent title id ext content props file method
   priority scheduled template collection state bibtex
-  on-success on-abort capture-kwargs)
+  target on-success on-abort capture-kwargs)
 
 (defun org-ilm-capture-ensure (&rest data)
   "Parse plist DATA as org-ilm-capture object, or return if it already is one.
@@ -2614,98 +2627,122 @@ TYPE should be one of 'material or 'card.
 PARENT should be the org-id of the parent element if the capture
 represents an extract or a card generated from a material. If omitted,
 the capture is implied to be a new element (import) without parent
-element. In that case, COLLECTION must be set to be the collection
-symbol.
+element. In that case, COLLECTION or TARGET must be set.
+
+TARGET can optionally be set to be the path of the collection file in
+which to store the element. If relative file path to the collection,
+COLLECTION must be set. If absolute file path, collection can be
+inferred.
 
 DATA is a plist that contains info about the capture entry.
 
 The callback ON-SUCCESS is called when capture is saved.
 
-The callback ON-ABORT is called when capture is cancelled."  
-  (if (and (= 1 (length data)) (org-ilm-capture-p (car data)))
-      (car data)
+The callback ON-ABORT is called when capture is cancelled."
+  ;; A bit of a hack: Want to do the validation regardless if passing data as
+  ;; plist or a single org-ilm-capture object. So: start by making an invalid
+  ;; org-ilm-capture object and immediately unpack it for processing.
+  (with-slots
+      (type parent title id ext content props file method
+            priority scheduled template collection state bibtex
+            target on-success on-abort capture-kwargs)
+
+      (if (and (= 1 (length data)) (org-ilm-capture-p (car data)))
+          (car data)
+        (apply #'make-org-ilm-capture data))
+
     
-    (cl-destructuring-bind
-        (&key parent type title id ext content props file method
-              priority scheduled template state on-success on-abort
-              bibtex collection capture-kwargs) data
-      
-      (cl-assert (member type '(material card)))
-      (unless id (setq id (org-id-new)))
-      (unless state
-        (setq state (car (if (eq type 'card)
-                             org-ilm-card-states
-                           org-ilm-material-states))))
+    (cl-assert (member type '(material card)))
+    (unless id (setq id (org-id-new)))
+    (unless state
+      (setq state (car (if (eq type 'card)
+                           org-ilm-card-states
+                         org-ilm-material-states))))
 
-      ;; See `org-attach-method'
-      (unless method (setq method 'cp))
-      (cl-assert (member method '(mv cp ln lns)))
+    ;; See `org-attach-method'
+    (unless method (setq method 'cp))
+    (cl-assert (member method '(mv cp ln lns)))
 
-      ;; Target parent id or collection
-      (cond
-       ((stringp parent)
-        ;; If no priority given, set same as parent.
-        (unless priority
-          (when-let ((p (org-ilm-pqueue-priority parent :nil-if-absent t)))
-            (setq priority (org-ilm-pqueue-parse-new-position (car p)))))
+    ;; Target, parent id, and collection
+    (cond
+     ((stringp parent)
+      ;; If no priority given, set same as parent.
+      (unless priority
+        (when-let ((p (org-ilm-pqueue-priority parent :nil-if-absent t)))
+          (setq priority (org-ilm-pqueue-parse-new-position (car p)))))
 
-        ;; Determine collection
-        (if-let* ((file (org-id-find-id-file parent))
-                  (col (org-ilm--collection-file file)))
-            (setq collection col)
-          (error "Collection not found for PARENT %s" parent)))
-       ((null parent)
+      ;; Determine collection. Note that TARGET is ignored as PARENT specifies
+      ;; this.
+      (if-let* ((file (org-id-find-id-file parent))
+                (col (org-ilm--collection-file file)))
+          (setq collection col)
+        (error "Collection not found for PARENT %s" parent)))
+     (parent
+      (error "PARENT must be org-id string"))
+     (target
+      (if (f-absolute-p target)
+          (progn
+            (cl-assert (file-exists-p target) nil "TARGET not a file")
+            (if collection
+                (cl-assert (org-ilm--collection-file target collection)
+                           nil "TARGET not in COLLECTION")
+              (setq collection (org-ilm--collection-file target))))
         (cl-assert (assoc collection org-ilm-collections) nil
-                   "COLLECTION must be a valid collection symbol if no PARENT is given"))
-       (t "PARENT must be org-id string"))
+                   "COLLECTION must be valid if TARGET is relative path")
+        (setq target (expand-file-name target
+                                       (org-ilm--collection-path collection)))))
+     (t
+      (cl-assert (assoc collection org-ilm-collections) nil
+                 "COLLECTION must be a valid if no PARENT or TARGET given")
+      (setq target (org-ilm--collection-default-file collection))))
 
-      ;; Priority. We always need a priority value.
-      (setq priority
-            (if priority
-                (org-ilm-pqueue-parse-new-position priority)
-              (org-ilm-pqueue-select-position)))
+    ;; Priority. We always need a priority value.
+    (setq priority
+          (if priority
+              (org-ilm-pqueue-parse-new-position priority)
+            (org-ilm-pqueue-select-position)))
 
-      ;; Schedule date. Always needed.
-      (setq scheduled
-            (cond
-             ((ts-p scheduled) scheduled)
-             ((stringp scheduled) (ts-parse scheduled))
-             (scheduled (error "scheduled unrecognized"))
-             (t (let ((card-interval (org-ilm-card-first-interval)))
-                  (cond
-                   ((or (not (eq type 'card)) (eq card-interval 'priority))
-                    (org-ilm--initial-schedule-from-priority (cdr priority)))
-                   ((numberp card-interval)
-                    (ts-adjust 'minute card-interval (ts-now)))
-                   (t (error "card-interval unrecognized")))))))
+    ;; Schedule date. Always needed.
+    (setq scheduled
+          (cond
+           ((ts-p scheduled) scheduled)
+           ((stringp scheduled) (ts-parse scheduled))
+           (scheduled (error "scheduled unrecognized"))
+           (t (let ((card-interval (org-ilm-card-first-interval)))
+                (cond
+                 ((or (not (eq type 'card)) (eq card-interval 'priority))
+                  (org-ilm--initial-schedule-from-priority (cdr priority)))
+                 ((numberp card-interval)
+                  (ts-adjust 'minute card-interval (ts-now)))
+                 (t (error "card-interval unrecognized")))))))
 
-      ;; Generate title from content if no title provided
-      (when (and (not title) content)
-        (setq title (org-ilm--generate-text-snippet content)))
+    ;; Generate title from content if no title provided
+    (when (and (not title) content)
+      (setq title (org-ilm--generate-text-snippet content)))
 
-      ;; Set extension from file when set to t
-      (when (eq ext t)
-        (if file
-            (setq ext (file-name-extension file))
-          (error "Cannot infer extension when no file provided (:ext=t)")))
+    ;; Set extension from file when set to t
+    (when (eq ext t)
+      (if file
+          (setq ext (file-name-extension file))
+        (error "Cannot infer extension when no file provided (:ext=t)")))
 
-      ;; Either file, content, or neither is given.
-      (cl-assert (not (and file content)))
-      (when (and (not file) content)
-        (setq file (expand-file-name
-                    (format "%s.%s" id (or ext "org"))
-                    temporary-file-directory)
-              method 'cp))
+    ;; Either file, content, or neither is given.
+    (cl-assert (not (and file content)))
+    (when (and (not file) content)
+      (setq file (expand-file-name
+                  (format "%s.%s" id (or ext "org"))
+                  temporary-file-directory)
+            method 'cp))
 
-      ;; Make sure there is a collection
-      (setq collection (or collection (org-ilm--active-collection)))
+    ;; Make sure there is a collection
+    (setq collection (or collection (org-ilm--active-collection)))
 
-      (make-org-ilm-capture
-       :parent parent :type type :title title :id id :ext ext
-       :content content :props props :file file :method method
-       :priority priority :scheduled scheduled :template template
-       :state state :on-success on-success :on-abort on-abort
-       :bibtex bibtex :collection collection :capture-kwargs capture-kwargs))))
+    (make-org-ilm-capture
+     :parent parent :target target :type type :title title :id id :ext ext
+     :content content :props props :file file :method method
+     :priority priority :scheduled scheduled :template template
+     :state state :on-success on-success :on-abort on-abort
+     :bibtex bibtex :collection collection :capture-kwargs capture-kwargs)))
 
 (defun org-ilm--capture (&rest data)
   "Make an org capture to make a new source heading, extract, or card.
@@ -2740,7 +2777,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                              (lambda ()
                                (org-node-goto-id parent-id)
                                (org-back-to-heading)))))
-      (setq target (list 'file (org-ilm--select-collection-file collection))))
+      (setq target (list 'file (org-ilm-capture-target capture))))
     
     ;; Save content in a file if provided.
     (when-let ((content (org-ilm-capture-content capture)))
@@ -2879,7 +2916,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (org-ilm--capture capture)
       (org-ilm--capture-transient capture))))
 
-;;;;; Transient
+;;;;; Capture transient
 
 (defun org-ilm--capture-transient-values ()
   (let* ((capture (transient-scope))
@@ -2887,6 +2924,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                    (transient-args transient-current-command)
                  (transient-get-value)))
          (title (transient-arg-value "--title=" args))
+         (collection (transient-arg-value "--collection=" args))         
          (rank (transient-arg-value "--priority=" args))
          (scheduled (transient-arg-value "--scheduled=" args)))          
 
@@ -2898,18 +2936,27 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (setq rank (1- (string-to-number rank)))
       (setq rank (org-ilm-capture-priority (transient-scope))))
 
-    (list title rank scheduled)))
+    (when collection
+      (setq collection (expand-file-name
+                        collection
+                        (org-ilm--collection-path (org-ilm-capture-collection capture)))))
+
+    (list title rank scheduled collection)))
 
 (transient-define-prefix org-ilm--capture-transient (scope)
   :refresh-suffixes t
   
   [:description
    (lambda ()
-     (pcase (org-ilm-capture-type (transient-scope))
-       ('card "Cloze")
-       ('material "Extract")
-       ('source "Import")
-       (_ "Capture")))
+     (if (org-ilm-capture-parent (transient-scope))
+         (pcase (org-ilm-capture-type (transient-scope))
+           ('card "Cloze")
+           ('material "Extract")
+           (_ "Capture"))
+       (pcase (org-ilm-capture-type (transient-scope))
+         ('card "Import card")
+         ('material "Import material")
+         (_ "Import"))))
 
    ("t" "Title" "--title="
     :transient transient--do-call
@@ -2922,6 +2969,15 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         (if (string-empty-p title)
             cur-title
           title))))
+   ("c" "Collection" "--collection="
+    :transient transient--do-call
+    :always-read t
+    :allow-empty nil
+    :reader
+    (lambda (&rest _)
+      (org-ilm--select-collection-file
+       (org-ilm-capture-collection (transient-scope))
+       'relative)))
    ("p" "Priority" "--priority="
     :transient transient--do-call
     :class transient-option
@@ -2963,18 +3019,28 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
   (transient-setup 'org-ilm--capture-transient
                    nil nil :scope scope
                    :value (append
+                           (let* ((collection (org-ilm-capture-collection scope))
+                                  (target (or (org-ilm-capture-target scope)
+                                              (org-ilm--collection-default-file
+                                               collection))))
+                             (list (concat "--collection="
+                                           (file-relative-name
+                                            target
+                                            (org-ilm--collection-path collection)))))
                            (when-let ((title (org-ilm-capture-title scope)))
                              (list (concat "--title=" title))))))
 
 (defun org-ilm--capture-transient-capture (&optional with-buffer-p)
-  (cl-destructuring-bind (title rank scheduled)
+  (cl-destructuring-bind (title rank scheduled collection-file)
       (org-ilm--capture-transient-values)
     (let ((capture (transient-scope))
           (capture-kwargs (list :immediate-finish (not with-buffer-p))))
       (setf (org-ilm-capture-priority capture) rank
             (org-ilm-capture-scheduled capture) scheduled
             (org-ilm-capture-title capture) title
-            (org-ilm-capture-capture-kwargs capture) capture-kwargs)
+            (org-ilm-capture-capture-kwargs capture) capture-kwargs
+            (org-ilm-capture-target capture) collection-file)
+      (setq capture (org-ilm-capture-ensure capture))
       (org-ilm--capture capture))))
 
 ;;;; Org attachment
