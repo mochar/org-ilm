@@ -1268,8 +1268,7 @@ object."
   (let* ((pqueue (org-ilm-pqueue collection))
          (collection (org-ilm-pqueue--collection pqueue))
          (queue (make-org-ilm-queue
-                 :name (format "Priority queue (%s)" 
-                               (symbol-name collection))
+                 :name (format "Priority queue (%s)" collection)
                  :collection collection
                  :type 'pqueue))
          (elements (org-ilm-query-collection collection #'org-ilm-query-all)))
@@ -5147,9 +5146,7 @@ See `org-ilm-attachment-transclude'."
 
 ;;;; Query
 
-(defcustom org-ilm-queries
-  `((Outstanding . org-ilm-query-outstanding)
-    (All . org-ilm-query-all))
+(defcustom org-ilm-queries nil
   "Alist mapping query name to a function that returns an org-ql query."
   :type '(alist :key-type symbol :value-type function)
   :group 'org-ilm)
@@ -5357,7 +5354,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 
 ;; Queues are stored locally within each queue buffer.
 
-(cl-defun org-ilm--queue-create (collection &key elements query name key reversed)
+(cl-defun org-ilm--queue-create (collection &key elements query name key reversed type)
   "Create a new ilm queue object."
   (setq key (or key "prank"))
   (let ((queue (make-org-ilm-queue
@@ -5366,6 +5363,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
                           (symbol-name collection))
                 :collection collection
                 :query query
+                :type type
                 :key key
                 :reversed reversed)))
     (dolist (element elements)
@@ -5386,11 +5384,18 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (let* ((collection (or collection
                          (org-ilm--collection-from-context)
                          (car (org-ilm--select-collection))))
-         (queues (cons (cons "Priority queue" "Full queue") org-ilm-queries))
-         (choice (org-ilm--select-alist queues "Query: ")))
-    (if (string= (car choice) "Priority queue")
-        (org-ilm-pqueue-queue collection)
-      (org-ilm--queue-build collection (car choice)))))
+         (queues (append
+                  (list (cons "Priority queue" "All elements")
+                        (cons "Outstanding queue" "Due elements"))
+                  org-ilm-queries))
+         (choice (org-ilm--select-alist queues "Queue: ")))
+    (pcase (car choice)
+      ("Priority queue"
+       (org-ilm-pqueue-queue collection))
+      ("Outstanding queue"
+       (org-ilm--queue-build-outstanding collection))
+      (_
+       (org-ilm--queue-build collection (car choice))))))
 
 (defun org-ilm--queue-rebuild (&optional buffer)
   "Replace the queue object by a rebuild one.
@@ -5400,6 +5405,8 @@ If the queue has a query, run it again. Else re-parse elements."
           (cond-let*
             ((eq (org-ilm-queue--type org-ilm-queue) 'pqueue)
              (org-ilm-pqueue-queue (org-ilm-queue--collection org-ilm-queue)))
+            ((eq (org-ilm-queue--type org-ilm-queue) 'outstanding)
+             (org-ilm--queue-build-outstanding (org-ilm-queue--collection org-ilm-queue)))
             ([query (org-ilm-queue--query org-ilm-queue)]
              (org-ilm--queue-build
               (org-ilm-queue--collection org-ilm-queue) query))
@@ -5589,7 +5596,14 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
   (org-ilm-with-queue-buffer buffer
     (org-ilm-queue--pop org-ilm-queue)))
 
-;;;;; Dynamic building
+;;;;; Queue building
+
+(defun org-ilm--queue-build-outstanding (collection)
+  (org-ilm--queue-create
+   collection
+   :name (format "Outstanding queue (%s)" collection)
+   :type 'outstanding
+   :elements (org-ilm-query-collection collection #'org-ilm-query-outstanding)))
 
 ;; TODO With prefix arg: transient with additional settings
 ;; - Mainly queue-specific priorities.
