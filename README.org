@@ -2,6 +2,59 @@
 
 This Emacs package implements [[https://supermemo.guru/wiki/Incremental_reading][incremental reading]] (+ watching/listening/writing).
 
+** Install and configuration
+
+#+begin_src emacs-lisp
+(use-package org-ilm
+  :vc (:url "https://github.com/mochar/org-ilm" :rev :newest)
+  :config
+
+  ;; convtools
+  (global-set-key (kbd "C-c v") #'convtools-org-convert)
+
+  ;; org-registry
+  (require 'org-registry)
+  (keymap-set global-map "C-c r" org-registry-prefix-map)
+  (org-registry-global-minor-mode 1)
+
+  ;; org-ilm
+  (require 'org-ilm)
+  (keymap-set global-map "s-i" org-ilm-map)
+  (setq org-ilm-collections
+        '((main . ((path . "~/ilm/main/")))
+          (test . ((path . "~/ilm/test/")))))
+  (org-ilm-global-minor-mode 1)
+
+  (cl-pushnew "~/ilm/main/attachments" org-mem-exclude :test #'string=)
+  (cl-pushnew "~/ilm/test/attachments" org-mem-exclude :test #'string=))
+#+end_src
+
+** Getting started
+
+*** Collection and elements
+A collection first needs to be created. This is simply a folder where all the data is stored. It needs to be registered in ~org-ilm-collections~. Org documents in the collection are used to store /elements/, which are org headings that represent either /material/ you want to learn, or a /card/ with information you wish to commit to memory. The actual contents of the elements are stored in the attachments directory, as managed by org-attach.
+
+*** Importing
+Next you need to import material using ~org-ilm-import~. A URL can be passed, with options to: download the website as an Org file; if the link contains a video such as youtube, download the video and/or subtitles; if it links to a paper or preprint, download as PDF. Org-ilm has functionality to process all the aforementioned types.
+
+You can also create new elements from scratch.
+
+*** Priority queue
+When importing, you are asked to set a priority for the material. The priority represents the position of the element in the /priority queue/, a global queue of all elements in your collection. The priority queue can be viewed using ~org-ilm-queue~. You can at all times change the priority of an element as you wish.
+
+Other types of queues exists and can be made dynamically, which will be covered later on.
+
+*** Scheduling
+Elements are scheduled for review. The process of incremental reading is done by reviewing the /Outstanding queue/, which is the priority queue /filtered on elements that are (over)due/, and sorted by their priority (i.e. position in the queue). The scheduling is automatically determined but can always be manually adjusted.
+
+*** Review
+When you are ready to start learning, you can open up the Outstanding queue using ~org-ilm-queue~ and hit =r= to start reviewing. When an element is reviewed, a new due date is calculated and so it won't pop up in your review queue until then.
+
+*** Extracts and clozes
+When reviewing material, you are /extracting/ passages, images, entire sections, etc. using ~org-ilm-extract~. Each extract will turn into a child element of the element you are processing. They will therefore have their own independent priority and scheduling, which must be processed as well.
+
+As these extracts become smaller and condensed down to a unit of information, you can select the piece of information you wish to remember and run ~org-ilm-cloze~ to create a flashcard element for it. This too will be an independent element that must be reviewed incrementally.
+
 ** Dependencies
 
 Emacs packages:
