@@ -874,8 +874,6 @@ See `parsebib-read-entry'."
       (goto-char (point-min))
       (aref (json-read) 0))))
 
-
-
 ;;;; Ost
 
 ;; Shared code for structs that hold an ost.
@@ -2102,7 +2100,7 @@ ELEMENT may be nil, in which case try to read it from point."
     ("X" "New extract"
      (lambda ()
        (interactive)
-       (org-ilm--org-new 'extract
+       (org-ilm--org-new 'material
                          (org-ilm-element-id org-ilm--element-transient-element))))
     ]
    ]
@@ -2587,19 +2585,15 @@ An empty log implies a new card, so step is 0."
   :type 'boolean
   :group 'org-ilm)
 
-(defvar org-ilm-extract-hook nil
-  "Hook run after extract was made.
-Arguments are: extract id, collection")
-
-(defvar org-ilm-card-hook nil
-  "Hook run after card was made.
-Arguments are: extract id, collection")
+(defvar org-ilm-capture-hook nil
+  "Hook run after element was captured.
+Arguments are: type, id, collection, parent-id")
 
 ;;;;; Capture
 
 (cl-defstruct org-ilm-capture
-  "Data for a capture (extract or card)."
-  type target title id ext content props file method
+  "Data for a capture (material or card)."
+  type parent title id ext content props file method
   priority scheduled template collection state bibtex
   on-success on-abort capture-kwargs)
 
@@ -2607,13 +2601,13 @@ Arguments are: extract id, collection")
   "Parse plist DATA as org-ilm-capture object, or return if it already is one.
 Alternatively pass just an org-ilm-capture object, which will be returned.
 
-TYPE should be one of 'extract 'card, or 'source.
+TYPE should be one of 'material or 'card.
 
-TARGET should be the org-capture target. If it is a string, it is
-interpreted as the org ID of a heading, which will be the
-target. Finally, if it is a symbol, it is interpreted as a collection
-name, and the user will be prompted to select a file from the collection
-to be used as the target.
+PARENT should be the org-id of the parent element if the capture
+represents an extract or a card generated from a material. If omitted,
+the capture is implied to be a new element (import) without parent
+element. In that case, COLLECTION must be set to be the collection
+symbol.
 
 DATA is a plist that contains info about the capture entry.
 
@@ -2624,11 +2618,11 @@ The callback ON-ABORT is called when capture is cancelled."
       (car data)
     
     (cl-destructuring-bind
-        (&key target type title id ext content props file method
+        (&key parent type title id ext content props file method
               priority scheduled template state on-success on-abort
               bibtex collection capture-kwargs) data
       
-      (cl-assert (member type '(extract card source)))
+      (cl-assert (member type '(material card)))
       (unless id (setq id (org-id-new)))
       (unless state
         (setq state (car (if (eq type 'card)
@@ -2639,38 +2633,24 @@ The callback ON-ABORT is called when capture is cancelled."
       (unless method (setq method 'cp))
       (cl-assert (member method '(mv cp ln lns)))
 
-      ;; Set the target.
-      (setq target
-            (cond
-             ;; Target is parent org id 
-             ((stringp target)
-              ;; If no priority given, set same as parent.
-              (unless priority
-                (when-let ((p (org-ilm-pqueue-priority target :nil-if-absent t)))
-                  (setq priority (org-ilm-pqueue-parse-new-position (car p)))))
+      ;; Target parent id or collection
+      (cond
+       ((stringp parent)
+        ;; If no priority given, set same as parent.
+        (unless priority
+          (when-let ((p (org-ilm-pqueue-priority parent :nil-if-absent t)))
+            (setq priority (org-ilm-pqueue-parse-new-position (car p)))))
 
-              ;; Determine collection
-              (when-let* ((file (org-id-find-id-file target))
-                          (col (org-ilm--collection-file file)))
-                (setq collection col))
-              
-              ;; Originally used the built-in 'id target, however for some reason
-              ;; it sometimes finds the wrong location which messes everything
-              ;; up. I noticed this behavior also with org-id-find and such. I
-              ;; should probably find the root cause, but org-node finds location
-              ;; accurately so i rely on it instead to find the location of a
-              ;; heading by id.  `(id ,target)
-              (let ((target-id (copy-sequence target)))
-                (list 'function
-                      (lambda ()
-                        (org-node-goto-id target-id)
-                        (org-back-to-heading)))))
-             ((symbolp target)
-              (setq collection target)
-              (list 'file (org-ilm--select-collection-file target)))
-             ;; TODO Determine collection based on arbitrary target?
-             ;; Maybe its ok to leave this
-             (t target)))
+        ;; Determine collection
+        (if-let* ((file (org-id-find-id-file parent))
+                  (col (org-ilm--collection-file file)))
+            (setq collection col)
+          (error "Collection not found for PARENT %s" parent)))
+       ((null parent)
+        (cl-assert (assoc collection org-ilm-collections) nil
+                   "COLLECTION must be a valid collection symbol if no PARENT is given"))
+       (t "PARENT must be org-id string"))
+
       ;; Priority. We always need a priority value.
       (setq priority
             (if priority
@@ -2713,7 +2693,7 @@ The callback ON-ABORT is called when capture is cancelled."
       (setq collection (or collection (org-ilm--active-collection)))
 
       (make-org-ilm-capture
-       :target target :type type :title title :id id :ext ext
+       :parent parent :type type :title title :id id :ext ext
        :content content :props props :file file :method method
        :priority priority :scheduled scheduled :template template
        :state state :on-success on-success :on-abort on-abort
@@ -2730,13 +2710,31 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
          (scheduled (org-ilm-capture-scheduled capture))
          (priority (org-ilm-capture-priority capture))
          (template (org-ilm-capture-template capture))
+         (parent (org-ilm-capture-parent capture))
+         target
          capture-kwargs
          attach-dir) ; Will be set in :hook, and passed to on-success
 
     (cl-assert (org-ilm-capture-p capture))
+
+    ;; Capture target. If given should be string to parent org id. Else
+    ;; collection file import.
+    (if parent
+        ;; Originally used the built-in 'id target, however for
+        ;; some reason it sometimes finds the wrong location which
+        ;; messes everything up. I noticed this behavior also with
+        ;; org-id-find and such. I should probably find the root
+        ;; cause, but org-node finds location accurately so i rely
+        ;; on it instead to find the location of a heading by id.
+        ;; `(id ,parent)
+        (let ((parent-id (copy-sequence parent)))
+          (setq target (list 'function
+                             (lambda ()
+                               (org-node-goto-id parent-id)
+                               (org-back-to-heading)))))
+      (setq target (list 'file (org-ilm--select-collection-file collection))))
     
-    ;; Save content in a  file if provided.
-    ;; TODO set MUSTBENEW to t?
+    ;; Save content in a file if provided.
     (when-let ((content (org-ilm-capture-content capture)))
       (write-region content nil (org-ilm-capture-file capture)))
 
@@ -2758,12 +2756,9 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              ;; callback. Has to be done in the hook so that point is on
              ;; the headline, and respects file-local or .dir-locals
              ;; `org-attach-id-dir'.
-             (setq attach-dir
-                   ;; If extract/card need to use inherited attach dir. If
-                   ;; new source, make new one from id.
-                   (if-let ((d (org-attach-dir)))
-                       (expand-file-name d)
-                     (org-attach-dir-from-id id)))
+             (setq attach-dir (if parent
+                                  (expand-file-name (org-attach-dir))
+                                (org-attach-dir-from-id id)))
              
              ;; Regardless of type, every headline will have an id.
              (org-entry-put nil "ID" id)
@@ -2798,7 +2793,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              (pcase type 
                ('card 
                 (org-ilm--card-log-new priority scheduled))
-               ((or 'source 'extract)
+               ('material
                 (org-ilm--material-log-new priority scheduled)))
 
              ;; Store bibtex
@@ -2808,24 +2803,26 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              )
            :before-finalize
            (lambda ()
-             ;; If this is a source header where the attachments will
-             ;; live, we need to set the DIR property, otherwise for
-             ;; some reason org-attach on children doesn't detect that
-             ;; there is a parent attachment header, even with a non-nil
+             ;; If this is an import header where the attachments will live, we
+             ;; need to set the DIR property, otherwise for some reason
+             ;; org-attach on children doesn't detect that there is a parent
+             ;; attachment header, even with a non-nil
              ;; `org-attach-use-inheritance'.
-             (when (eq type 'source)
+             (unless parent
                (org-entry-put
                 nil "DIR"
                 (file-relative-name
                  (org-attach-dir-get-create)
                  (file-name-directory (org-ilm--collection-path collection)))))
+
+             ;; TODO Should do a check that the top parent dir has DIR property,
+             ;; otherwise this fails.
              
+             ;; Attach the file in the org heading attach dir
              (when-let ((file (org-ilm-capture-file capture))
                         (method (org-ilm-capture-method capture)))
-               ;; Attach the file. Turn of auto tagging if not import source.
-               (let ((org-attach-auto-tag (if (eq type 'source)
-                                              org-attach-auto-tag
-                                            nil)))
+               ;; Turn of auto tagging if not import source.
+               (let ((org-attach-auto-tag (if parent nil org-attach-auto-tag)))
                  (org-attach-attach file nil method)
 
                  ;; Make sure the file name is the org-id
@@ -2846,23 +2843,18 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                      (funcall on-abort)))
                (when org-ilm-update-org-mem-after-capture
                  (mochar-utils--org-mem-update-cache-after-capture 'entry))
-               (pcase type
-                 ('extract
-                  (run-hook-with-args 'org-ilm-extract-hook id collection))
-                 ('card
-                  (run-hook-with-args 'org-ilm-card-hook id collection)))
+               (run-hook-with-args 'org-ilm-capture-hook
+                                   type id collection parent)
                (when-let ((on-success (org-ilm-capture-on-success capture)))
-                 (funcall on-success id attach-dir
-                          (org-ilm-capture-collection capture)))))
+                 (funcall on-success id attach-dir collection))))
+           ;; By default the capture buffer is not shown, but this can be
+           ;; overwritten in the `capture-kwargs' slot in DATA.
            :immediate-finish t))
 
     (cl-letf (((symbol-value 'org-capture-templates)
                (list
                 (append
-                 (list
-                  "i" "Import" 'entry
-                  (org-ilm-capture-target capture)
-                  template)
+                 (list "i" "Import" 'entry target template)
                  (org-combine-plists
                   capture-kwargs
                   (org-ilm-capture-capture-kwargs capture))))))
@@ -2878,14 +2870,6 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
     (if immediate-p
         (org-ilm--capture capture)
       (org-ilm--capture-transient capture))))
-
-(defun org-ilm--capture-extract (&rest data)
-  "Make an extract with DATA, see `org-ilm-capture-ensure'."
-  (apply #'org-ilm--capture-capture 'extract data))
-
-(defun org-ilm--capture-cloze (&rest data)
-  "Make a cloze with DATA, see `org-ilm-capture-ensure'."
-  (apply #'org-ilm--capture-capture 'card data))
 
 ;;;;; Transient
 
@@ -2985,17 +2969,18 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
             (org-ilm-capture-capture-kwargs capture) capture-kwargs)
       (org-ilm--capture capture))))
 
-
-
 ;;;; Org attachment
 
-(defun org-ilm--org-new (type &optional target)
+(defun org-ilm--org-new (type &optional parent)
+  "Create a new Org element of TYPE by letting user type in attachment
+content in a capture buffer."
   (let* ((tmp-file (make-temp-file "" nil ".org"))
          (after-finalize (lambda ()
                            (unless org-note-abort
                              (org-ilm--capture-capture
                               type
-                              :target (or target (org-ilm--active-collection))
+                              :parent parent
+                              :collection (org-ilm--active-collection)
                               :file tmp-file :method 'mv)))))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list (list "n" "New" 'plain (list 'file tmp-file) ""
@@ -3004,18 +2989,16 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
 (defun org-ilm-org-new-material ()
   (interactive)
-  (org-ilm--org-new 'extract))
+  (org-ilm--org-new 'material))
 
 (defun org-ilm-org-new-card ()
   (interactive)
   (org-ilm--org-new 'card))
 
-(cl-defun org-ilm-org-extract (&key title dont-update-priority)
-  "Extract text in region.
-
-Will become an attachment Org file that is the child heading of current entry."
+(defun org-ilm-org-extract (&optional title)
+  "Extract region text in Org mode attachments."
   (interactive)
-  (unless (use-region-p) (user-error "No region active."))
+  (unless (use-region-p) (user-error "No region active"))
   (let* ((file-buf (current-buffer))
          (file-path buffer-file-name)
          (file-name (file-name-base file-path))
@@ -3047,15 +3030,15 @@ Will become an attachment Org file that is the child heading of current entry."
         (when-let ((timer (org-ilm--media-extract-range region-text)))
           (setf (plist-get props :ILM_MEDIA+) timer)))
           
-      (org-ilm--capture-extract
-       :target file-org-id
+      (org-ilm--capture-capture
+       'material
+       :parent file-org-id
        :id extract-org-id
        :content region-text
        :title title
        :props props
        :on-success
        (lambda (&rest _)
-
          ;; Wrap region with targets.
          (with-current-buffer file-buf
            (save-excursion
@@ -3110,9 +3093,9 @@ A cloze is made automatically of the element at point or active region."
         (org-ilm--card-cloze-region (prog1 (point) (insert content)) (point))
         (setq buffer-text (buffer-string))))
         
-    (org-ilm--capture-cloze
-     :type 'card
-     :target file-org-id
+    (org-ilm--capture-capture
+     'card
+     :parent file-org-id
      :id card-org-id
      :content buffer-text
      :title snippet
@@ -3131,10 +3114,11 @@ A cloze is made automatically of the element at point or active region."
   "Split org document by heading level."
   (interactive)
   (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
-                  (eq major-mode 'org-mode)))
+                  (eq major-mode 'org-mode))
+             nil "Not in Org mode attachment")
 
   (unless level
-    (setq level (read-number "Split by level: "  (max (org-outline-level) 2))))
+    (setq level (read-number "Split by level: "  (max (org-outline-level) 1))))
 
   (let ((org-ilm-capture-show-menu nil))
     (save-excursion
@@ -3143,12 +3127,13 @@ A cloze is made automatically of the element at point or active region."
             title)
         (while (re-search-forward re nil t)
           (setq title (org-get-heading t t t t))
-          (beginning-of-line)
-          (insert "\n")
-          (set-mark (point))
-          (org-end-of-subtree t)
-          (insert "\n")
-          (org-ilm-org-extract :title title :dont-update-priority t))))))
+          (atomic-change-group
+            (beginning-of-line)
+            (insert "\n")
+            (set-mark (point))
+            (org-end-of-subtree t)
+            (insert "\n")
+            (org-ilm-org-extract title)))))))
 
 ;;;; Media attachment
 
@@ -4197,24 +4182,27 @@ See also `org-ilm-pdf-convert-org-respect-area'."
       ('virtual
        (let ((excerpt (org-ilm--generate-text-snippet
                        (pdf-info-gettext current-page '(0 0 1 1)))))
-         (org-ilm--capture-extract
-          :target org-id
+         (org-ilm--capture-capture
+          'material
+          :parent org-id
           :title (format "Page %s%s" current-page-real
                          (if excerpt (concat ": " excerpt) ""))
           :props (list :ILM_PDF current-page-real))))
       ('text
        (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
-         (org-ilm--capture-extract
-          :target org-id :content text :ext "org")))
+         (org-ilm--capture-capture
+          'material :parent org-id :content text :ext "org")))
       ('image
        (let* ((img-path (org-ilm--pdf-image-export extract-org-id)))
-         (org-ilm--capture-extract
-          :target org-id :file img-path
+         (org-ilm--capture-capture
+          'material
+          :parent org-id :file img-path
           :title (format "Page %s" current-page-real)
           :id extract-org-id :method 'mv :ext t)))
       ('org
-       (org-ilm--capture-extract
-        :target org-id
+       (org-ilm--capture-capture
+        'material
+        :parent org-id
         :title (format "Page %s" current-page-real)
         :id extract-org-id
         :ext "org"
@@ -4255,7 +4243,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (capture-data
                 (list
                  :title title
-                 :target org-id
+                 :parent org-id
                  :id extract-org-id
                  ;; Add PDF region so that it can be rendered in pdf page even
                  ;; when extracting as eg image
@@ -4351,8 +4339,9 @@ See also `org-ilm-pdf-convert-org-respect-area'."
           (range (alist-get 'range section)))
       (pcase output-type
         ('virtual
-         (org-ilm--capture-extract
-          :target org-id
+         (org-ilm--capture-capture
+          'material
+          :parent org-id
           :title title
           :props (list :ILM_PDF range)))
         ('text
@@ -4374,12 +4363,14 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                           'word pdf-buffer)
                          "\n"))))
 
-           (org-ilm--capture-extract
-            :target org-id :content (buffer-string) :ext "org"
+           (org-ilm--capture-capture
+            'material
+            :parent org-id :content (buffer-string) :ext "org"
             :title title)))
         ('org
-         (org-ilm--capture-extract
-          :target org-id :id extract-org-id :ext "org"
+         (org-ilm--capture-capture
+          'material
+          :parent org-id :id extract-org-id :ext "org"
           :title title
           :on-success
           (lambda (&rest _)
@@ -4416,8 +4407,9 @@ See also `org-ilm-pdf-convert-org-respect-area'."
           (org-ilm-capture-show-menu nil))
       (dolist (section outline)
         (when (= depth (alist-get 'depth section))
-          (org-ilm--capture-extract
-           :target org-id
+          (org-ilm--capture-capture
+           'material
+           :parent org-id
            :title (concat "Section: " (alist-get 'title section))
            :props (list :ILM_PDF (alist-get 'range section))))))))
 
@@ -6305,8 +6297,9 @@ A lot of formatting code from org-ql."
 (defun org-ilm-import-buffer ()
   (interactive)
   (org-ilm--capture-capture
-   'source :content (buffer-string)
-   :target (org-ilm--active-collection)))
+   'material
+   :collection (org-ilm--active-collection)
+   :content (buffer-string)))
 
 ;;;;; File
 
@@ -6372,8 +6365,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 (defun org-ilm-import-file (file collection method)
   "Import a file."
   (cl-assert (member method '(mv cp ln lns)))  
-  (org-ilm--capture
-   :type 'source :target collection
+  (org-ilm--capture-capture
+   'material :collection collection
    :file file :method method :ext t))
 
 ;;;;; Media
@@ -6420,8 +6413,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (interactive)
       (cl-destructuring-bind (&key source title collection &allow-other-keys)
           (org-ilm--import-media-transient-args)
-        (org-ilm--capture
-         :type 'source :target collection
+        (org-ilm--capture-capture
+         'material :collection collection
          :title title :content ""
          :props (list :ILM_MEDIA source))))
     :inapt-if-not
@@ -6447,7 +6440,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
     (setq source (read-string "URL or ID: ")))
 
   (when (and source (not (string-empty-p source)))
-    (let* ((data (org-ilm--citation-get-zotero-json source))
+    (let* ((data (org-ilm--citation-get-zotero source))
            (type "resource")
            (source-type (if (org-url-p source) 'url 'id))
            (title (or (alist-get 'title data)
@@ -6641,8 +6634,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
         (let ((transient-args (transient-args 'org-ilm--import-resource-transient)))
           (org-ilm--capture-capture
-           'source
-           :target (org-ilm--active-collection)
+           'material
+           :collection (org-ilm--active-collection)
            :title title
            :id id
            :bibtex bibtex
@@ -6664,7 +6657,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                         source nil
                         (expand-file-name (concat id ".pdf") attach-dir))
                        (mochar-utils--org-with-point-at id
-                         (org-attach-sync)))
+                         (org-attach-sync)
+                         (org-entry-put nil "ILM_EXT" "pdf")))
                    (error (message "Failed to download paper for %s" title))))
 
                (when html-download
@@ -6807,9 +6801,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
        (interactive)
        (cl-destructuring-bind (&key collection entry attachment method media)
            (org-ilm--import-registry-transient-args)
-         (org-ilm--capture
-          :type 'source
-          :target collection
+         (org-ilm--capture-capture
+          'material
+          :collection collection
           :file attachment
           :content (when (and (not attachment) media) "")
           :method (or (when method (intern method)) 'cp)
@@ -6830,8 +6824,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   "Import a registry entry."
   (cl-assert (or (null method) (member method '(mv cp ln lns))))
 
-  (org-ilm--capture
-   :type 'source :target collection
+  (org-ilm--capture-capture
+   'material :collection collection
    :file attachment :method (or method 'cp) :ext (when attachment t)
    :title (org-mem-entry-title entry)
    :props (list :REGISTRY (org-mem-entry-id entry))))
