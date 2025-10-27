@@ -2095,6 +2095,36 @@ ELEMENT may be nil, in which case try to read it from point."
      :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
      :transient transient--do-call)
     ]
+   ["Queue"
+    ("qa" "Add"
+     (lambda ()
+       (interactive)
+       (let* ((element org-ilm--element-transient-element)
+              (queue-buffer (org-ilm--queue-completing-read
+                             (org-ilm-element-title element))))
+         (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
+         (with-current-buffer (switch-to-buffer queue-buffer)
+           (org-ilm-queue-revert)))))
+    ("q+" "Add all"
+     (lambda ()
+       (interactive)
+       (transient-quit-all)
+       (org-ilm-queue-add-dwim)))
+    ("qm" "Mark all"
+     (lambda ()
+       (interactive)
+       (let* ((element org-ilm--element-transient-element)
+              (children (org-ilm--element-children (org-ilm-element-id element) 'headline t t))
+              (queue-buffer (org-ilm--queue-completing-read nil t)))
+         (with-current-buffer queue-buffer
+           (dolist (el children)
+             (when-let ((id (org-element-property :ID el)))
+               (when (org-ilm-queue--contains-p org-ilm-queue id)
+                 (push id org-ilm--queue-marked-objects))))
+           (org-ilm-queue-revert))
+         (switch-to-buffer queue-buffer)))
+     :inapt-if-not org-ilm--queue-buffers)
+    ]
    ]
 
   ["Actions"
@@ -5507,6 +5537,18 @@ queue buffer."
      (with-current-buffer buf
        ,@body)))
 
+(defun org-ilm--queue-completing-read (&optional new-name require-match)
+  "Choose a queue buffer or make new."
+   (let* ((queue-buffers (mapcar (lambda (b) (cons (buffer-name b) b))
+                                 (org-ilm--queue-buffers)))
+          (queue (completing-read "Add to queue, or create new: "
+                                  queue-buffers nil require-match)))
+     (or (cdr (assoc queue queue-buffers))
+         (org-ilm--queue-buffer-create
+          (org-ilm--queue-create
+           (org-ilm--active-collection)
+           :name (if (string-empty-p queue) new-name queue))))))
+
 (defun org-ilm-queue (new &optional dont-switch)
   "Build a queue and view it in Agenda-like buffer."
   (interactive "P")
@@ -5607,7 +5649,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
 ;; - Mainly queue-specific priorities.
 ;; - Exclude cards.
 ;; Replace current arg with double arg
-(defun org-ilm-queue-add-dwim (arg)
+(defun org-ilm-queue-add-dwim (&optional arg)
   "Add element at point + descendants to queue. With ARG, add to new queue.
 
 If point on headline, add headline and descendants.
@@ -5615,20 +5657,9 @@ If point on concept, add all headlines of concept."
   (interactive "P")
   (when-let* ((headline (org-ilm--org-headline-at-point))
               (type (org-ilm-type headline))
-              (collection (or (org-ilm--active-collection)
-                              (org-ilm--select-collection)))
-              (queue-buffer
-               (let* ((queue-buffers (mapcar (lambda (b) (cons (buffer-name b) b))
-                                             (org-ilm--queue-buffers)))
-                      (queue (completing-read "Add to queue, or create new: "
-                                              queue-buffers)))
-                 (or (cdr (assoc queue queue-buffers))
-                     (org-ilm--queue-buffer-create
-                      (org-ilm--queue-create
-                       collection
-                       :name (when (string-empty-p queue)
-                               (format "[%s] %s" (upcase (symbol-name type))
-                                       (org-element-property :title headline))))))))
+              (queue-buffer (org-ilm--queue-completing-read
+                             (format "[%s] %s" (upcase (symbol-name type))
+                                     (org-element-property :title headline))))
               (n-added 0))
     (pcase type
       ('concept
