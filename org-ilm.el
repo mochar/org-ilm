@@ -4584,7 +4584,8 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     ;;   org-link--try-link-store-functions(nil)
     ;;   org-store-link(nil)
     (let ((org-link-parameters nil))
-      (apply (if card-p #'org-ilm--capture-cloze #'org-ilm--capture-extract)
+      (apply #'org-ilm--capture-capture
+             (if card-p 'card 'material)
              :on-success
              (lambda (&rest _)
                (when capture-on-success
