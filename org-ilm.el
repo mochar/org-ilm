@@ -1129,6 +1129,7 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
 (defun org-ilm--collection-eldoc-element-info (callback)
   "Return info about the element at point."
   (when-let* ((element (org-ilm-element-from-context))
+              (_ (member (org-ilm-element-type element) '(material card)))
               (doc ""))
 
     (setq doc (concat doc
@@ -2044,8 +2045,14 @@ ELEMENT may be nil, in which case try to read it from point."
       (propertize
        (org-ilm-element-title org-ilm--element-transient-element)
        'face 'italic)))
+   (:info "")
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
+   ("n" "Concepts..."
+    (lambda ()
+      (interactive)
+      (org-ilm-element-with-point-at org-ilm--element-transient-element
+        (org-ilm-concepts))))
    ]
 
   [
@@ -2092,6 +2099,7 @@ ELEMENT may be nil, in which case try to read it from point."
     ]
 
    ["Media"
+    :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
     ("ms" "Set"
      (lambda ()
        (interactive)
@@ -7538,7 +7546,7 @@ rounded and clamped to at least 1."
   (interactive "P")
   (let* ((collection (org-ilm--collection-from-context))
          (collection (if (or select-collection-p (null collection))
-                         (car (org-ilm--select-collection))
+                         (org-ilm--select-collection)
                        collection))
          (file (org-ilm--select-collection-file collection)))
     (cl-letf (((symbol-value 'org-capture-templates)
@@ -7561,7 +7569,8 @@ rounded and clamped to at least 1."
     (user-error "Headline already has a TODO state!"))
    (t
     (org-todo (car org-ilm-concept-states))
-    (org-id-get-create))))
+    (org-id-get-create)
+    (save-buffer))))
 
 (defun org-ilm-concept-remove ()
   "Remove concept from CONCEPTS property for element at point."
@@ -7586,7 +7595,8 @@ rounded and clamped to at least 1."
                                     " "))
     (if (string-empty-p concepts-str)
         (org-entry-delete nil "CONCEPTS+")
-      (org-entry-put nil "CONCEPTS+" concepts-str))))
+      (org-entry-put nil "CONCEPTS+" concepts-str))
+    (save-buffer)))
 
 (defun org-ilm-concept-add ()
   "Add concept to CONCEPTS property for element at point."
@@ -7606,7 +7616,96 @@ rounded and clamped to at least 1."
              (concept-link (org-link-make-string
                             (concat "id:" concept-id) concept-desc)))
         (org-entry-put nil "CONCEPTS+"
-                       (concat cur-concepts " " concept-link)))))))
+                       (concat cur-concepts " " concept-link))
+        (save-buffer))))))
+
+;;;;; Transient
+
+(defun org-ilm-concepts ()
+  (interactive)
+  (if-let* ((element (org-ilm-element-from-context))
+            (id (org-ilm-element-id element))
+            (entry (org-mem-entry-by-id id)))
+      (let* ((concept-data (org-ilm-element-concepts element))
+             (concept-ids (copy-sequence (car concept-data)))
+             (n-direct (cdr concept-data))
+             (prop-ids (org-ilm--org-with-point-at id
+                         (mapcar #'car (org-ilm--concept-parse-property))))
+             (parent-ids (mapcar (lambda (c) (nth 4 c))
+                                 (org-mem-entry-crumbs entry)))
+             (data (list :element element)))
+        (seq-do-indexed
+         (lambda (concept-id i)
+             (push (list :direct (and n-direct (< i n-direct))
+                         :outline (member concept-id parent-ids)
+                         :property (member concept-id prop-ids)
+                         :entry (org-mem-entry-by-id concept-id))
+                   (plist-get data :concepts)))
+         (reverse concept-ids))
+        (org-ilm--concept-transient data))
+    (user-error "No element at point")))
+
+(defun org-ilm--concept-transient-concepts-build (concepts)
+  (seq-map
+   (lambda (concept)
+     (let* ((entry (plist-get concept :entry))
+            (title (mochar-utils--org-mem-title-full entry)))
+       (transient-parse-suffix '
+        'org-ilm--concept-transient
+        (list :info* (concat "- " title)))))
+   concepts))
+
+(transient-define-prefix org-ilm--concept-transient (scope)
+  :refresh-suffixes t
+
+  ["Outline"
+   :setup-children
+   (lambda (_)
+     (org-ilm--concept-transient-concepts-build
+      (seq-filter
+       (lambda (concept)
+         (and (plist-get concept :outline)
+              (plist-get concept :direct)))
+       (plist-get (transient-scope) :concepts))))
+   ]
+
+  ["Inherited"
+   :setup-children
+   (lambda (_)
+     (org-ilm--concept-transient-concepts-build
+      (seq-filter
+       (lambda (concept)
+         (and (not (plist-get concept :property))
+              (not (plist-get concept :outline))))
+       (plist-get (transient-scope) :concepts))))
+   ]
+
+  ["Property"
+   :setup-children
+   (lambda (suffixes)
+     (append
+      (org-ilm--concept-transient-concepts-build
+       (seq-filter
+        (lambda (concept)
+          (plist-get concept :property))
+        (plist-get (transient-scope) :concepts)))
+      suffixes))
+   ("a" "Add"
+    (lambda ()
+      (interactive)
+      (org-ilm-element-with-point-at (plist-get (transient-scope) :element)
+        (org-ilm-concept-add)))
+    :transient transient--do-call)
+   ("r" "Remove"
+    (lambda ()
+      (interactive)
+      (org-ilm-element-with-point-at (plist-get (transient-scope) :element)
+        (org-ilm-concept-remove)))
+    :transient transient--do-call)
+   ]
+  
+  (interactive)
+  (transient-setup 'org-ilm--concept-transient nil nil :scope scope))
   
 ;;;;; Parsing
 
