@@ -157,6 +157,8 @@ be due starting 2am."
       (progn
         (add-hook 'after-change-major-mode-hook
                   #'org-ilm--attachment-prepare-buffer)
+        (add-hook 'org-mode-hook
+                  #'org-ilm--collection-prepare-buffer)
         (add-hook 'org-mem-post-full-scan-functions
                   #'org-ilm--org-mem-hook)
         (add-hook 'org-mem-post-targeted-scan-functions
@@ -169,6 +171,8 @@ be due starting 2am."
     ;; Disable
     (remove-hook 'after-change-major-mode-hook
                  #'org-ilm--attachment-prepare-buffer)
+    (remove-hook 'org-mode-hook
+                 #'org-ilm--collection-prepare-buffer)
     (remove-hook 'org-mem-post-full-scan-functions
               #'org-ilm--org-mem-hook)
     (remove-hook 'org-mem-post-targeted-scan-functions
@@ -1115,6 +1119,53 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
           (mapcar #'org-mem-entry-tags
                   (org-ilm--collection-entries collection)))
    :test #'string=))
+
+;;;;; Annotations
+
+;; When in a collection org file, add "annotations" to element headlines:
+;; - Eldoc doc in echo area when point is on element
+;; - TODO Overlays next to element headlines
+
+(defun org-ilm--collection-eldoc-element-info (callback)
+  "Return info about the element at point."
+  (when-let* ((element (org-ilm-element-from-context))
+              (doc ""))
+
+    (setq doc (concat doc
+                      "🚩 "
+                      ;; "P: "
+                      (org-ilm-element-priority-formatted element)
+                      " 📅 "
+                      ;; " S: "
+                      (org-ql-view--format-relative-date
+                       (round (org-ilm-element-schedrel element)))))
+
+
+    ;; Concepts
+    (let ((ids (car (org-ilm-element-concepts element)))
+          (n-direct (cdr (org-ilm-element-concepts element))))
+      (when ids
+        (setq doc (concat
+                   doc
+                   " 💡 "
+                   ;; " C: "
+                   (string-join
+                    (seq-map-indexed 
+                     (lambda (id i)
+                       (when-let ((entry (org-mem-entry-by-id id)))
+                         (mochar-utils--org-mem-title-full entry)))
+                     ids)
+                    ", ")))))
+
+    (funcall callback doc))
+  t)
+
+(defun org-ilm--collection-prepare-buffer ()
+  (when (org-ilm--collection-file)
+    (add-hook 'eldoc-documentation-functions
+              #'org-ilm--collection-eldoc-element-info
+              nil 'local)))
+
 
 
 ;;;; Priority queue
@@ -5987,8 +6038,8 @@ A lot of formatting code from org-ql."
            (cond
             (missing "NA")
             (due (org-add-props
-                                   (org-ql-view--format-relative-date
-                                    (round due))
+                     (org-ql-view--format-relative-date
+                      (round due))
                      nil 'face 'org-ql-view-due-date))
             (t ""))
            marked missing))))
@@ -6067,13 +6118,6 @@ A lot of formatting code from org-ql."
    :keymap (or keymap org-ilm-queue-map)
    :actions '("S" ignore)))
 
-(defun org-ilm--queue-eldoc-show-info ()
-  "Return info about the element at point in the queue buffer."
-  (when-let* ((element (cdr (org-ilm--vtable-get-object))))
-    (when (org-ilm-element-p element)
-      (propertize (format "[#%s]" (org-ilm-element-pcookie element))
-                  'face 'org-priority))))
-
 (cl-defun org-ilm--queue-buffer-build (&key buffer switch-p keymap)
   "Build the contents of the queue buffer, and optionally switch to it."
   (org-ilm-with-queue-buffer buffer
@@ -6089,7 +6133,9 @@ A lot of formatting code from org-ql."
     (setq-local buffer-read-only t)
     (hl-line-mode 1)
     (eldoc-mode 1)
-    (setq-local eldoc-documentation-function #'org-ilm--queue-eldoc-show-info)
+    (add-hook 'eldoc-documentation-functions
+              #'org-ilm--collection-eldoc-element-info
+              nil 'local)
     (goto-char (point-min))
     (when switch-p
       (switch-to-buffer buffer))))
