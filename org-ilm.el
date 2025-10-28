@@ -2352,6 +2352,8 @@ FSRS default: t"
                  (number :tag "Custom interval in minutes"))
   :group 'org-ilm-card)
 
+(defconst org-ilm-property-desired-retention "ILM_RETENTION")
+
 ;;;;; Logic
 
 (defun org-ilm-card-first-interval ()
@@ -2373,25 +2375,47 @@ FSRS default: t"
    :maximum-interval org-ilm-card-fsrs-maximum-interval
    :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p))
 
+;; TODO If property set in element or non-concept ancestor, use that instead
+(defun org-ilm--card-element-scheduler (element)
+  "Return the FSRS scheduler with parameters based on ELEMENT and its
+concept properties."
+  (cl-assert (org-ilm-element-card-p element) nil "Element not a card")
+  ;; TODO Validate retention values!!
+  (let ((retention (or
+                    (when-let ((r (org-entry-get nil org-ilm-property-desired-retention)))
+                      (string-to-number r))
+                    (apply
+                     #'org-ilm--mean
+                     (mapcar
+                      (lambda (x)
+                        (string-to-number (cdr x)))
+                      (org-ilm--concept-property-or-inherited
+                       (org-ilm-element-id element)
+                       org-ilm-property-desired-retention)))
+                    org-ilm-card-fsrs-desired-retention)))
+    (fsrs-make-scheduler
+     :desired-retention retention
+     :learning-steps org-ilm-card-fsrs-learning-steps
+     :relearning-steps org-ilm-card-fsrs-relearning-steps
+     :maximum-interval org-ilm-card-fsrs-maximum-interval
+     :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p)))
+
 (defun org-ilm--card-review (rating &optional org-id timestamp duration)
   "Rate a card element with RATING, update log and scheduled date.
 If ORG-ID ommitted, assume point at card headline."
   (org-ilm--org-with-point-at org-id
-    (if-let* ((headline (org-ilm--org-headline-at-point))
-              (org-id (org-id-get))
-              (collection (org-ilm--collection-file))
-              (priority (org-ilm-pqueue-priority org-id :collection collection))
-              (scheduled (org-element-property :scheduled headline)))
-        (atomic-change-group
-          (cl-assert (eq (org-ilm-type headline) 'card))
-          (let ((review (org-ilm--card-log-review
-                         priority (ts-parse-org-element scheduled) rating
-                         (org-ilm--card-default-scheduler)
-                         timestamp duration)))
-            (org-ilm--org-schedule
-             :timestamp (ts-parse (org-ilm-log-review-due review)))))
-      ;; TODO error message sucks
-      (error "Cannot rate headline due to lacking info"))))
+    (let ((element (org-ilm-element-at-point)))
+      (cl-assert element nil "Not an ilm element")
+      (cl-assert (org-ilm-element-card-p element) nil "Element not a card")
+      (atomic-change-group
+        (let ((review (org-ilm--card-log-review
+                       (org-ilm-element-priority element)
+                       (org-ilm-element-sched element)
+                       rating
+                       (org-ilm--card-element-scheduler element)
+                       timestamp duration)))
+          (org-ilm--org-schedule
+           :timestamp (ts-parse (org-ilm-log-review-due review))))))))
 
 ;;;;; Logging
 
@@ -7155,6 +7179,11 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   "Generate a uniform random number between 0 and 1."
   (/ (random 1000000) 1000000.0))
 
+(defun org-ilm--mean (&rest numbers)
+  "Return the mean of NUMBERS."
+  (/ (apply #'+ numbers)
+     (float (length numbers))))
+
 (defun org-ilm--random-exponential (rate)
   "Generate an exponential random variable with given rate parameter."
   (- (/ (log (org-ilm--random-uniform)) rate)))
@@ -7862,6 +7891,21 @@ and again by `org-ilm-queue-mark-by-concept'."
 
     concept-and-descendants))
 
+(defun org-ilm--concept-property-or-inherited (id property)
+  "Return the PROPERTY value of concept, or that of its earliest ancestor, else nil."
+  (pcase-let* ((`(,concepts . ,n-direct) (org-ilm--concept-cache-gather id))
+               (values))
+    (when (and n-direct (> n-direct 0))
+      (setq concepts (last concepts n-direct))
+      (dolist (concept concepts)
+        (when-let ((entry (org-mem-entry-by-id concept)))
+          (if-let ((value (org-mem-entry-property property entry)))
+              (setf (alist-get concept values nil nil #'string=) value)
+            (dolist (value (org-ilm--concept-property-or-inherited
+                            concept property))
+              (setf (alist-get (car value) values nil nil #'string=) (cdr value))))))
+      values)))
+
 
 ;;;;; Concept cache
 
@@ -7876,12 +7920,10 @@ Gets reset after org-mem refreshes.")
   (setq org-ilm-concept-cache (make-hash-table :test 'equal)))
 
 (defun org-ilm--concept-cache-gather (headline-or-id)
-  "Gather recursively headline's priority and parent concept priorities.
-Headline can be a concept or not."
+  "Gather recursively headline's concepts. Headline may itself be a concept."
   (let ((id (if (stringp headline-or-id)
                 headline-or-id
               (org-element-property :ID headline-or-id))))
-    ;; (org-ilm--debug "Gathering concepts for:" id)
     
     (or (gethash id org-ilm-concept-cache)
         (let* ((parents-data
@@ -7908,6 +7950,7 @@ Headline can be a concept or not."
               (puthash id data org-ilm-concept-cache))
             ;; Return data
             data)))))
+
 
 ;;;; Review
 
