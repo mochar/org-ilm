@@ -156,6 +156,13 @@ save-excursion."
          (org-mem-updater-ensure-id-node-at-point-known)))
       (_ (error "EXTENT must be one of 'file or 'entry")))))
 
+(defun mochar-utils--org-mem-title-full (entry)
+  (cl-assert (org-mem-entry-p entry))
+  (pcase-let* ((affix (funcall org-node-affixation-fn entry (org-mem-entry-title entry)))
+               (`(,title ,prefix ,suffix) affix)
+               (title (concat prefix title suffix)))
+    title))
+
 ;;;; Web
 
 (defun mochar-utils--get-page-title (url &optional slugify)

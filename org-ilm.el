@@ -123,7 +123,7 @@ be due starting 2am."
   "z" #'org-ilm-cloze
   "c" #'org-ilm-cloze-toggle
   "t" #'org-ilm-attachment-transclude
-  "n" #'org-ilm-concept-dwim
+  "n" org-ilm-concept-map
   "d" #'org-ilm-element-delete
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
@@ -2158,16 +2158,19 @@ ELEMENT may be nil, in which case try to read it from point."
   "Open menu to apply an action on an element."
   (interactive)
   (let ((element (org-ilm-element-from-context)))
-    (if (null element)
-        (user-error "No ilm element!")
+    (cond
+     ((null element)
+      (user-error "No ilm element!"))
+     ((eq (org-ilm-element-type element) 'concept)
+      (user-error "Element actions not available for concepts"))
+     (t
       (setq org-ilm--element-transient-element element)
       ;; Unset var after transient exited. Tried temporarily setting var within
       ;; let, but gets lost somehow.
       (org-ilm--add-hook-once
        'transient-post-exit-hook
        (lambda () (setq org-ilm--element-transient-element nil)))
-      (org-ilm--element-transient))))
-
+      (org-ilm--element-transient)))))
 
 ;;;; Material
 
@@ -7426,6 +7429,141 @@ rounded and clamped to at least 1."
 
 ;;;; Concepts
 
+;;;;; Functions
+
+(defun org-ilm--concept-select-entry (&optional collection prompt)
+  "Select org-mem concept entries."
+  (setq collection
+        (or collection
+            (org-ilm--collection-from-context)
+            (org-ilm--active-collection)))
+  (let ((choice
+         (org-node-read-candidate
+          (or prompt "Concept: ") nil
+          (lambda (name entry)
+            (when-let ((state (org-mem-todo-state entry))
+                       (file (org-mem-entry-file entry)))
+              (and
+               (eq 'concept (org-ilm-type state))
+               (org-ilm--collection-file file collection))))
+          'require-match)))
+    (gethash choice org-node--candidate<>entry)))
+
+(defun org-ilm--concept-parse-property (&optional string)
+  "Return (id . title) of concepts in STRING or property of heading at point."
+  (unless string (setq string (or string (org-entry-get nil "CONCEPTS"))))
+  (when string
+    (let ((link-match-pos 0)
+          concepts)
+      (while-let ((_ (string-match org-link-any-re string link-match-pos))
+                  (concept (cons (substring (match-string 2 string) 3)
+                                 (match-string 3 string))))
+        (push concept concepts)
+        (setq link-match-pos (match-end 1)))
+      concepts)))
+
+
+;;;;; Commands
+
+(defvar-keymap org-ilm-concept-map
+  :doc "Keymap for concept actions."
+  "a" #'org-ilm-concept-add
+  "r" #'org-ilm-concept-remove
+  "." #'org-ilm-concept-into
+  "n" #'org-ilm-concept-new)
+
+(defun org-ilm-concept-dwim ()
+  "Add concept if point in ilm element, otherwise create a new concept."
+  (interactive)
+  (if (eq major-mode 'org-mode)
+      (let* ((at-heading-p (org-at-heading-p))
+             (state (when at-heading-p (org-get-todo-state)))
+             (ilm-type (org-ilm-type state)))
+        (cond
+         (ilm-type
+          (call-interactively #'org-ilm-concept-add))
+         ((and at-heading-p (null state))
+          (call-interactively #'org-ilm-concept-into))
+         (t (call-interactively #'org-ilm-concept-new))))
+    (call-interactively #'org-ilm-concept-new)))
+
+(defun org-ilm-concept-new (&optional select-collection-p)
+  "Create a new concept."
+  (interactive "P")
+  (let* ((collection (org-ilm--collection-from-context))
+         (collection (if (or select-collection-p (null collection))
+                         (car (org-ilm--select-collection))
+                       collection))
+         (file (org-ilm--select-collection-file collection)))
+    (cl-letf (((symbol-value 'org-capture-templates)
+               (list
+                (list
+                 "s" "Concept" 'entry (list 'file file)
+                 (concat "* " (car org-ilm-concept-states) " %?")
+                 :hook
+                 (lambda ()
+                   (org-id-get-create))))))
+      (org-capture nil "s"))))
+
+(defun org-ilm-concept-into ()
+  "Convert headline at point to a concept."
+  (interactive)
+  (cond
+   ((not (and (eq major-mode 'org-mode) (org-at-heading-p)))
+    (user-error "Point not on a headline!"))
+   ((org-get-todo-state)
+    (user-error "Headline already has a TODO state!"))
+   (t
+    (org-todo (car org-ilm-concept-states))
+    (org-id-get-create))))
+
+(defun org-ilm-concept-remove ()
+  "Remove concept from CONCEPTS property for element at point."
+  (interactive)
+  (unless (org-ilm-type)
+    (user-error "Not on an element heading"))
+  (let* ((concepts-str (org-entry-get nil "CONCEPTS"))
+         (concepts (org-ilm--concept-parse-property concepts-str))
+         (entries (seq-keep
+                   (lambda (c)
+                     (when-let* ((entry (org-mem-entry-by-id (car c)))
+                                 (title (mochar-utils--org-mem-title-full entry)))
+                       (cons title entry)))
+                   concepts))
+         (entry-title (completing-read "Remove concept: " entries nil t)))
+    (setf (alist-get entry-title entries nil 'remove #'string=) nil)
+    (setq concepts-str (string-join (mapcar (lambda (entry)
+                                              (format "[[id:%s][%s]]"
+                                                      (org-mem-entry-id (cdr entry))
+                                                      (org-mem-entry-title (cdr entry))))
+                                            entries)
+                                    " "))
+    (if (string-empty-p concepts-str)
+        (org-entry-delete nil "CONCEPTS+")
+      (org-entry-put nil "CONCEPTS+" concepts-str))))
+
+(defun org-ilm-concept-add ()
+  "Add concept to CONCEPTS property for element at point."
+  ;; TODO Skip if self or descendant.
+  (interactive)
+  (let* ((concept-entry (org-ilm--concept-select-entry nil "Add concept: "))
+         (concept-id (org-mem-entry-id concept-entry))
+         (cur-concepts (org-entry-get nil "CONCEPTS" 'inherit)))
+    (cond
+     ((string= (org-id-get) concept-id)
+      (user-error "Cannot add concept to itself"))
+     ((and cur-concepts (string-match concept-id cur-concepts))
+      ;; TODO offer option to remove
+      (user-error "Concept already added"))
+     (t
+      (let* ((concept-desc (mochar-utils--org-mem-title-full concept-entry))
+             (concept-link (org-link-make-string
+                            (concat "id:" concept-id) concept-desc)))
+        (org-entry-put nil "CONCEPTS+"
+                       (concat cur-concepts " " concept-link)))))))
+  
+;;;;; Parsing
+
 ;; TODO Probably still incredibly inefficient as we have to go up the hierarchy
 ;; everytime. A better option might be to use org-ql to find all headlines with
 ;; a CONCEPTS property and store mapping org-id -> concepts in a cache. Then use
@@ -7579,86 +7717,6 @@ and again by `org-ilm-queue-mark-by-concept'."
 
     concept-and-descendants))
 
-;;;;; Functions
-
-(defun org-ilm--concept-select-entry (&optional collection)
-  (setq collection
-        (or collection
-            (org-ilm--collection-from-context)
-            (org-ilm--active-collection)))
-  (let ((choice
-         (org-node-read-candidate
-          "Concept: " nil
-          (lambda (name entry)
-            (when-let ((state (org-mem-todo-state entry))
-                       (file (org-mem-entry-file entry)))
-              (and
-               (eq 'concept (org-ilm-type state))
-               (org-ilm--collection-file file collection))))
-          'require-match)))
-    (gethash choice org-node--candidate<>entry)))
-
-;;;;; Commands
-
-(defun org-ilm-concept-dwim ()
-  "Add concept if point in ilm element, otherwise create a new concept."
-  (interactive)
-  (if (eq major-mode 'org-mode)
-      (let* ((at-heading-p (org-at-heading-p))
-             (state (when at-heading-p (org-get-todo-state)))
-             (ilm-type (org-ilm-type state)))
-        (cond
-         ((and ilm-type (not (eq ilm-type 'concept)))
-          (call-interactively #'org-ilm-concept-add))
-         ((and at-heading-p (null state))
-          (call-interactively #'org-ilm-concept-into))
-         (t (call-interactively #'org-ilm-concept-new))))
-    (call-interactively #'org-ilm-concept-new)))
-
-(defun org-ilm-concept-new (&optional select-collection-p)
-  "Create a new concept."
-  (interactive "P")
-  (let* ((collection (org-ilm--collection-from-context))
-         (collection (if (or select-collection-p (null collection))
-                         (car (org-ilm--select-collection))
-                       collection))
-         (file (org-ilm--select-collection-file collection)))
-    (cl-letf (((symbol-value 'org-capture-templates)
-               (list
-                (list
-                 "s" "Concept" 'entry (list 'file file) "* CONC %?"
-                 :hook (lambda () (org-node-nodeify-entry))))))
-      (org-capture nil "s"))))
-
-(defun org-ilm-concept-into ()
-  "Convert headline at point to a concept."
-  (interactive)
-  (cond
-   ((not (and (eq major-mode 'org-mode) (org-at-heading-p)))
-    (user-error "Point not on a headline!"))
-   ((org-get-todo-state)
-    (user-error "Headline already has a TODO state!"))
-   (t
-    (org-todo (car org-ilm-concept-states))
-    (org-node-nodeify-entry))))
-
-(defun org-ilm-concept-add ()
-  "Annotate headline at point with a concept.
-
-TODO Skip if self or descendant."
-  (interactive)
-  (let* ((concept-entry (org-ilm--concept-select-entry))
-         (concept-id (org-mem-entry-id concept-entry))
-         (cur-concepts (org-entry-get nil "CONCEPTS" t)))
-    (if (and cur-concepts
-             (string-match concept-id cur-concepts))
-        ;; TODO offer option to remove
-        (message "Concept already added")
-      (let* ((concept-desc (org-mem-entry-title concept-entry))
-             (concept-link (org-link-make-string
-                            (concat "id:" concept-id) concept-desc)))
-        (org-entry-put nil "CONCEPTS+"
-                       (concat cur-concepts " " concept-link))))))
 
 ;;;;; Concept cache
 
