@@ -1612,10 +1612,10 @@ DUE is the new scheduled review timestamp."
         (cl-assert (null review-log))
       (cl-assert review-log)
       ;; TODO Is this midnight shift calculation right????
-      (setf (plist-get review-data :delay)
-            (org-ilm--ts-diff-rounded-days
-             timestamp
-             (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled))))
+      (let ((delay (org-ilm--ts-diff-rounded-days
+                    timestamp
+                    (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled))))
+        (setf (plist-get review-data :delay) delay)))
 
     (let ((review (apply #'make-org-ilm-log-review review-data)))
       (org-ilm--log-insert review)
@@ -2182,29 +2182,50 @@ ELEMENT may be nil, in which case try to read it from point."
   (org-ilm--log-log 'material priority due scheduled
                     :duration duration :timestamp timestamp))
 
+(defun org-ilm--material-schedule-multiplier (priority)
+  "Return multiplier (A-factor) from PRIORITY.
+
+Map PRIORITY ∈ [0,1] to a smooth A-Factor ∈ [1.1,3.0].
+Lower PRIORITY → higher importance → smaller A."
+  (cl-assert (<= 0.0 priority 1.0))
+  (let* ((min-a 1.1)
+         (max-a 2.0)
+         (k 5.0) ;; steepness
+         (x (max 0.0 (min 1.0 priority)))
+         ;; standard logistic in [0,1]
+         (sig (/ 1.0 (+ 1.0 (exp (* (- k) (- x 0.5))))))
+         ;; normalize so 0→0, 1→1
+         (sig-norm (/ (- sig (/ 1.0 (+ 1.0 (exp (* k 0.5))))) 
+                      (- (/ 1.0 (+ 1.0 (exp (* (- k) 0.5))))
+                         (/ 1.0 (+ 1.0 (exp (* k 0.5))))))))
+    (+ min-a (* (- max-a min-a) sig-norm))))
+
 (defun org-ilm--material-calculate-interval (priority scheduled last-review)
-  "Calculate the new scheduled interval in days."
+  "Calculate the new scheduled interval in days.
+
+If the scheduled date is before or equal to LAST-REVIEW this is treated
+as a new element and the initial interval based on PRIORITY is returned."
   (cl-assert (and (ts-p scheduled) (ts-p last-review)))
 
-  (let ((review-interval (org-ilm--ts-diff-rounded-days (ts-now) last-review)))
+  (let* ((now (ts-now))
+         (review-interval (org-ilm--ts-diff-rounded-days now last-review))
+         (sched-interval (org-ilm--ts-diff-rounded-days scheduled last-review)))
     ;; If the scheduled date was adjusted to be before the last review, then see
     ;; it as a new element and use initial interval base on priority
-    (if (< (org-ilm--ts-diff-rounded-days (ts-now) last-review) 0)
-        (org-ilm--initial-schedule-interval-from-priority priority)
-      
-      (let* ((multiplier 1.5)
-             (sched-interval (org-ilm--ts-diff-rounded-days scheduled last-review))
+    (if (<= sched-interval 0)
+        (org-ilm--initial-schedule-interval-from-priority (cdr priority))
+      (let* ((multiplier (float (org-ilm--material-schedule-multiplier (cdr priority))))
              (new-interval (* sched-interval multiplier)))
 
         ;; Reviewed earlier than scheduled. Take proportion of time from last review
         ;; to today relative to scheduled date and use that to adjust the new
         ;; interval.
-        (when (< review-interval sched-interval)
+        ;; TODO Pretty sure this is the same as just doing (* review-interval multiplier)??
+        (when (and (< review-interval sched-interval) (> sched-interval 0))
           (setq new-interval
-                (+ sched-interval
-                   (* new-interval (/ (float review-interval) sched-interval)))))
+                (* new-interval (/ (float review-interval) sched-interval))))
 
-        (round new-interval)))))
+        (max 1 (round new-interval))))))
 
 (defun org-ilm--material-review (&optional org-id duration)
   "Apply a review on the material element.
@@ -7318,12 +7339,35 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   "Return ts object representing DAYS from now."
   (ts-adjust 'day -1 (ts-now)))
 
-(defun org-ilm--initial-schedule-interval-from-priority (priority)
-  "Calculate the initial schedule interval from the normalized priority value."
-  (cl-assert (and (floatp priority) (<= 0 priority 1)))
-  (let* ((rate (* 25 priority))
-         (interval (+ (org-ilm--random-poisson rate) 1)))
-    interval))
+(cl-defun org-ilm--initial-schedule-interval-from-priority
+    (priority &key
+              (min 1)
+              (max 30)
+              (exponent 1.0)
+              (jitter-proportion 0.25)
+              (use-poisson nil)
+              (poisson-scale 1.0))
+  "Compute an initial schedule interval (days) from PRIORITY in [0,1].
+
+MIN and MAX give the deterministic bounds for the base interval.
+EXPONENT controls curvature of the mapping (1.0 → linear).
+JITTER-PROPORTION is the max fractional multiplicative jitter when not using Poisson.
+If USE-POISSON is non-nil, add a Poisson-distributed component with mean
+POISSON-SCALE * base (uses `org-ilm--random-poisson`). The result is
+rounded and clamped to at least 1."
+  (cl-assert (numberp priority) nil "PRIORITY must be a number")
+  (let* ((p (max 0.0 (min 1.0 (float priority))))
+         ;; deterministic base interval mapped from priority
+         (base (+ min (* (- max min) (expt p exponent)))))
+    (if use-poisson
+        (let ((rate (* poisson-scale base)))
+          (max 1 (+ 1 (org-ilm--random-poisson rate))))
+      ;; Multiplicative uniform jitter
+      (let* ((rand (/ (float (random 10000)) 10000.0)) ; 0..1
+             (signed (- (* 2 rand) 1.0))              ; -1..1
+             (multiplier (+ 1.0 (* signed jitter-proportion)))
+             (val (round (* base multiplier))))
+        (max 1 val)))))
 
 (defun org-ilm--initial-schedule-from-priority (priority &optional timestamp)
   "Calculate the initial schedule date from the normalized priority value."
