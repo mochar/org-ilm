@@ -8153,12 +8153,13 @@ Return t if already ready."
     (when (and (org-ilm-element-card-p element)
                (not (plist-get org-ilm--review-data :rating)))
       (setf (plist-get org-ilm--review-data :rating)
-            (let ((ratings '(("Good" . :good)
-                             ("Easy" . :easy)
-                             ("Hard" . :hard)
-                             ("Again" . :again))))
-              (alist-get (completing-read "Rate:" ratings nil t)
-                         ratings nil nil #'equal)))))
+            (or rating
+                (let ((ratings '(("Good" . :good)
+                                 ("Easy" . :easy)
+                                 ("Hard" . :hard)
+                                 ("Again" . :again))))
+                  (alist-get (completing-read "Rate:" ratings nil t)
+                             ratings nil nil #'equal))))))
   
   (org-ilm--review-next))
 
