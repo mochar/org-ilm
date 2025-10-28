@@ -2392,19 +2392,25 @@ FSRS default: t"
   "Return the FSRS scheduler with parameters based on ELEMENT and its
 concept properties."
   (cl-assert (org-ilm-element-card-p element) nil "Element not a card")
-  ;; TODO Validate retention values!!
   (let ((retention (or
                     (when-let ((r (org-entry-get nil org-ilm-property-desired-retention)))
                       (string-to-number r))
-                    (apply
-                     #'org-ilm--mean
-                     (mapcar
-                      (lambda (x)
-                        (string-to-number (cdr x)))
-                      (org-ilm--concept-property-or-inherited
-                       (org-ilm-element-id element)
-                       org-ilm-property-desired-retention)))
+                    (when-let ((r (seq-keep
+                                   (lambda (x)
+                                     (let ((r (string-to-number (cdr x))))
+                                       (if (< 0 r 1)
+                                           r
+                                         (message "Detected invalid retention property: %s" r)
+                                         nil)))
+                                   (org-ilm--concept-property-or-inherited
+                                    (org-ilm-element-id element)
+                                    org-ilm-property-desired-retention))))
+                      (apply #'org-ilm--mean r))
                     org-ilm-card-fsrs-desired-retention)))
+    (unless (and (numberp retention) (< 0 retention 1))
+      (message "Invalid inherited retention value: %s" retention)
+      (setq retention org-ilm-card-fsrs-desired-retention))
+    
     (fsrs-make-scheduler
      :desired-retention retention
      :learning-steps org-ilm-card-fsrs-learning-steps
