@@ -8185,13 +8185,21 @@ Return t if already ready."
   (when org-ilm--review-data
     ;; Update priority and schedule
     (cl-destructuring-bind
-        (&key buffer id element rating &allow-other-keys)
+        (&key buffer id element rating start &allow-other-keys)
         org-ilm--review-data
       
       (when org-ilm--review-update-schedule
-        (if (org-ilm-element-card-p element)
-            (org-ilm--card-review rating id)
-          (org-ilm--material-review id))))
+        (let (duration)
+          (when start
+            (let* ((end (current-time))
+                   (diff (float-time (time-subtract end start)))
+                   (minutes (/ diff 60.0)))
+              (setq duration minutes)))
+          
+          (if (org-ilm-element-card-p element)
+              ;; TODO Pass duration??
+              (org-ilm--card-review rating id)
+            (org-ilm--material-review id duration)))))
     
     (let ((element (org-ilm--queue-pop)))
       
@@ -8253,8 +8261,8 @@ needs the attachment buffer."
         ;; We update the buffer-local `org-ilm--data' (see
         ;; `org-ilm--attachment-prepare-buffer') with a start time. This is used
         ;; to calculate the new priority.
-        (org-ilm--attachment-ensure-data-object)
-        (setf (plist-get org-ilm--data :start) (current-time))
+        ;; (org-ilm--attachment-ensure-data-object)
+        ;; (setf (plist-get org-ilm--data :start) (current-time))
 
         ;; TODO Run hook here so that individual components can run their own
         ;; preparation without doing it all here.
@@ -8276,7 +8284,8 @@ needs the attachment buffer."
     (setq org-ilm--review-data
           (list :element element
                 :id (org-ilm-element-id element)
-                :buffer attachment-buffer))))
+                :buffer attachment-buffer
+                :start (current-time)))))
 
 (defun org-ilm-review-reveal ()
   "Reveal the cloze contents of the current element."
