@@ -2235,6 +2235,8 @@ ELEMENT may be nil, in which case try to read it from point."
 
 ;; Source material to be consumed incrementally. Includes extracts.
 
+(defconst org-ilm-property-multiplier "ILM_MULTIPLIER")
+
 (defun org-ilm--material-log-new (priority due &optional timestamp)
   "Log the creation of a new material element in the ilm drawer."
   (org-ilm--log-log 'material priority due nil :timestamp timestamp))
@@ -2262,7 +2264,7 @@ Lower PRIORITY → higher importance → smaller A."
                          (/ 1.0 (+ 1.0 (exp (* k 0.5))))))))
     (+ min-a (* (- max-a min-a) sig-norm))))
 
-(defun org-ilm--material-calculate-interval (priority scheduled last-review)
+(defun org-ilm--material-calculate-interval (priority scheduled last-review &optional multiplier)
   "Calculate the new scheduled interval in days.
 
 If the scheduled date is before or equal to LAST-REVIEW this is treated
@@ -2276,8 +2278,10 @@ as a new element and the initial interval based on PRIORITY is returned."
     ;; it as a new element and use initial interval base on priority
     (if (<= sched-interval 0)
         (org-ilm--initial-schedule-interval-from-priority (cdr priority))
-      (let* ((multiplier (float (org-ilm--material-schedule-multiplier (cdr priority))))
-             (new-interval (* sched-interval multiplier)))
+      
+      (unless multiplier
+        (setq multiplier (float (org-ilm--material-schedule-multiplier (cdr priority)))))
+      (let ((new-interval (* sched-interval multiplier)))
 
         ;; Reviewed earlier than scheduled. Take proportion of time from last review
         ;; to today relative to scheduled date and use that to adjust the new
@@ -2299,9 +2303,17 @@ This will update the log table and the headline scheduled date."
       (let* ((element (org-ilm-element-at-point))
              (scheduled (org-ilm-element-sched element))
              (priority (org-ilm-element-priority element))
+             ;; TODO Inherit from concepts like fsrs retention?
+             (multiplier (when-let ((m (org-entry-get nil org-ilm-property-multiplier)))
+                           (setq m (string-to-number m))
+                           (if (> m 0)
+                               m
+                             (message "Multiplier property invalid")
+                             nil)))
              (interval (org-ilm--material-calculate-interval
                         priority scheduled
-                        (ts-parse (org-ilm-log-review-timestamp last-review))))
+                        (ts-parse (org-ilm-log-review-timestamp last-review))
+                        multiplier))
              (due (ts-adjust 'day interval (ts-now))))
         (atomic-change-group
           (org-ilm--material-log-review priority due scheduled nil duration)
