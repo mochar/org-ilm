@@ -123,6 +123,7 @@ be due starting 2am."
   "z" #'org-ilm-cloze
   "c" #'org-ilm-cloze-toggle
   "t" #'org-ilm-attachment-transclude
+  "h" org-ilm-context-map
   "n" org-ilm-concept-map
   "d" #'org-ilm-element-delete
   "r" #'org-ilm-review
@@ -5140,6 +5141,127 @@ See `org-ilm-attachment-transclude'."
     (if dont-activate
         (org-ilm-attachment-transclusion-create)
       (org-ilm-attachment-transclusion-transclude))))
+
+;;;; Context
+
+;; Context can be added to current element and children by adding arbitrary text
+;; to <org-id>.context.org file. This buffer will dynamically view the context
+;; org file of the currently opened element attachment.
+
+(defconst org-ilm--context-name "*Ilm Context*")
+(defvar org-ilm--context-frame nil)
+
+(defun org-ilm--context-default-buffer ()
+  "Buffer shown when no context available."
+  (let ((buffer (get-buffer org-ilm--context-name)))
+    (unless (buffer-live-p buffer)
+      (with-current-buffer (setq buffer (get-buffer-create org-ilm--context-name))
+        (insert (propertize "No context found" 'face 'Info-quoted))
+        (read-only-mode 1)))
+    buffer))
+
+(defun org-ilm--context-frame ()
+  "Return the context frame, making one if not exists."
+  (if (frame-live-p org-ilm--context-frame)
+      org-ilm--context-frame
+    (let ((frame (make-frame `((name . ,org-ilm--context-name)
+                               (minibuffer . nil)
+                               (unsplittable . t)
+                               (width . 50)
+                               (height . 20)
+                               (tab-bar-lines . nil)))))
+      (with-selected-window (frame-root-window frame)
+        (switch-to-buffer (org-ilm--context-default-buffer)))
+      (setq org-ilm--context-frame frame))))
+
+(defun org-ilm--context-frame-p (frame)
+  (string= (frame-parameter frame 'name) org-ilm--context-name))
+
+(defun org-ilm--context-frame-on-delete (frame)
+  (when (org-ilm--context-frame-p frame)
+    (org-ilm-context-mode -1)))
+
+(define-minor-mode org-ilm-context-mode
+  ""
+  :init-value nil
+  :global t
+  :lighter nil ;; String to display in mode line
+  :group 'org-ilm
+  (if org-ilm-context-mode
+      (progn
+        (add-hook 'window-buffer-change-functions
+                  #'org-ilm--context-detect)
+        (add-hook 'delete-frame-functions
+                  #'org-ilm--context-frame-on-delete)
+        )
+    (remove-hook 'window-buffer-change-functions
+                 #'org-ilm--context-detect)
+    (remove-hook 'delete-frame-functions
+                 #'org-ilm--context-frame-on-delete)
+    (kill-buffer (org-ilm--context-default-buffer))))
+
+(defun org-ilm--context-detect (frame)
+  (unless (org-ilm--context-frame-p frame)
+    (with-current-buffer (window-buffer (frame-root-window frame))
+      (let ((context-path (org-ilm--context-get-path)))
+        (with-selected-window (frame-root-window (org-ilm--context-frame))
+          (if context-path
+              (find-alternate-file context-path)
+            (switch-to-buffer (org-ilm--context-default-buffer))))))))
+
+(defun org-ilm--context-get-path ()
+  "Return the path to the context file of the current selected attachment."
+  (let ((location (org-ilm--where-am-i)))
+    (when (eq (car location) 'attachment)
+      (when-let* ((attach-dir (file-name-directory (buffer-file-name)))
+                  (id (nth 1 location))
+                  (entry (org-mem-entry-by-id id))
+                  (crumbs (org-mem-entry-crumbs entry)))
+        (catch 'path
+          (dolist (crumb crumbs)
+            (when-let* ((id (nth 4 crumb))
+                        (path (expand-file-name (concat id ".context.org") attach-dir)))
+              (when (file-exists-p path)
+                (throw 'path path)))))))))
+
+;;;;; Commands
+
+(defvar-keymap org-ilm-context-map
+  :doc "Keymap for the context frame"
+  "h" #'org-ilm-context-frame
+  "n" #'org-ilm-context-new)
+
+(defun org-ilm-context-frame ()
+  "Open a frame that will show the context of the last viewed element attachment."
+  (interactive)
+  (let ((frame (org-ilm--context-frame)))
+    (org-ilm-context-mode 1)
+    (org-ilm--context-detect (selected-frame))
+    (raise-frame org-ilm--context-frame)))
+
+(defun org-ilm-context-new ()
+  "Create a new context file for the element at point."
+  (interactive)
+  (if-let* ((element (org-ilm-element-from-context))
+            (id (org-ilm-element-id element))
+            (attach-dir (org-ilm-element-with-point-at element
+                          (org-attach-dir-get-create)))
+            (entry (org-mem-entry-by-id id))
+            (ancestory (seq-keep
+                        (lambda (crumb)
+                          (when-let* ((id (nth 4 crumb))
+                                      (e (org-mem-entry-by-id id))
+                                      (_ (member (org-ilm-type (org-mem-entry-todo-state e))
+                                                 '(material card)))
+                                      (title (mochar-utils--org-mem-title-full e)))
+                            (cons title e)))
+                        (reverse (org-mem-entry-crumbs entry))))
+            (choice (completing-read "Element: " ancestory nil t))
+            (context-entry (cdr (assoc choice ancestory)))
+            (context-id (org-mem-entry-id context-entry)))
+      (find-file (expand-file-name (concat context-id ".context.org") attach-dir))
+    (user-error "No element at point")))
+
 
 ;;;; Target overlays
 
