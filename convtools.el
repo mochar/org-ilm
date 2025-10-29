@@ -184,7 +184,7 @@ final converter succeeds."
                     (file-name-directory (or load-file-name buffer-file-name))))
 
 (cl-defun convtools--convert-with-defuddle (&rest args &key process-id process-name input-path output-format &allow-other-keys)
-  "Convert an HTML file to Markdown using Defuddle."
+  "Convert an HTM file to Markdown using Defuddle."
   (unless (and process-id input-path output-format)
     (error "Required args: PROCESS-ID INPUT-PATH OUTPUT-FORMAT"))
   (unless (member output-format '("markdown" "html"))
@@ -207,6 +207,7 @@ final converter succeeds."
        (list
         convtools-node-path
         convtools-defuddle-path
+        "html"
         input-path
         output-format
         output-path))))))
@@ -828,14 +829,14 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
   [:hide (lambda () t) ("s" "Source" "--source=")]
 
-  ["HTML"
+  ["Webpage"
    :if
    (lambda ()
      (or (eq (plist-get convtools--org-data :type) 'url)
-         (string= (file-name-extension (plist-get convtools--org-data :source)) "html")))
+         (string= (file-name-extension (plist-get convtools--org-data :source)) "webpage")))
    :setup-children
    (lambda (_)
-     (convtools--transient-html-build
+     (convtools--transient-webpage-build
       (eq (plist-get convtools--org-data :type) 'url)))
    ]
 
@@ -860,14 +861,14 @@ SUB-LANGS may also be 'all' to download all subtitles."
                   (org-id (org-id-get))
                   (attach-dir (org-attach-dir-get-create)))
 
-        ;; HTML
-        (when-let ((_ (transient-arg-value "--html-download" args))
+        ;; Webpage
+        (when-let ((_ (transient-arg-value "--webpage-download" args))
                    (title (if (eq type 'url)
                               (if-let ((title (mochar-utils--get-page-title source)))
                                   (mochar-utils--slugify-title title)
                                 org-id)
                             (file-name-base source))))
-          (convtools--transient-html-run source title attach-dir org-id args))
+          (convtools--transient-webpage-run source title attach-dir org-id args))
 
         ;; Media
         (when (or (transient-arg-value "--media-download" args)
@@ -876,55 +877,55 @@ SUB-LANGS may also be 'all' to download all subtitles."
     :inapt-if
     (lambda ()
       (and (eq (plist-get convtools--org-data :type) 'url)
-           (not (transient-arg-value "--html-download" (transient-get-value)))
+           (not (transient-arg-value "--webpage-download" (transient-get-value)))
            (not (transient-arg-value "--media-download" (transient-get-value)))
            (not (cdr (assoc "--media-subs=" (transient-get-value)))))))
    ]
   )
 
-;;;;; HTML
+;;;;; Webpage
 
-(defvar convtools--transient-html-download-suffix
-  '("hd" "Download" "--html-download" :transient transient--do-call))
+(defvar convtools--transient-webpage-download-suffix
+  '("wd" "Download" "--webpage-download" :transient transient--do-call))
 
-(defvar convtools--transient-html-simplify-suffix
-  '("hs" "Simplify" "--html-simplify="
+(defvar convtools--transient-webpage-simplify-suffix
+  '("ws" "Simplify" "--webpage-simplify="
      :class transient-switches
      :transient transient--do-call
-     :argument-format "--html-simplify-to-%s"
-     :argument-regexp "\\(--html-simplify-to-\\(markdown\\|html\\)\\)"
+     :argument-format "--webpage-simplify-to-%s"
+     :argument-regexp "\\(--webpage-simplify-to-\\(markdown\\|html\\)\\)"
      :choices ("markdown" "html")))
 
-(defvar convtools--transient-html-orgify-suffix
-  '("ho" "Orgify" "--html-orgify"
+(defvar convtools--transient-webpage-orgify-suffix
+  '("wo" "Orgify" "--webpage-orgify"
     :summary "Convert to Org mode with Pandoc"
     :transient transient--do-call))
 
-(defun convtools--transient-html-build (&optional with-download hide-invalid-p)
+(defun convtools--transient-webpage-build (&optional with-download hide-invalid-p)
   (let ((condition
          (lambda ()
            (and with-download
-                (null (transient-arg-value "--html-download" (transient-get-value)))))))
+                (null (transient-arg-value "--webpage-download" (transient-get-value)))))))
     (mapcar
      (lambda (suffix)
        (transient-parse-suffix 'transient--prefix suffix))
      (append
       (when with-download
-        (list convtools--transient-html-download-suffix))
+        (list convtools--transient-webpage-download-suffix))
       (mapcar
        (lambda (suffix)
          (append suffix (list (if hide-invalid-p :if-not :inapt-if) condition)))
-       (list convtools--transient-html-simplify-suffix
-             convtools--transient-html-orgify-suffix))))))
+       (list convtools--transient-webpage-simplify-suffix
+             convtools--transient-webpage-orgify-suffix))))))
 
-(defun convtools--transient-html-run (source title output-dir id transient-args)
-  (let* ((download (transient-arg-value "--html-download" transient-args))
+(defun convtools--transient-webpage-run (source title output-dir id transient-args)
+  (let* ((download (transient-arg-value "--webpage-download" transient-args))
          (simplify (cond
-                    ((transient-arg-value "--html-simplify-to-html" transient-args)
+                    ((transient-arg-value "--webpage-simplify-to-html" transient-args)
                      "html")
-                    ((transient-arg-value "--html-simplify-to-markdown" transient-args)
+                    ((transient-arg-value "--webpage-simplify-to-markdown" transient-args)
                      "markdown")))
-         (orgify (transient-arg-value "--html-orgify" transient-args))
+         (orgify (transient-arg-value "--webpage-orgify" transient-args))
          (html-path (expand-file-name (concat title ".html") output-dir))
          (on-success
           (lambda (proc buf id)
@@ -962,7 +963,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
     (setq converters (reverse converters))
     
     (convtools--convert-multi
-     :process-name "html"
+     :process-name "webpage"
      :process-id id
      :converters converters
      :on-error nil

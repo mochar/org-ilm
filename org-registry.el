@@ -755,15 +755,15 @@ See `parsebib-read-entry'."
 
         :paper-download (transient-arg-value "--paper-download" args)
 
-        ;; HTML Download
-        :html-download (transient-arg-value "--html-download" args)
-        :html-simplify
+        ;; Webpage Download
+        :webpage-download (transient-arg-value "--webpage-download" args)
+        :webpage-simplify
         (cond
-         ((transient-arg-value "--html-simplify-to-html" args)
-          "html")
-         ((transient-arg-value "--html-simplify-to-markdown" args)
+         ((transient-arg-value "--webpage-simplify-to-webpage" args)
+          "webpage")
+         ((transient-arg-value "--webpage-simplify-to-markdown" args)
           "markdown"))
-        :html-orgify (transient-arg-value "--html-orgify" args)
+        :webpage-orgify (transient-arg-value "--webpage-orgify" args)
 
         ;; Media download
         :media-download (transient-arg-value "--media-download" args)
@@ -877,7 +877,7 @@ See `parsebib-read-entry'."
   :value
   (lambda ()
     (append
-     '("--html-simplify-to-markdown" "--html-orgify")
+     '("--webpage-simplify-to-markdown" "--webpage-orgify")
      (let ((source (plist-get org-registry--type-resource-data :source)))
        (unless source
          (setq org-registry--type-resource-data
@@ -904,14 +904,14 @@ See `parsebib-read-entry'."
                  (member (plist-get args :source-type) '(url id))))))
    ]
 
-  ["HTML download"
+  ["Webpage download"
    :hide
    (lambda ()
      (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
        (not (member (plist-get args :source-type) '(url)))))
    :setup-children
    (lambda (_)
-     (convtools--transient-html-build t t))]
+     (convtools--transient-webpage-build t t))]
 
   ["Media download"
    :if
@@ -931,7 +931,7 @@ See `parsebib-read-entry'."
       (cl-destructuring-bind
           (&key source source-type type bibtex key title
                 paper-download
-                html-download html-simplify html-orgify
+                webpage-download webpage-simplify webpage-orgify
                 media-download media-template media-audio-only media-sub-langs)
           (org-registry--type-resource-transient-args)
 
@@ -963,7 +963,7 @@ See `parsebib-read-entry'."
              (list :ROAM_REFS (if key (concat source " @" key) source)))
             :on-success
             (lambda (_)
-              (when (or html-download media-download paper-download)
+              (when (or webpage-download media-download paper-download)
                 (make-directory attach-dir)
 
                 (when paper-download
@@ -975,8 +975,8 @@ See `parsebib-read-entry'."
                     (mochar-utils--org-with-point-at id
                       (org-attach-sync))))
 
-                (when html-download
-                  (convtools--transient-html-run
+                (when webpage-download
+                  (convtools--transient-webpage-run
                    source title attach-dir id transient-args))
 
                 (when (or media-download media-sub-langs)

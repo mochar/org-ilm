@@ -6814,17 +6814,19 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           :id id
           :title title
 
+          :html-download (transient-arg-value "--html-download" args)
+
           :paper-download (transient-arg-value "--paper-download" args)
 
-          ;; HTML Download
-          :html-download (transient-arg-value "--html-download" args)
-          :html-simplify
+          ;; Webpage Download
+          :webpage-download (transient-arg-value "--webpage-download" args)
+          :webpage-simplify
           (cond
-           ((transient-arg-value "--html-simplify-to-html" args)
+           ((transient-arg-value "--webpage-simplify-to-html" args)
             "html")
-           ((transient-arg-value "--html-simplify-to-markdown" args)
+           ((transient-arg-value "--webpage-simplify-to-markdown" args)
             "markdown"))
-          :html-orgify (transient-arg-value "--html-orgify" args)
+          :webpage-orgify (transient-arg-value "--webpage-orgify" args)
 
           ;; Media download
           :media-download (transient-arg-value "--media-download" args)
@@ -6885,16 +6887,16 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   :refresh-suffixes t
   :value
   (lambda ()
-    (append
-     '("--html-simplify-to-markdown" "--html-orgify"
-       "--media-template=%(title)s.%(ext)s")
-     (let ((id (or (plist-get org-ilm--import-resource-data :id) (org-id-new)))
-           (source (plist-get org-ilm--import-resource-data :source)))
-       (unless source
-         (setq org-ilm--import-resource-data
-               (org-ilm--import-resource-process-source))
-         (setq source (plist-get org-ilm--import-resource-data :source)))
-       (setf (plist-get org-ilm--import-resource-data :id) id)
+    (let ((id (or (plist-get org-ilm--import-resource-data :id) (org-id-new)))
+          (source (plist-get org-ilm--import-resource-data :source)))
+      (unless source
+        (setq org-ilm--import-resource-data
+              (org-ilm--import-resource-process-source))
+        (setq source (plist-get org-ilm--import-resource-data :source)))
+      (setf (plist-get org-ilm--import-resource-data :id) id)
+      (append
+       '("--webpage-simplify-to-markdown" "--webpage-orgify"
+         "--media-template=%(title)s.%(ext)s")
        (list (concat "--source=" source)
              (concat "--key=" (plist-get org-ilm--import-resource-data :key))
              (concat "--type=" (plist-get org-ilm--import-resource-data :type))
@@ -6902,7 +6904,9 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
              ;; prop to point to media. The dedicated attachment is the org file
              ;; in media elements
              ;; (concat "--media-template=" id ".%(ext)s")
-             ))))
+             )
+       (when (string= "website" (plist-get org-ilm--import-resource-data :type))
+         (list "--html-download")))))
 
   ["Import Resource"
    (org-ilm--import-resource-transient-source)
@@ -6912,18 +6916,20 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           (propertize title 'face 'italic)))
     :if (lambda () (plist-get org-ilm--import-resource-data :title)))
    ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
-      :always-read t :allow-empty nil)
+    :always-read t :allow-empty nil)
+   ("h" "HTML download as Org" "--html-download")
    ]
 
-  ["HTML download"
+  ["Webpage download"
    :hide
    (lambda ()
      (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
        (or (not (eq (plist-get args :source-type) 'url))
-           (string= (plist-get args :type) "media"))))
+           (string= (plist-get args :type) "media")
+           (plist-get args :html-download))))
    :setup-children
    (lambda (_)
-     (convtools--transient-html-build t t))]
+     (convtools--transient-webpage-build t t))]
 
   ["Media download"
    :if
@@ -6969,24 +6975,50 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (interactive)
       (cl-destructuring-bind
           (&key source source-type type bibtex key title id
+                html-download
                 paper-download
-                html-download html-simplify html-orgify
+                webpage-download webpage-simplify webpage-orgify
                 media-download media-template media-audio-only media-sub-langs)
           (org-ilm--import-resource-transient-args)
-
         (let ((transient-args (transient-args 'org-ilm--import-resource-transient))
-              (media-no-download (and (string= type "media") (not media-download))))
+              (media-no-download (and (string= type "media") (not media-download)))
+              content)
+
+          (setq content
+                (cond
+                 (html-download
+                  (let ((default-directory (file-name-directory convtools-defuddle-path)))
+                    (with-temp-buffer
+                      (insert
+                       (with-output-to-string
+                         (call-process
+                          convtools-node-path
+                          nil standard-output nil
+                          convtools-defuddle-path
+                          "url"
+                          source
+                          "markdown")))
+                      (call-process-region (point-min) (point-max)
+                                           "pandoc" t t nil
+                                           "-f" "markdown" "-t" "org"
+                                           "--wrap=preserve")
+                      (buffer-string))))
+                 (media-no-download
+                  ;; Create an org attachment for note taking when importing media
+                  ;; without downloading. When downloading, set in on-success
+                  ;; callback. HTML download is inactive when type is media, so no
+                  ;; clash with org file generated by it.
+                  "")))
+
+          ;; (edebug)
+          
           (org-ilm--capture-capture
            'material
            :collection (org-ilm--active-collection)
            :title title
            :id id
            :bibtex bibtex
-           ;; Create an org attachment for note taking when importing media
-           ;; without downloading. When downloading, set in on-success
-           ;; callback. HTML download is inactive when type is media, so no
-           ;; clash with org file generated by it.
-           :content (when media-no-download "")
+           :content content
            :props
            (append
             (list :ROAM_REFS (if key (concat source " @" key) source))
@@ -6996,7 +7028,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
             (when media-no-download (list :ILM_MEDIA source)))
            :on-success
            (lambda (id attach-dir collection)
-             (when (or html-download media-download paper-download)
+             (when (or html-download webpage-download media-download paper-download)
                (make-directory attach-dir t)
 
                (when paper-download
@@ -7010,8 +7042,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
                          (org-entry-put nil "ILM_EXT" "pdf")))
                    (error (message "Failed to download paper for %s" title))))
 
-               (when html-download
-                 (convtools--transient-html-run
+               (when webpage-download
+                 (convtools--transient-webpage-run
                   source id attach-dir id transient-args))
 
                (when (or media-download media-sub-langs)
