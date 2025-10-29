@@ -16,7 +16,7 @@ const errorFmt = () => console.error('Usage: defuddle.mjs [url|html] [website.or
 if (inputType !== "url" && inputType !== "html") {
   errorFmt();
   process.exit(1);
-}  
+}
 
 if (!inputPath || !(outputFormat === "markdown" || outputFormat === "html")) {
   errorFmt();
@@ -27,17 +27,48 @@ try {
   const input = inputType === "html"
       ? await readFile(inputPath, 'utf8')
       : await JSDOM.fromURL(inputPath);
+
+  // Determine the base URL for resolving relative links
+  let docURL;
+  if (inputType === "url") {
+    docURL = inputPath;
+  } else if (input instanceof JSDOM) {
+    docURL = input.window.location.href; // Get URL from JSDOM
+  } else {
+    docURL = baseURL; // Fallback for html file
+  }
+
   const result = await Defuddle(
     input,
-    // inputType === "html" ? baseURL : undefined,
-    inputType === "html" ? baseURL : inputPath,
-    { markdown: outputFormat == 'markdown', debug: false});
+    inputType === "html" ? docURL : undefined,
+    { 
+      markdown: outputFormat === 'markdown',
+      debug: false
+    }
+  );
 
   if (result?.content) {
+    let finalContent = result.content;
+
+    // Post-process the final MARKDOWN string to fix links
+    if (outputFormat === 'markdown') {
+      
+      // Protocol-relative URLs (e.g., ![](//...))
+      // Replaces ](// with ](https://
+      finalContent = finalContent.replace(/\]\(\/\//g, '](https://');
+
+      // Root-relative links (e.g., [](/wiki...))
+      const origin = new URL(docURL).origin;
+      
+      // Regex: Finds "](/..." but NOT "](//..."
+      const relativeLinkRegex = new RegExp(`\\]\\(\\/(?!\\/)`, 'g');
+      finalContent = finalContent.replace(relativeLinkRegex, `](${origin}/`);
+    }
+
     if (outputPath) {
-      await writeFile(outputPath, result.content, 'utf8');
+      await writeFile(outputPath, finalContent, 'utf8');
     } else {
-      process.stdout.write(result.content);
+      process.stdout.write(finalContent);
     }
   } else {
     console.error('Could not extract readable content.');
