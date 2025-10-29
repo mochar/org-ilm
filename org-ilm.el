@@ -6779,7 +6779,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
   (unless source
     ;; TODO Support for path to pdf -> recover bibtex data (zotero-like)
     ;; (setq source (ffap-read-file-or-url "URL/path/DOI: " nil))
-    (setq source (read-string "URL or ID: ")))
+    (setq source (read-string "URL or ID: " (thing-at-point 'url))))
 
   (when (and source (not (string-empty-p source)))
     (let* ((data (org-ilm--citation-get-zotero source))
