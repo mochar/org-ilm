@@ -275,7 +275,7 @@ be due starting 2am."
   (if (eq 'attachment (car (org-ilm--where-am-i)))
     (cond
      ((eq major-mode 'org-mode)
-      (call-interactively #'org-ilm-org-extract))
+      (call-interactively #'org-ilm-org-extract-dwim))
      ((org-ilm--pdf-mode-p)
       (call-interactively #'org-ilm-pdf-extract)))
     (user-error "Extracts can only be made from within an attachment")))
@@ -3220,10 +3220,55 @@ content in a capture buffer."
   (interactive)
   (org-ilm--org-new 'card))
 
+(defvar org-ilm--org-mark-element nil)
+(defvar org-ilm--org-mark-point nil)
+
+(defun org-ilm-org-mark-element-cycle ()
+  (interactive)
+  (if-let ((_ org-ilm--org-mark-element)
+           (parent (org-element-property :parent org-ilm--org-mark-element)))
+          (setq org-ilm--org-mark-element parent)
+    (setq org-ilm--org-mark-element (org-element-context)))
+  (set-mark (org-element-end org-ilm--org-mark-element))
+  (goto-char (org-element-begin org-ilm--org-mark-element))
+  (activate-mark))
+
+(defvar-keymap org-ilm-mark-map
+  :doc "Keymap for org-ilm-mark-mode."
+  :repeat (:enter (org-ilm-org-mark-element-cycle) :exit (org-ilm-org-extract))
+  "x" #'org-ilm-org-mark-element-cycle
+  "RET" (lambda ()
+          (interactive)
+          (org-ilm-mark-mode -1)
+          (org-ilm-org-extract))
+  "C-g" (lambda ()
+          (interactive)
+          (when org-ilm--org-mark-point
+            (goto-char org-ilm--org-mark-point))
+          (deactivate-mark)
+          (org-ilm-mark-mode -1)))
+
+(define-minor-mode org-ilm-mark-mode
+  ""
+  :keymap org-ilm-mark-map
+  (if org-ilm-mark-mode
+      (progn
+        (setq org-ilm--org-mark-point (point))
+        (org-ilm-org-mark-element-cycle))
+    (setq org-ilm--org-mark-element nil
+          org-ilm--org-mark-point nil)))
+
+(defun org-ilm-org-extract-dwim ()
+  "Extract text in Org mode attachments by cycling through regions."
+  (interactive)
+  (if (region-active-p)
+      (org-ilm-org-extract)
+    (org-ilm-mark-mode 1)))
+
 (defun org-ilm-org-extract (&optional title)
   "Extract region text in Org mode attachments."
   (interactive)
-  (unless (use-region-p) (user-error "No region active"))
+  (unless (region-active-p) (user-error "No region active"))
   (let* ((file-buf (current-buffer))
          (file-path buffer-file-name)
          (file-name (file-name-base file-path))
