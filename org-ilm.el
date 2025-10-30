@@ -2189,13 +2189,15 @@ ELEMENT may be nil, in which case try to read it from point."
     ("C" "New card"
      (lambda ()
        (interactive)
-       (org-ilm--org-new 'card
-                         (org-ilm-element-id org-ilm--element-transient-element))))
-    ("X" "New extract"
+       (org-ilm--org-new
+        'card
+        (org-ilm-element-id org-ilm--element-transient-element))))
+    ("X" "New material"
      (lambda ()
        (interactive)
-       (org-ilm--org-new 'material
-                         (org-ilm-element-id org-ilm--element-transient-element))))
+       (org-ilm--capture-capture
+        'material
+        :parent (org-ilm-element-id org-ilm--element-transient-element))))
     ]
    ]
   )
