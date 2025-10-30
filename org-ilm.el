@@ -3696,16 +3696,13 @@ This is done by converting the area to an image first. Note that this will likel
 
 (defconst org-ilm--pdf-extract-options
   '((page . "Page")
-    (outline . "Outline")
     (region . "Region")
     (section . "Section")))
 
 (defconst org-ilm--pdf-extract-option-to-types
   '((page . (virtual text image org))
-    (outline . (virtual))
     (region . (virtual text image org))
     (section . (virtual text org))))
-
 
 ;;;;; Commands
 
