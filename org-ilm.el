@@ -3991,9 +3991,8 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
      `(menu-item "Ilm: Open attachment"
                  ,(lambda ()
                     (interactive)
-                    (let ((path (org-ilm--org-with-point-at id
-                                  (org-ilm--attachment-find))))
-                      (find-file path)))
+                    (org-ilm--org-with-point-at id
+                      (org-ilm--attachment-open)))
                  :help "Open the attachment of this extract."))
     
     menu))
