@@ -190,6 +190,23 @@ Uses various utilities from `url.el'."
         (mochar-utils--slugify-title web-title-str)
       web-title-str)))
 
+(defun mochar-utils--get-website-as-org (url)
+  "Download the HTML content from URL and convert to Org with Defuddle and Pandoc."
+  (let ((default-directory (file-name-directory convtools-defuddle-path)))
+    (with-temp-buffer
+      (insert
+       (with-output-to-string
+         (call-process
+          convtools-node-path
+          nil standard-output nil
+          convtools-defuddle-path
+          "url" url "markdown")))
+      (call-process-region (point-min) (point-max)
+                           "pandoc" t t nil
+                           "-f" "markdown" "-t" "org"
+                           "--wrap=preserve")
+      (buffer-string))))
+
 ;;;; Transient
 
 (defun mochar-utils--transiet-set-target-value (target-key new-value)
