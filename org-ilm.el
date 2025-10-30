@@ -1141,7 +1141,7 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
 
 (defun org-ilm--collection-eldoc-element-info (callback)
   "Return info about the element at point."
-  (when-let* ((element (org-ilm-element-from-context))
+  (when-let* ((element (ignore-errors (org-ilm-element-from-context)))
               (_ (member (org-ilm-element-type element) '(material card)))
               (doc ""))
 
@@ -1725,26 +1725,20 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
   (eq (org-ilm-element-type element) 'card))
 
 (defun org-ilm-element-at-point ()
-  "Parse org-ilm data of headline at point.
-
-Was thinking of org-ql--value-at this whole function, but this is
-wasteful if headline does not match query."
-  ;; (when-let ((headline (org-ilm--org-headline-at-point)))
-  (when-let ((headline (ignore-errors (org-element-headline-parser))))
-    (let* (;; `headline' looses the priority property which is set manually in
-           ;; `org-ilm--org-headline-at-point', after I access the :todo-keyword
-           ;; property below. I think it is because it is a deferred value, which
-           ;; might cause org to overwrite the custom set :priority value after
-           ;; resolving it when it is accessed. In any case, it is essentialy to
-           ;; use the priority before accessing the other
-           ;; properties. Alternatively we can just resolve the deferred
-           ;; properties by accessing them all in
-           ;; `org-ilm--org-headline-at-point'.
-           (id (org-element-property :ID headline))
-           (todo-keyword (org-element-property :todo-keyword headline))
-           (type (org-ilm-type todo-keyword))
-           (entry (org-node-at-point)))
-      
+  "Parse org-ilm data of headline at point."
+  ;; TODO Was thinking of org-ql--value-at this whole function, but this is
+  ;; wasteful if headline does not match query.
+  (when-let* ((headline (ignore-errors (org-element-headline-parser)))
+              (id (org-element-property :ID headline))
+              ;; TODO Need something like (org-node-at-point-ensure) to force
+              ;; add it to cache if not already there, since it has to exist if
+              ;; it has an ID. Wait for https://github.com/meedstrom/org-mem/issues/31
+              (entry (or (org-mem-entry-by-id id)
+                         (progn
+                           (org-mem-updater-ensure-id-node-at-point-known)
+                           (org-mem-entry-by-id id)))))
+    (let* ((todo-keyword (org-element-property :todo-keyword headline))
+           (type (org-ilm-type todo-keyword)))
       (when (and type id)
         (make-org-ilm-element
          ;; Headline element properties
