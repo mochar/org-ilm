@@ -3567,6 +3567,29 @@ the ytdlp flags which I don't care to do atm."
              (cdr subtitles) "time1-time2"
              org-ilm-media-link ""))))
 
+(defun org-ilm--media-time-to-duration (time type)
+  (pcase type
+    ('seconds (setq time (/ (float time) 60)))
+    ('minutes)
+    (_ (error "Unknown value for TYPE")))
+  (org-duration-from-minutes time 'h:mm:ss))
+
+(defun org-ilm--media-insert-chapters ()
+  (if-let ((chapters (mpv-get-property "chapter-list")))
+      (dotimes (i (length chapters))
+        (when-let* ((chapter (aref chapters i))
+                    (title (or (alist-get 'title chapter) ""))
+                    (start (alist-get 'time chapter))
+                    (end (if (< (1+ i) (length chapters))
+                             (alist-get 'time (aref chapters (1+ i)))
+                           (mpv-get-property "duration")))
+                    (range (concat
+                            (org-ilm--media-time-to-duration start 'seconds)
+                            "-"
+                            (org-ilm--media-time-to-duration end 'seconds))))
+          (insert "- [[ilmmedia:" range "][" range "]] " title "\n")))
+    (message "No chapter data available")))
+
 ;;;;; Custom link
 
 ;; Will get the media file name from ILM_MEDIA property so that we only have to
@@ -5089,6 +5112,10 @@ missing, something else is wrong, so throw an error."
      (lambda ()
        (interactive)
        (org-ilm--media-insert-subtitles)))
+    ("mc" "Insert chapters"
+     (lambda ()
+       (interactive)
+       (org-ilm--media-insert-chapters)))
     ]
    ]
 
