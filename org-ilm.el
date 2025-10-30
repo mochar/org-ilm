@@ -500,40 +500,6 @@ The returned function can be used to call `remove-hook' if needed."
     (add-hook hook hook-function depth local)
     hook-function))
 
-(cl-defun org-ilm--buffer-text-process (&key keep-clozes no-footnotes (source-buffer (current-buffer)) (begin (point-min)) (end (point-max)))
-  "Process current buffer for extraction or cloze."
-  (replace-regexp org-ilm-target-regexp "" nil begin end)
-  (unless keep-clozes
-    (org-ilm--card-uncloze-buffer begin end))
-  (if no-footnotes
-      (replace-regexp org-footnote-re "" nil begin end)
-    ;; Copy over footnotes 
-    (let ((footnotes '()))
-      (goto-char (point-min))
-      (while (re-search-forward org-footnote-re nil t)
-        (when-let* ((fn (match-string 0))
-                    (label (match-string 1))
-                    (def (with-current-buffer source-buffer
-                           (org-footnote-get-definition label))))
-          (push (concat fn " " (nth 3 def)) footnotes)))
-      (goto-char (point-max))
-      (insert "\n\n")
-      (dolist (fn (delete-dups (nreverse footnotes)))
-        (insert fn "\n")))))
-
-(defun org-ilm--buffer-text-prepare (&optional region-begin region-end keep-clozes remove-footnotes)
-  "Return processed buffer text for new extract or card element."
-  (let* ((text (buffer-substring-no-properties (or region-begin (point-min))
-                                               (or region-end (point-max))))
-         (buffer (current-buffer)))
-    (with-temp-buffer
-      (insert text)
-      (org-ilm--buffer-text-process
-       :source-buffer buffer
-       :keep-clozes keep-clozes
-       :no-footnotes remove-footnotes)
-      (buffer-string))))
-
 (defun org-ilm--generate-text-snippet (text)
   "Cleanup TEXT so that it can be used in as an org header."
   (let* ((text (replace-regexp-in-string "\n" " " text))
@@ -3217,6 +3183,8 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
 ;;;; Org attachment
 
+;;;;; New
+
 (defun org-ilm--org-new (type &optional parent)
   "Create a new Org element of TYPE by letting user type in attachment
 content in a capture buffer."
@@ -3240,6 +3208,47 @@ content in a capture buffer."
 (defun org-ilm-org-new-card ()
   (interactive)
   (org-ilm--org-new 'card))
+
+;;;;; Functions
+
+(cl-defun org-ilm--org-buffer-text-process (&key keep-clozes no-footnotes (source-buffer (current-buffer)) (begin (point-min)) (end (point-max)))
+  "Process current buffer for extraction or cloze."
+  ;; Remove capture targets
+  (replace-regexp org-ilm-target-regexp "" nil begin end)
+  ;; Undo cloze syntax
+  (unless keep-clozes (org-ilm--card-uncloze-buffer begin end))
+  ;; Append referenced footnotes
+  (if no-footnotes
+      (replace-regexp org-footnote-re "" nil begin end)
+    ;; Copy over footnotes 
+    (let ((footnotes '()))
+      (goto-char (point-min))
+      (while (re-search-forward org-footnote-re nil t)
+        (when-let* ((fn (match-string 0))
+                    (label (match-string 1))
+                    (def (with-current-buffer source-buffer
+                           (org-footnote-get-definition label))))
+          (push (concat fn " " (nth 3 def)) footnotes)))
+      (goto-char (point-max))
+      (insert "\n\n")
+      (dolist (fn (delete-dups (nreverse footnotes)))
+        (insert fn "\n")))))
+
+(defun org-ilm--org-buffer-text-prepare (&optional region-begin region-end keep-clozes remove-footnotes)
+  "Return processed buffer text for new extract or card element."
+  (let* ((text (buffer-substring-no-properties (or region-begin (point-min))
+                                               (or region-end (point-max))))
+         (text (string-trim text))
+         (buffer (current-buffer)))
+    (with-temp-buffer
+      (insert text)
+      (org-ilm--org-buffer-text-process
+       :source-buffer buffer
+       :keep-clozes keep-clozes
+       :no-footnotes remove-footnotes)
+      (buffer-string))))
+
+;;;;; Extract
 
 (defvar org-ilm--org-mark-element nil)
 (defvar org-ilm--org-mark-point nil)
@@ -3311,7 +3320,7 @@ content in a capture buffer."
            (region-end (if (save-excursion (goto-char region-end) (bolp))
                            (max (- region-end 1) 1)
                          region-end))
-           (region-text (org-ilm--buffer-text-prepare region-begin region-end))
+           (region-text (org-ilm--org-buffer-text-prepare region-begin region-end))
            (extract-org-id (org-id-new))
            (entry (org-mem-entry-by-id attach-org-id))
            props)
@@ -3357,6 +3366,8 @@ content in a capture buffer."
                (org-ilm-recreate-overlays region-begin (point))))))
        ))))
 
+;;;;; Cloze
+
 (defun org-ilm-org-cloze ()
   "Create a cloze card.
 A cloze is made automatically of the element at point or active region."
@@ -3380,7 +3391,7 @@ A cloze is made automatically of the element at point or active region."
       (let ((marker (point-marker))
             (content (buffer-substring (car cloze-bounds) (cdr cloze-bounds))))
         (delete-region (car cloze-bounds) (cdr cloze-bounds))
-        (org-ilm--buffer-text-process :source-buffer file-buf)
+        (org-ilm--org-buffer-text-process :source-buffer file-buf)
         (setq snippet (org-ilm--generate-text-snippet (buffer-string)))
         (goto-char marker)
         (org-ilm--card-cloze-region (prog1 (point) (insert content)) (point))
@@ -3402,6 +3413,8 @@ A cloze is made automatically of the element at point or active region."
            (insert "<<card:beg:" card-org-id ">>"))
          (save-buffer)
          (org-ilm-recreate-overlays))))))
+
+;;;;; Split
 
 (defun org-ilm-org-split (&optional level)
   "Split org document by heading level."
