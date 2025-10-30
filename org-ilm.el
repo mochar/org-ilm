@@ -112,6 +112,18 @@ be due starting 2am."
   '((t :background "pink"))
   "Face used to highlight clozes.")
 
+(defvar-keymap org-ilm-context-map
+  :doc "Keymap for the context frame"
+  "h" #'org-ilm-context-frame
+  "n" #'org-ilm-context-new)
+
+(defvar-keymap org-ilm-concept-map
+  :doc "Keymap for concept actions."
+  "a" #'org-ilm-concept-add
+  "r" #'org-ilm-concept-remove
+  "." #'org-ilm-concept-into
+  "n" #'org-ilm-concept-new)
+
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-minor-mode'."
   "i" #'org-ilm-import
@@ -5226,11 +5238,6 @@ See `org-ilm-attachment-transclude'."
 
 ;;;;; Commands
 
-(defvar-keymap org-ilm-context-map
-  :doc "Keymap for the context frame"
-  "h" #'org-ilm-context-frame
-  "n" #'org-ilm-context-new)
-
 (defun org-ilm-context-frame ()
   "Open a frame that will show the context of the last viewed element attachment."
   (interactive)
@@ -7771,13 +7778,6 @@ rounded and clamped to at least 1."
 
 
 ;;;;; Commands
-
-(defvar-keymap org-ilm-concept-map
-  :doc "Keymap for concept actions."
-  "a" #'org-ilm-concept-add
-  "r" #'org-ilm-concept-remove
-  "." #'org-ilm-concept-into
-  "n" #'org-ilm-concept-new)
 
 (defun org-ilm-concept-dwim ()
   "Add concept if point in ilm element, otherwise create a new concept."
