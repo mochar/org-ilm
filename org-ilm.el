@@ -5194,18 +5194,18 @@ See `org-ilm-attachment-transclude'."
     (org-ilm-context-mode -1)))
 
 (define-minor-mode org-ilm-context-mode
-  ""
+  "Minor mode that opens context file in the context buffer of last opened attachment."
   :init-value nil
   :global t
-  :lighter nil ;; String to display in mode line
+  :lighter nil
+  :interactive nil
   :group 'org-ilm
   (if org-ilm-context-mode
       (progn
         (add-hook 'window-buffer-change-functions
                   #'org-ilm--context-detect)
         (add-hook 'delete-frame-functions
-                  #'org-ilm--context-frame-on-delete)
-        )
+                  #'org-ilm--context-frame-on-delete))
     (remove-hook 'window-buffer-change-functions
                  #'org-ilm--context-detect)
     (remove-hook 'delete-frame-functions
@@ -5213,6 +5213,8 @@ See `org-ilm-attachment-transclude'."
     (kill-buffer (org-ilm--context-default-buffer))))
 
 (defun org-ilm--context-detect (frame)
+  "Detects if last opened buffer in FRAME is an ilm attachment and updates
+the context frame."
   (unless (org-ilm--context-frame-p frame)
     (with-current-buffer (window-buffer (frame-root-window frame))
       (let ((context-path (org-ilm--context-get-path)))
@@ -5252,7 +5254,7 @@ See `org-ilm-attachment-transclude'."
   (if-let* ((element (org-ilm-element-from-context))
             (id (org-ilm-element-id element))
             (attach-dir (org-ilm-element-with-point-at element
-                          (org-attach-dir-get-create)))
+                          (expand-file-name (org-attach-dir-get-create))))
             (entry (org-mem-entry-by-id id))
             (ancestory (seq-keep
                         (lambda (crumb)
