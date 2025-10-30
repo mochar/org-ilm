@@ -445,6 +445,7 @@ org-capture template properties."
             (concat
              (format "[[%s][%s]]: " (org-registry--link-target) type)
              title)))
+    (setf (plist-get props :SOURCE) (org-store-link '(4)))
     (unless template-string
       (setq template-string
             (format "* %s%s%s"
