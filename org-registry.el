@@ -257,30 +257,30 @@ This helps share functionality of a type while being able to filter on a more gr
 
 (cl-defun org-registry--select-entry (&key types registries)
   "Select registry entry."
-  (let* ((types (if (listp types) types (list types)))
+  (let* ((types (if types (ensure-list types) (mapcar #'car org-registry-types)))
          (registries (mapcar
                       (lambda (x) (expand-file-name x "~/"))
                       (if registries
                           (if (listp registries) registries (list registries))
-                        org-registry-registries)))
-         (predicate
-          (lambda (name node)
-            (and
-             (member (org-mem-entry-file-truename node) registries)
-             (if types
-                 (member (org-mem-entry-property "TYPE" node) types)
-               t)))))
-    (gethash
-     (org-node-read-candidate
-      "Entry: "
-      nil
-      predicate
-      'require-match
-      (when-let* ((entry (ignore-errors (org-node-at-point)))
-                  (title (org-mem-entry-title entry)))
-        (when (funcall predicate title entry) title))
-      )
-     org-node--candidate<>entry)))
+                        org-registry-registries))))
+
+    (car
+     (consult--multi
+      (seq-map
+       (lambda (type-name)
+         (list :name type-name
+               :narrow (plist-get (cdr (assoc type-name org-registry-types)) :key)
+               :items
+               (lambda ()
+                 (seq-keep
+                  (lambda (entry)
+                    (when (member (org-mem-entry-property "TYPE" entry)
+                                  (org-registry--type-name-and-aliases type-name))
+                      (cons (org-mem-entry-title entry) entry)))
+                  (org-mem-entries-in-files registries)))))
+       types)
+      :require-match t
+      :prompt "Registry entry: "))))
 
 (defun org-registry-type-aliases ()
   "Return alist of type name to aliases.
@@ -605,6 +605,7 @@ environment (multiline), paste it in headline body."
 
 (org-registry-set-type
  "latex"
+ :key ?l
  :preview #'org-registry--type-latex-preview
  :teardown #'org-registry--type-latex-teardown
  :paste #'org-registry--type-latex-paste
@@ -664,6 +665,7 @@ environment (multiline), paste it in headline body."
 
 (org-registry-set-type
  "file"
+ :key ?f
  :aliases '("image" "video" "audio")
  :preview #'org-registry--type-file-preview
  :paste #'org-registry--type-file-paste
@@ -719,6 +721,7 @@ environment (multiline), paste it in headline body."
 
 (org-registry-set-type
  "org"
+ :key ?o
  :preview #'org-registry--type-org-preview
  :teardown #'org-registry--type-org-teardown
  :paste #'org-registry--type-org-paste
@@ -1012,6 +1015,7 @@ See `parsebib-read-entry'."
 
 (org-registry-set-type
  "resource"
+ :key ?r
  :parse #'org-registry--type-resource-parse
  :register #'org-registry--type-resource-register
  )
