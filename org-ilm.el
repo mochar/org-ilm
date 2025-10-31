@@ -176,6 +176,8 @@ be due starting 2am."
                   #'org-ilm--org-mem-hook)
         (add-hook 'org-mem-post-targeted-scan-functions
                   #'org-ilm--org-mem-hook)
+        (add-hook 'kill-emacs-hook
+                  #'org-ilm--pqueue-write-all)
         (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
         (define-key image-mode-map (kbd "A") org-ilm-image-map)
         (advice-add 'pdf-annot-create-context-menu
@@ -190,6 +192,9 @@ be due starting 2am."
               #'org-ilm--org-mem-hook)
     (remove-hook 'org-mem-post-targeted-scan-functions
                  #'org-ilm--org-mem-hook)
+    (remove-hook 'kill-emacs-hook
+                 #'org-ilm--pqueue-write-all)
+    (org-ilm--pqueue-write-all)
     (define-key pdf-view-mode-map (kbd "A") nil)
     (define-key image-mode-map (kbd "A") nil)
     (advice-remove 'pdf-annot-create-context-menu
@@ -1156,7 +1161,12 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
    user-emacs-directory)
   "The directory where the queues are stored for single file collections."
   :type 'directory
-  :group 'org-ilm)
+  :group 'org-ilm-pqueue)
+
+(defcustom org-ilm-pqueue-save-every-n-changes 5
+  "Save the priority queue to disk after this many changes."
+  :type 'integer
+  :group 'org-ilm-pqueue)
 
 (defvar org-ilm-pqueue-priority-changed-hook nil
   "Hook called when the priority of an element was actively changed.
@@ -1169,7 +1179,8 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 
 (cl-defstruct (org-ilm-pqueue (:conc-name org-ilm-pqueue--))
   "Priority queue."
-  collection ost)
+  collection ost
+  (changes-since-save 0 :type integer))
 
 (defun org-ilm--pqueue-dir (collection)
   "Return the directory path where the queue of COLLECTION is stored."
@@ -1181,6 +1192,7 @@ Note that priority may change frequently due to the nature of a queue. Therefore
         dir))))
 
 (defun org-ilm--pqueue-file (collection)
+  "Return the file path where the queue of COLLECTION is stored."
   (expand-file-name "element-queue.el" (org-ilm--pqueue-dir collection)))
 
 (defun org-ilm--pqueue-read (collection)
@@ -1190,11 +1202,30 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 ;; TODO Schedule for write in background process
 ;; If new scheduled, old one cancelled. Use org-mem thing?
 (defun org-ilm-pqueue--write (pqueue)
-  (let ((file (org-ilm--pqueue-file (org-ilm-pqueue--collection pqueue))))
+  (let* ((file (org-ilm--pqueue-file (org-ilm-pqueue--collection pqueue)))
+         (backup-file (concat file ".bak")))
     (make-directory (file-name-directory file) 'parents)
+    (when (file-exists-p file)
+      (copy-file file backup-file t))
     (ost-write (org-ilm-pqueue--ost pqueue) file))
   ;; Return nil prevent printing
   nil)
+
+(defun org-ilm-pqueue--mark-changes (pqueue &optional n-changes)
+  (setq n-changes (or n-changes 1))
+  (cl-incf (org-ilm-pqueue--changes-since-save pqueue) n-changes)
+  (when (>= (org-ilm-pqueue--changes-since-save pqueue)
+            org-ilm-pqueue-save-every-n-changes)
+    (org-ilm-pqueue--write pqueue)
+    (setf (org-ilm-pqueue--changes-since-save pqueue) 0)))
+
+(defun org-ilm--pqueue-write-all ()
+  "Force-save all pqueues that have pending changes."
+  (interactive)
+  (dolist (pqueue-cons org-ilm--pqueues)
+    (let ((pqueue (cdr pqueue-cons)))
+      (when (org-ilm-pqueue-p pqueue)
+        (org-ilm-pqueue--write pqueue)))))
 
 (defun org-ilm-pqueue--contains-p (pqueue id)
   "Return ID if it is in QUEUE."
@@ -1203,20 +1234,20 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 (defun org-ilm-pqueue--insert (pqueue id rank)
   "Insert element with ID in PQUEUE with RANK."
   (ost-tree-insert (org-ilm-pqueue--ost pqueue) rank id)
-  (org-ilm-pqueue--write pqueue))
+  (org-ilm-pqueue--mark-changes pqueue))
 
 (defun org-ilm-pqueue--remove (pqueue id)
   "Remove element with ID from PQUEUE."
   (when (org-ilm-pqueue--contains-p pqueue id)
     (ost-tree-remove (org-ilm-pqueue--ost pqueue) id)
-    (org-ilm-pqueue--write pqueue)))
+    (org-ilm-pqueue--mark-changes pqueue)))
 
 ;; TODO Keep copy of ost to restore in case of error midway?
 (defun org-ilm-pqueue--move (pqueue id new-rank)
   "Move element ID in PQUEUE to NEW-RANK."
   (ost-tree-move (org-ilm-pqueue--ost pqueue) id new-rank)
   (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook (cons id new-rank))
-  (org-ilm-pqueue--write pqueue))
+  (org-ilm-pqueue--mark-changes pqueue))
 
 (defun org-ilm-pqueue--move-many (pqueue new-ranks-alist)
   "Move many elements in PQUEUE to a new rank.
@@ -1224,7 +1255,7 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (ost-tree-move-many (org-ilm-pqueue--ost pqueue) new-ranks-alist)
   (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook new-ranks-alist)
-  (org-ilm-pqueue--write pqueue))
+  (org-ilm-pqueue--mark-changes pqueue (length new-ranks-alist)))
 
 (defun org-ilm-pqueue--count (pqueue)
   "Return number of elements in PQUEUE."
@@ -6811,7 +6842,7 @@ A lot of formatting code from org-ql."
   :allow-empty nil
   :reader
   (lambda (prompt initial-input history)
-    (car (org-ilm--select-collection))))
+    (org-ilm--select-collection)))
 
 (transient-define-suffix org-ilm--import-transient-resource ()
   (interactive)
