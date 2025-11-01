@@ -114,8 +114,9 @@ be due starting 2am."
 
 (defvar-keymap org-ilm-context-map
   :doc "Keymap for the context frame"
-  "h" #'org-ilm-context-frame
-  "n" #'org-ilm-context-new)
+  "f" #'org-ilm-context-frame
+  "n" #'org-ilm-context-new
+  "a" #'org-ilm-context-add)
 
 (defvar-keymap org-ilm-concept-map
   :doc "Keymap for concept actions."
@@ -135,7 +136,7 @@ be due starting 2am."
   "z" #'org-ilm-cloze
   "c" #'org-ilm-cloze-toggle
   "t" #'org-ilm-attachment-transclude
-  "h" org-ilm-context-map
+  ";" org-ilm-context-map
   "n" org-ilm-concept-map
   "d" #'org-ilm-element-delete
   "r" #'org-ilm-review
@@ -333,9 +334,10 @@ be due starting 2am."
       (let ((key (ignore-errors
                    (car (mochar-utils--org-mem-cite-refs)))))
         (with-current-buffer (find-file path)
-          (goto-char (point-min))
-          (when (re-search-forward key nil t)
-            (beginning-of-line))))
+          (when key 
+            (goto-char (point-min))
+            (when (re-search-forward key nil t)
+              (beginning-of-line)))))
     (user-error "Path to bibliography not found")))
   
 ;;;; Utilities
@@ -5264,7 +5266,7 @@ See `org-ilm-attachment-transclude'."
   (if (frame-live-p org-ilm--context-frame)
       org-ilm--context-frame
     (let ((frame (make-frame `((name . ,org-ilm--context-name)
-                               (minibuffer . nil)
+                               ;; (minibuffer . nil)
                                (unsplittable . t)
                                (width . 50)
                                (height . 20)
@@ -5272,6 +5274,10 @@ See `org-ilm-attachment-transclude'."
       (with-selected-window (frame-root-window frame)
         (switch-to-buffer (org-ilm--context-default-buffer)))
       (setq org-ilm--context-frame frame))))
+
+(defun org-ilm--context-save-buffer ()
+  (with-selected-window (frame-root-window (org-ilm--context-frame))
+    (when buffer-file-name (save-buffer))))
 
 (defun org-ilm--context-frame-p (frame)
   (string= (frame-parameter frame 'name) org-ilm--context-name))
@@ -5293,6 +5299,7 @@ See `org-ilm-attachment-transclude'."
                   #'org-ilm--context-detect)
         (add-hook 'delete-frame-functions
                   #'org-ilm--context-frame-on-delete))
+    (org-ilm--context-save-buffer)
     (remove-hook 'window-buffer-change-functions
                  #'org-ilm--context-detect)
     (remove-hook 'delete-frame-functions
@@ -5306,6 +5313,7 @@ the context frame."
     (with-current-buffer (window-buffer (frame-root-window frame))
       (let ((context-path (org-ilm--context-get-path)))
         (with-selected-window (frame-root-window (org-ilm--context-frame))
+          (when buffer-file-name (save-buffer))
           (if context-path
               (find-alternate-file context-path)
             (switch-to-buffer (org-ilm--context-default-buffer))))))))
@@ -5314,7 +5322,9 @@ the context frame."
   "Return the path to the context file of the current selected attachment."
   (let ((location (org-ilm--where-am-i)))
     (when (eq (car location) 'attachment)
-      (when-let* ((attach-dir (file-name-directory (buffer-file-name)))
+      (when-let* ((attach-dir (if (org-ilm--pdf-mode-p)
+                                  (nth 1 (org-ilm--pdf-data))
+                                (file-name-directory (buffer-file-name))))
                   (id (nth 1 location))
                   (entry (org-mem-entry-by-id id))
                   (crumbs (org-mem-entry-crumbs entry)))
@@ -5357,6 +5367,37 @@ the context frame."
             (context-id (org-mem-entry-id context-entry)))
       (find-file (expand-file-name (concat context-id ".context.org") attach-dir))
     (user-error "No element at point")))
+
+
+(defun org-ilm-context-add ()
+  "Add active region to context."
+  (interactive)
+  (if-let ((path (org-ilm--context-get-path)))
+      (let (text)
+        (cond
+         ((eq major-mode 'org-mode)
+          (unless (region-active-p) (user-error "Region not active"))
+          (setq text (buffer-substring-no-properties (region-beginning) (region-end))))
+         ((org-ilm--pdf-mode-p)
+          (unless (pdf-view-active-region-p) (user-error "Region not active"))
+          (let* ((data (org-ilm--pdf-data))
+                 (id (nth 0 data))
+                 (attach-dir (nth 1 data))
+                 (filename-base (concat id "_" (substring (org-id-new) 0 8)))
+                 (out-file-base (expand-file-name filename-base attach-dir))
+                 (out-file (org-ilm--pdf-image-export
+                            out-file-base :region (car (pdf-view-active-region t)))))
+            (setq text (concat "file:" (file-name-nondirectory out-file))))))
+        
+        (when text
+          (with-current-buffer (find-file-noselect path)
+            (save-excursion
+              (goto-char (point-max))
+              (unless (bolp) (newline))
+              (insert text))
+            (org-link-preview nil (point-min) (point-max))
+            (save-buffer))))
+    (user-error "No context file")))
 
 
 ;;;; Target overlays
@@ -7062,7 +7103,11 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 
 (defun org-ilm--import-resource-process-source (&optional source)
   (unless source
-    (setq source (ffap-read-file-or-url "URL/DOI/PDF path: " (thing-at-point 'url))))
+    (setq source (ffap-read-file-or-url
+                  "URL/DOI/PDF path: "
+                  (or (thing-at-point 'url)
+                      ;; Works in dired!
+                      (thing-at-point 'existing-filename)))))
 
   (when (and source (not (string-empty-p source)))
 
