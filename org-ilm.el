@@ -2056,7 +2056,8 @@ ELEMENT may be nil, in which case try to read it from point."
     (lambda ()
       (interactive)
       (org-ilm-element-with-point-at org-ilm--element-transient-element
-        (org-ilm-concepts))))
+        (org-ilm-concepts)))
+    :transient t)
    ]
 
   [
@@ -3698,6 +3699,7 @@ the ytdlp flags which I don't care to do atm."
   "x" #'org-ilm-pdf-extract
   "z" #'org-ilm-pdf-cloze
   "c" #'org-ilm-pdf-convert
+  "s" #'org-ilm-pdf-split
   "n" #'org-ilm-pdf-toggle-narrow
   "h" #'org-ilm-pdf-toggle-highlights)
 
@@ -7032,30 +7034,57 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
 ;; - Paper from arxiv link or doi (paper)
 ;; - Paper from local pdf file
 
+(defcustom org-ilm-pdf2doi-path (executable-find "pdf2doi")
+  "Path to the pdf2doi executable."
+  :type 'file
+  :group 'org-ilm-import)
+
+(defun org-ilm--pdf2doi (path)
+  "Use pd2doi to attempt extraction of doi from pdf in PATH."
+  (cl-assert (f-absolute-p path))
+  (when org-ilm-pdf2doi-path
+    ;; pdf2doi returns table, one line per file. we only pass one file so only
+    ;; fetch the first line.
+    (when-let* ((output (car (process-lines org-ilm-pdf2doi-path path)))
+                (doi (string-trim (nth 1 (string-split output)))))
+      (when (and doi (not (string-empty-p doi)) (not (string= doi "n.a.")))
+        doi))))
+
 (defvar org-ilm--import-resource-data nil)
 
 (defun org-ilm--import-resource-process-source (&optional source)
   (unless source
-    ;; TODO Support for path to pdf -> recover bibtex data (zotero-like)
-    ;; (setq source (ffap-read-file-or-url "URL/path/DOI: " nil))
-    (setq source (read-string "URL or ID: " (thing-at-point 'url))))
+    (setq source (ffap-read-file-or-url "URL/DOI/PDF path: " (thing-at-point 'url))))
 
   (when (and source (not (string-empty-p source)))
-    (let* ((data (org-ilm--citation-get-zotero source))
-           (type "resource")
-           (source-type (if (org-url-p source) 'url 'id))
-           (title (or (alist-get 'title data)
-                      (alist-get 'shortTitle data)
-                      (when (eq source-type 'url)
-                        (mochar-utils--get-page-title source))
-                      source)))
 
-      (pcase (alist-get 'itemType data)
-        ((or "preprint" "conferencePaper" "document" "journalArticle" "manuscript")
-         (setq type "paper"))
-        ((or "videoRecording" "audioRecording")
-         (setq type "media"))
-        (_ (setq type "website")))
+    (let ((type "resource")
+          (title source)
+          source-type data)
+      
+      (cond
+       ((file-exists-p source)
+        (setq source (expand-file-name source)
+              source-type 'file)
+        (when-let ((doi (org-ilm--pdf2doi source)))
+          (setq data (org-ilm--citation-get-zotero doi))))
+       (t
+        (setq data (org-ilm--citation-get-zotero source)
+              source-type (if (org-url-p source) 'url 'id))))
+
+      (when data
+        (setq title (or (alist-get 'title data)
+                        (alist-get 'shortTitle data)
+                        (when (eq source-type 'url)
+                          (mochar-utils--get-page-title source))
+                        source))
+
+        (pcase (alist-get 'itemType data)
+          ((or "preprint" "conferencePaper" "document" "journalArticle" "manuscript")
+           (setq type "paper"))
+          ((or "videoRecording" "audioRecording")
+           (setq type "media"))
+          (_ (setq type "website"))))
       
       (list :source source :source-type source-type
             :title title :type type :data data))))
@@ -7072,6 +7101,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           :key key
           :id id
           :title title
+
+          :file-method (intern (or (transient-arg-value "--file-method" args) "cp"))
 
           :html-download (transient-arg-value "--html-download" args)
 
@@ -7155,7 +7186,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (setf (plist-get org-ilm--import-resource-data :id) id)
       (append
        '("--webpage-simplify-to-markdown" "--webpage-orgify"
-         "--media-template=%(title)s.%(ext)s")
+         "--media-template=%(title)s.%(ext)s"
+         "--file-method=cp")
        (list (concat "--source=" source)
              (concat "--key=" (plist-get org-ilm--import-resource-data :key))
              (concat "--type=" (plist-get org-ilm--import-resource-data :type))
@@ -7176,7 +7208,20 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
     :if (lambda () (plist-get org-ilm--import-resource-data :title)))
    ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
     :always-read t :allow-empty nil)
-   ("h" "HTML download as Org" "--html-download")
+   ]
+
+  ["File"
+   :hide (lambda () (not (eq (plist-get org-ilm--import-resource-data :source-type) 'file)))
+   ("fm" "Method of attachment" "--file-method="
+    :allow-empty nil
+    :always-read t
+    :choices (mv cp ln lns) :prompt "Method of attachment: ")
+   ]
+   
+
+  ["HTML -> org download"
+   :if (lambda () (not (eq (plist-get org-ilm--import-resource-data :source-type) 'file)))
+   ("hd" "Download" "--html-download")
    ]
 
   ["Webpage download"
@@ -7205,7 +7250,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
    :if
    (lambda ()
      (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
-       (string= (plist-get args :type) "paper")))
+       (and (string= (plist-get args :type) "paper")
+            (not (eq (plist-get args :source-type) 'file)))))
    ("pd" "Download" "--paper-download" :transient transient--do-call)
    ]
 
@@ -7234,6 +7280,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
       (interactive)
       (cl-destructuring-bind
           (&key source source-type type bibtex key title id
+                file-method
                 html-download
                 paper-download
                 webpage-download webpage-simplify webpage-orgify
@@ -7241,6 +7288,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           (org-ilm--import-resource-transient-args)
         (let ((transient-args (transient-args 'org-ilm--import-resource-transient))
               (media-no-download (and (string= type "media") (not media-download)))
+              (file-p (eq source-type 'file))
               content)
 
           (setq content
@@ -7261,9 +7309,12 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            :id id
            :bibtex bibtex
            :content content
+           :file (when file-p source)
+           :method (when file-p file-method)
+           :ext t
            :props
            (append
-            (list :ROAM_REFS (if key (concat source " @" key) source))
+            (list :ROAM_REFS (unless file-p (if key (concat source " @" key) source)))
             ;; Media URL as media prop when we are not downloading. When
             ;; downloading, the source file is determined by ytdlp and set later
             ;; on.
