@@ -179,6 +179,7 @@ be due starting 2am."
         (add-hook 'kill-emacs-hook
                   #'org-ilm--pqueue-write-all)
         (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
+        (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-actions)
         (define-key image-mode-map (kbd "A") org-ilm-image-map)
         (advice-add 'pdf-annot-create-context-menu
                     :around #'org-ilm--pdf-annot-create-context-menu-advice)
@@ -196,6 +197,7 @@ be due starting 2am."
                  #'org-ilm--pqueue-write-all)
     (org-ilm--pqueue-write-all)
     (define-key pdf-view-mode-map (kbd "A") nil)
+    (define-key pdf-view-mode-map (kbd "e") nil)
     (define-key image-mode-map (kbd "A") nil)
     (advice-remove 'pdf-annot-create-context-menu
                    #'org-ilm--pdf-annot-create-context-menu-advice)
@@ -970,6 +972,7 @@ should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
 
 (defcustom org-ilm-collections '((ilm . ((path . "~/ilm/")
                                          (bib . "refs.bib")
+                                         (concepts . "concepts.org")
                                          (default . "inbox.org"))))
   "Alist mapping collection name symbol to its configuration alist.
 
@@ -1001,7 +1004,7 @@ Properties:
   (let ((location (org-ilm--where-am-i)))
     (pcase (car location)
       ('collection (cdr location))
-      ('attachment (caaddr location))
+      ('attachment (nth 2 location))
       ('queue (cadr location)))))
 
 (defun org-ilm--collection-path (collection)
@@ -1012,6 +1015,11 @@ Properties:
   "Return path of the default file in COLLECTION to place imports."
   (or (alist-get 'default (alist-get collection org-ilm-collections))
       (expand-file-name "inbox.org" (org-ilm--collection-path collection))))
+
+(defun org-ilm--collection-concepts-file (collection)
+  "Return path of file in COLLECTION where concepts are to be stored. May be nil."
+  (when-let ((file (alist-get 'concepts (alist-get collection org-ilm-collections))))
+    (expand-file-name file (org-ilm--collection-path collection))))
 
 (defun org-ilm--collection-single-file-p (collection)
   "Return t if COLLECTION is a single file collection."
@@ -1064,7 +1072,7 @@ The collections are stored in `org-ilm-collections'."
       (directory-files file-or-dir 'full "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
-(defun org-ilm--select-collection-file (collection &optional relative-p)
+(defun org-ilm--select-collection-file (collection &optional relative-p prompt)
   "Prompt user to select a file from COLLECTION.
 With RELATIVE-P non-nil, return path truncated relative to collection directory."
   (cl-assert (assoc collection org-ilm-collections))
@@ -1078,7 +1086,7 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
       ;; TODO Make it work with nested files
       (setq file (expand-file-name
                   (completing-read
-                   "Collection file: "
+                   (or prompt "Collection file: ")
                    (mapcar (lambda (f)
                              (file-relative-name f col-path))
                            files)
@@ -2824,7 +2832,6 @@ The callback ON-ABORT is called when capture is cancelled."
           (car data)
         (apply #'make-org-ilm-capture data))
 
-    
     (cl-assert (member type '(material card)))
     (unless id (setq id (org-id-new)))
     (unless state
@@ -3760,7 +3767,8 @@ TODO Cute if we can use numeric prefix to jump to that page number"
 (defun org-ilm-pdf-toggle-highlights ()
   "Toggle render of extract and cloze highlights."
   (interactive)
-  (setq org-ilm-pdf-highlight-captures-p (not org-ilm-pdf-highlight-captures-p))
+  (let ((state (setq org-ilm-pdf-highlight-captures-p (not org-ilm-pdf-highlight-captures-p))))
+    (message "Highlights turned %s" (if state "on" "off")))
   (pdf-view-redisplay))
 
 ;;;;; Utilities
@@ -7858,27 +7866,33 @@ rounded and clamped to at least 1."
 
 ;;;;; Functions
 
-(defun org-ilm--concept-select-entry (&optional collection prompt)
+(defun org-ilm--concept-select-entry (&optional collection prompt blank-ok predicate)
   "Select org-mem concept entries."
   (setq collection
         (or collection
             (org-ilm--collection-from-context)
             (org-ilm--active-collection)))
-  (let ((choice
-         (org-node-read-candidate
-          (or prompt "Concept: ") nil
-          (lambda (name entry)
-            (when-let ((state (org-mem-todo-state entry))
-                       (file (org-mem-entry-file entry)))
-              (and
-               (eq 'concept (org-ilm-type state))
-               (org-ilm--collection-file file collection))))
-          'require-match)))
+  (let* (;; See BLANK-OK in `org-node-read-candidate'
+         (org-node-blank-input-hint (propertize "(new concept)" 'face 'completions-annotations))
+         (choice
+          (org-node-read-candidate
+           (or prompt "Concept: ") blank-ok
+           (lambda (name entry)
+             (or
+              (and blank-ok (string= name ""))
+              (when-let ((state (org-mem-todo-state entry))
+                         (file (org-mem-entry-file entry)))
+                (and
+                 (eq 'concept (org-ilm-type state))
+                 (org-ilm--collection-file file collection)
+                 (if predicate (funcall predicate entry) t)))))
+           'require-match
+           )))
     (gethash choice org-node--candidate<>entry)))
 
-(defun org-ilm--concept-parse-property (&optional string)
+(defun org-ilm--concept-parse-property (&optional string inherit)
   "Return (id . title) of concepts in STRING or property of heading at point."
-  (unless string (setq string (or string (org-entry-get nil "CONCEPTS"))))
+  (unless string (setq string (or string (org-entry-get nil "CONCEPTS" inherit))))
   (when string
     (let ((link-match-pos 0)
           concepts)
@@ -7907,22 +7921,37 @@ rounded and clamped to at least 1."
          (t (call-interactively #'org-ilm-concept-new))))
     (call-interactively #'org-ilm-concept-new)))
 
-(defun org-ilm-concept-new (&optional select-collection-p)
+(cl-defun org-ilm-concept-new (&optional select-collection-p &key title id on-success)
   "Create a new concept."
   (interactive "P")
   (let* ((collection (org-ilm--collection-from-context))
          (collection (if (or select-collection-p (null collection))
                          (org-ilm--select-collection)
                        collection))
-         (file (org-ilm--select-collection-file collection)))
+         (file (or (org-ilm--collection-concepts-file collection)
+                   (org-ilm--select-collection-file collection nil "Concept location: "))))
+    (setq id (or id (org-id-new)))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list
                 (list
                  "s" "Concept" 'entry (list 'file file)
-                 (concat "* " (car org-ilm-concept-states) " %?")
+                 (concat "* " (car org-ilm-concept-states) " " title "%?")
                  :hook
                  (lambda ()
-                   (org-id-get-create))))))
+                   (org-entry-put nil "ID" id))
+                 :before-finalize
+                 (lambda ()
+                   (setq title (org-get-heading t t t t)))
+                 :after-finalize
+                 (lambda ()
+                   (unless org-note-abort
+                     (with-current-buffer (find-file-noselect file)
+                       (org-with-wide-buffer
+                         (goto-char (org-find-property "ID" id))
+                         (org-mem-updater-ensure-id-node-at-point-known)))
+                     (when on-success 
+                       (funcall on-success id title)))))
+                 )))
       (org-capture nil "s"))))
 
 (defun org-ilm-concept-into ()
@@ -7964,58 +7993,83 @@ rounded and clamped to at least 1."
       (org-entry-put nil "CONCEPTS+" concepts-str))
     (save-buffer)))
 
-(defun org-ilm-concept-add ()
+(defun org-ilm-concept-add (&optional concept-entry)
   "Add concept to CONCEPTS property for element at point."
-  ;; TODO Skip if self or descendant.
   (interactive)
-  (let* ((concept-entry (org-ilm--concept-select-entry nil "Add concept: "))
-         (concept-id (org-mem-entry-id concept-entry))
-         (cur-concepts (org-entry-get nil "CONCEPTS" 'inherit)))
-    (cond
-     ((string= (org-id-get) concept-id)
-      (user-error "Cannot add concept to itself"))
-     ((and cur-concepts (string-match concept-id cur-concepts))
-      ;; TODO offer option to remove
-      (user-error "Concept already added"))
-     (t
-      (let* ((concept-desc (mochar-utils--org-mem-title-full concept-entry))
-             (concept-link (org-link-make-string
-                            (concat "id:" concept-id) concept-desc)))
-        (org-entry-put nil "CONCEPTS+"
-                       (concat cur-concepts " " concept-link))
-        (save-buffer))))))
+  (let* ((org-id (org-id-get))
+         (concepts-str (org-entry-get nil "CONCEPTS"))
+         (cur-concepts (mapcar #'car (org-ilm--concept-parse-property nil 'inherit)))
+         (concept-entry
+          (or concept-entry
+              (org-ilm--concept-select-entry
+               nil "Add concept: " t
+               (lambda (entry) ;; predicate
+                 (not (member (org-mem-entry-id entry) cur-concepts))))))
+         concept-id)
+
+    (if (null concept-entry)
+        (org-ilm-concept-new
+         nil
+         :on-success
+         (lambda (id &rest _)
+           (org-ilm--org-with-point-at org-id
+             (org-ilm-concept-add (org-mem-entry-by-id id)))))
+      (setq concept-id (org-mem-entry-id concept-entry))
+      (cond
+       ((string= (org-id-get) concept-id)
+        (user-error "Cannot add concept to itself"))
+       ((member concept-id cur-concepts)
+        ;; TODO offer option to remove
+        (user-error "Concept already added"))
+       (t
+        (let* ((concept-desc (mochar-utils--org-mem-title-full concept-entry))
+               (concept-link (org-link-make-string
+                              (concat "id:" concept-id) concept-desc)))
+          (org-entry-put nil "CONCEPTS+"
+                         (concat concepts-str " " concept-link))
+          (save-buffer)))))))
 
 ;;;;; Transient
 
 (defun org-ilm-concepts ()
   (interactive)
   (if-let* ((element (org-ilm-element-from-context))
-            (id (org-ilm-element-id element))
-            (entry (org-mem-entry-by-id id)))
-      (let* ((concept-data (org-ilm-element-concepts element))
-             (concept-ids (copy-sequence (car concept-data)))
+            (id (org-ilm-element-id element)))
+      (let ((transient-data (org-ilm--concept-transient-data id)))
+        (org-ilm--concept-transient transient-data))
+    (user-error "No element at point")))
+
+(defun org-ilm--concept-transient-data (id)
+  "Annotate for each concept of element with ID whether it is a direct,
+outline, and/or property concept."
+  (let ((data (list :id id)))
+    (when-let* ((concept-data (org-ilm--concept-cache-gather id)))
+      (let* ((concept-ids (copy-sequence (car concept-data)))
              (n-direct (cdr concept-data))
-             (prop-ids (org-ilm--org-with-point-at id
-                         (mapcar #'car (org-ilm--concept-parse-property))))
-             (parent-ids (mapcar (lambda (c) (nth 4 c))
-                                 (org-mem-entry-crumbs entry)))
-             (data (list :element element)))
+             prop-ids parent-ids)
+        
+        (org-ilm--org-with-point-at id
+          (setq prop-ids (mapcar #'car (org-ilm--concept-parse-property)))
+          (save-excursion
+            (while (org-up-heading-safe)
+              (push (org-id-get) parent-ids))))
+        
         (seq-do-indexed
          (lambda (concept-id i)
-             (push (list :direct (and n-direct (< i n-direct))
-                         :outline (member concept-id parent-ids)
-                         :property (member concept-id prop-ids)
-                         :entry (org-mem-entry-by-id concept-id))
-                   (plist-get data :concepts)))
-         (reverse concept-ids))
-        (org-ilm--concept-transient data))
-    (user-error "No element at point")))
+           (push (list :direct (and n-direct (< i n-direct))
+                       :outline (member concept-id parent-ids)
+                       :property (member concept-id prop-ids)
+                       :id concept-id
+                       :title (when-let ((entry (org-mem-entry-by-id concept-id)))
+                                (mochar-utils--org-mem-title-full entry)))
+                 (plist-get data :concepts)))
+         (reverse concept-ids))))
+    data))
 
 (defun org-ilm--concept-transient-concepts-build (concepts)
   (seq-map
    (lambda (concept)
-     (let* ((entry (plist-get concept :entry))
-            (title (mochar-utils--org-mem-title-full entry)))
+     (let ((title (plist-get concept :title)))
        (transient-parse-suffix '
         'org-ilm--concept-transient
         (list :info* (concat "- " title)))))
@@ -8024,7 +8078,7 @@ rounded and clamped to at least 1."
 (transient-define-prefix org-ilm--concept-transient (scope)
   :refresh-suffixes t
 
-  ["Outline"
+  ["Outline concepts"
    :setup-children
    (lambda (_)
      (org-ilm--concept-transient-concepts-build
@@ -8035,7 +8089,7 @@ rounded and clamped to at least 1."
        (plist-get (transient-scope) :concepts))))
    ]
 
-  ["Inherited"
+  ["Inherited concepts"
    :setup-children
    (lambda (_)
      (org-ilm--concept-transient-concepts-build
@@ -8046,7 +8100,7 @@ rounded and clamped to at least 1."
        (plist-get (transient-scope) :concepts))))
    ]
 
-  ["Property"
+  ["Property concepts"
    :setup-children
    (lambda (suffixes)
      (append
@@ -8059,15 +8113,24 @@ rounded and clamped to at least 1."
    ("a" "Add"
     (lambda ()
       (interactive)
-      (org-ilm-element-with-point-at (plist-get (transient-scope) :element)
-        (org-ilm-concept-add)))
-    :transient transient--do-call)
+      ;; TODO This leads to error when creating a new concept from within
+      ;; (org-ilm-concepts-add), happens when capture buffer opens.
+      (let ((id (plist-get (transient-scope) :id)))
+        (org-ilm--org-with-point-at id
+          (org-ilm-concept-add)))
+      (run-with-timer .1 nil #'org-ilm-concepts)
+      )
+    :transient transient--do-exit
+    )
    ("r" "Remove"
     (lambda ()
       (interactive)
-      (org-ilm-element-with-point-at (plist-get (transient-scope) :element)
-        (org-ilm-concept-remove)))
-    :transient transient--do-call)
+      (let ((id (plist-get (transient-scope) :id)))
+        (org-ilm--org-with-point-at id
+          (org-ilm-concept-remove)))
+      (run-with-timer .1 nil #'org-ilm-concepts))
+    :transient transient--do-exit
+    )
    ]
   
   (interactive)
