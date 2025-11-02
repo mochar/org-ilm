@@ -6935,20 +6935,7 @@ A lot of formatting code from org-ql."
 
 ;;;; Import
 
-(transient-define-suffix org-ilm--import-transient-resource ()
-  (interactive)
-  (let ((hook (mochar-utils--add-hook-once
-               'org-registry-register-hook
-               (lambda (entry-id)
-                 (let ((org-ilm--import-registry-data (list :id entry-id)))
-                   (org-ilm--import-registry-transient))))))
-    (let ((org-registry-types (list (assoc "resource" org-registry-types))))
-      (call-interactively #'org-registry-register-dwim))
-    (mochar-utils--add-hook-once
-     'transient-post-exit-hook
-     (lambda () (remove-hook 'org-registry-register-hook hook)))))
-
-(transient-define-prefix org-ilm--import-transient ()
+(transient-define-prefix org-ilm--import-transient (scope)
   :refresh-suffixes t
   ["Ilm"
    ("C" "Collection"
@@ -6959,18 +6946,31 @@ A lot of formatting code from org-ql."
     (lambda ()
       (concat "Collection " (propertize (format "%s" (org-ilm--active-collection))
                                         'face 'transient-value))))
+   ("." "As child" "--child"
+    :inapt-if-not (lambda () (transient-scope)))
+   (:info
+    (lambda ()
+      (let ((element (transient-scope))
+            (as-child (transient-arg-value "--child" (transient-get-value))))
+        (propertize (org-ilm-element-title element)
+                    'face (if as-child 'transient-value 'Info-quoted))))
+    ;; :if (lambda () (transient-scope)))
+    :if (lambda () (and (transient-scope)
+                        (transient-arg-value "--child" (transient-get-value)))))
    ]
 
   [
    ["Import"
-    ("r" "Resource" org-ilm--import-resource-transient
-     :inapt-if-nil org-ilm--active-collection)
-    ("f" "File" org-ilm--import-file-transient
-     :inapt-if-nil org-ilm--active-collection)
-    ("m" "Media" org-ilm--import-media-transient
-     :inapt-if-nil org-ilm--active-collection)
-    ("g" "Registry" org-ilm--import-registry-transient
-     :inapt-if-nil org-ilm--active-collection)
+    ("r" "Resource"
+     (lambda ()
+       (interactive)
+       (org-ilm--import-resource-transient (transient-scope))))
+    ("f" "File"
+     (lambda ()
+       (interactive)
+       (org-ilm--import-file-transient (transient-scope))))
+    ("m" "Media" org-ilm--import-media-transient)
+    ("g" "Registry" org-ilm--import-registry-transient)
     ]
    ["New"
     ("o" "Org" org-ilm-org-new-material)
@@ -6978,30 +6978,35 @@ A lot of formatting code from org-ql."
     ("c" "Card" org-ilm-org-new-card)
     ]
    ]
-  )
+
+  (interactive "P")
+  (transient-setup 'org-ilm--import-transient nil nil :scope scope))
 
 (defun org-ilm-import ()
   "Import an item into your Ilm collection."
   (interactive)
-  (org-ilm--import-transient))
+  (org-ilm--import-transient (ignore-errors (org-ilm-element-from-context))))
 
 ;;;;; Buffer
 
 (defun org-ilm-import-buffer ()
   (interactive)
-  (let (props)
-    (pcase major-mode
-      ('gptel-mode
-       (gptel-org--save-state))
-      (_
-       (when-let ((link (org-store-link '(4))))
-         (setq props (list :ROAM_REFS link)))))
-    (org-ilm--capture-capture
-     'material
-     :collection (org-ilm--active-collection)
-     :content (buffer-string)
-     :props props)))
-
+  (let ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
+        props)
+    (with-current-buffer buf
+      (pcase major-mode
+        ('gptel-mode
+         (gptel-org--save-state))
+        (_
+         (when-let ((link (org-store-link '(4))))
+           (setq props (list :ROAM_REFS link)))))
+      (org-ilm--capture-capture
+       'material
+       :parent (when-let ((element (transient-scope)))
+                 (org-ilm-element-id element))
+       :collection (org-ilm--active-collection)
+       :content (buffer-string)
+       :props props))))
 
 ;;;;; File
 
@@ -7023,7 +7028,7 @@ A lot of formatting code from org-ql."
   (lambda (prompt initial-input history)
     (read-file-name prompt nil initial-input t)))
 
-(transient-define-prefix org-ilm--import-file-transient ()
+(transient-define-prefix org-ilm--import-file-transient (scope)
   :value
   (lambda ()
     (append
@@ -7040,10 +7045,14 @@ A lot of formatting code from org-ql."
     (lambda ()
       (interactive)
       (let ((args (org-ilm--import-file-transient-args)))
-        (org-ilm-import-file
-         (plist-get args :file)
-         (org-ilm--active-collection)
-         (intern (plist-get args :method)))))
+        (org-ilm--capture-capture
+         'material
+         :parent (when-let ((el (transient-scope)))
+                   (org-ilm-element-id el))
+         :collection (org-ilm--active-collection)
+         :file (plist-get args :file)
+         :method (intern (plist-get args :method))
+         :ext t)))
     :inapt-if-not
     (lambda ()
       (let ((args (org-ilm--import-file-transient-args)))
@@ -7051,27 +7060,16 @@ A lot of formatting code from org-ql."
          (and (plist-get args :file)
               (plist-get args :method)
               (plist-get args :collection))))))
-    ])
-
-(defun org-ilm--import-select-method (&optional force-ask)
-  "Ask user to choose whether to copy or move file when importing.
-
-If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
-  (if (and (not force-ask) org-ilm-import-default-method)
-      org-ilm-import-default-method
-    (let* ((choices '(("Copy" . cp) ("Move" . mv)))
-           (choice (completing-read "Method: " choices nil t))
-           (method (cdr (assoc choice choices))))
-      method)))
-
-(defun org-ilm-import-file (file collection method)
-  "Import a file."
-  (cl-assert (member method '(mv cp ln lns)))  
-  (org-ilm--capture-capture
-   'material :collection collection
-   :file file :method method :ext t))
+   ]
+  
+  (interactive "P")
+  (transient-setup 'org-ilm--import-file-transient nil nil :scope scope))
 
 ;;;;; Media
+
+;; TODO Can this go?
+;; Remote videos: Resource import
+;; Local videos: File import
 
 (defun org-ilm--import-media-transient-args (&optional args)
   (setq args (or args (transient-args 'org-ilm--import-media-transient)))
@@ -7407,6 +7405,8 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
           
           (org-ilm--capture-capture
            'material
+           :parent (when-let ((el (transient-scope)))
+                     (org-ilm-element-id el))
            :collection (org-ilm--active-collection)
            :title title
            :id id
@@ -7414,7 +7414,7 @@ If `org-ilm-import-default-method' is set and `FORCE-ASK' is nil, return it."
            :content content
            :file (when file-p source)
            :method (when file-p file-method)
-           :ext t
+           :ext (when file-p t)
            :props
            (append
             (list :ROAM_REFS (unless file-p (if key (concat source " @" key) source)))
