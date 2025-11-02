@@ -476,13 +476,14 @@ org-capture template properties."
 
                      (mochar-utils--org-mem-update-cache-after-capture 'entry)
 
+                     (when on-success (funcall on-success id))
+
                      (pcase-let ((`(,begin ,end) (plist-get data :region)))
                        (when (and begin end (yes-or-no-p "Replace with registry link? "))
                          (save-restriction
                            (delete-region begin end)
                            (org-registry-insert id))))
 
-                     (when on-success (funcall on-success id))
                      (run-hook-with-args 'org-registry-register-hook id)))
                  ))
                (template-props (org-combine-plists
@@ -619,9 +620,12 @@ environment (multiline), paste it in headline body."
 
 (defun org-registry--type-file-preview (entry ov link)
   (org-link-preview-file
-   ov (expand-file-name
-       (org-mem-entry-property "PATH" entry)
-       "~/")
+   ov
+   (with-current-buffer (find-file-noselect (org-mem-entry-file entry))
+     (car
+      (file-expand-wildcards
+       (expand-file-name (concat (org-mem-entry-id entry) "*")
+                         (org-attach-dir)))))
    link))
 
 (defun org-registry--type-file-paste (entry)
@@ -630,15 +634,15 @@ environment (multiline), paste it in headline body."
              (concat "file:" path)
              (file-name-base path)))))
 
-(defun org-registry--type-file-from-path (path)
+(defun org-registry--type-file-from-path (path &optional title)
   "Return data for registry entry of type file from PATH."
   (when (and (stringp path) (file-exists-p path))
     (let* ((ext (file-name-extension path))
-           (name (file-name-base path))
+           (title (or title (file-name-base path)))
            (type (cond
                   ((member ext image-file-name-extensions) "image")
                   (t "file"))))
-      (list :title name :path path :type type))))
+      (list :title title :path path :type type))))
 
 (defun org-registry--type-file-parse ()
   (if-let* ((el (when (eq major-mode 'org-mode) (org-element-context)))
@@ -646,7 +650,8 @@ environment (multiline), paste it in headline body."
                     (string= (org-element-property :type el) "file"))))
       (org-combine-plists
        (org-registry--type-file-from-path
-        (expand-file-name (org-element-property :path (org-element-context))))
+        (expand-file-name (org-element-property :path (org-element-context)))
+        (car (flatten-list (org-element-property :caption (org-element-at-point)))))
        (list :begin (org-element-property :begin el)
              :end (org-element-property :end el)))
     (when-let ((data (org-registry--type-file-from-path
@@ -654,6 +659,7 @@ environment (multiline), paste it in headline body."
       ;; We only dwim if its a non-generic file
       (unless (string= (plist-get data :type) "file") data))))
 
+;; TODO Deprecated for register function
 (defun org-registry--type-file-create (&optional args)
   (unless args
     (setq args (org-registry--type-file-from-path (read-file-name "File: "))))
@@ -664,6 +670,34 @@ environment (multiline), paste it in headline body."
     ;; latter.
     (list :title title :type type :props (list :PATH path))))
 
+(defun org-registry--type-file-register (&optional args)
+  (cl-destructuring-bind (&key title path type begin end)
+      (or args (org-registry--type-file-from-path (read-file-name "File: ")))
+    (let ((registry (org-registry--registry-select))
+          (id (org-id-new))
+          attach-dir)
+      (with-current-buffer (find-file-noselect registry)
+        (save-excursion
+          (goto-char (point-min))
+          (setq attach-dir (expand-file-name (org-attach-dir-get-create)))))
+      
+      (org-registry--register
+       "file"
+       (list
+        :title title
+        :id id
+        :type type
+        :region (when (and begin end) (list begin end))
+        :on-success
+        (lambda (&rest _)
+          (copy-file path (expand-file-name (concat id "." (file-name-extension path))
+                                            attach-dir))
+          (run-hook-with-args 'org-attach-after-change-hook attach-dir)
+          (org-attach-tag)
+
+          )
+        )))))
+
 (org-registry-set-type
  "file"
  :key ?f
@@ -671,7 +705,8 @@ environment (multiline), paste it in headline body."
  :preview #'org-registry--type-file-preview
  :paste #'org-registry--type-file-paste
  :parse #'org-registry--type-file-parse
- :create #'org-registry--type-file-create
+ ;; :create #'org-registry--type-file-create
+ :register #'org-registry--type-file-register
  )
 
 ;;;;; Org type

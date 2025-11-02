@@ -4978,12 +4978,15 @@ This is used to keep track of changes in priority and scheduling.")
                            ;; Allow for non-file buffer: pdf virtual view
                            (or buffer-file-name (buffer-name))))
               (entry (org-mem-entry-by-id file-title))
+              (type (when-let ((state (org-mem-entry-todo-state entry)))
+                      (org-ilm-type state)))
               (src-file (org-mem-entry-file entry))
               (src-file (expand-file-name src-file)) ;; sep line, else err
               (collection (org-ilm--collection-file src-file)))
     ;; Exclude registries
-    (unless (seq-some (lambda (r) (string= (expand-file-name r) src-file)) org-registry-registries) 
-      (list file-title collection src-file))))
+    (unless (seq-some (lambda (r) (string= (expand-file-name r) src-file)) org-registry-registries)
+      (when (member type '(material card))
+        (list file-title collection src-file)))))
 
 (defun org-ilm--attachment-extension ()
   "Return the extension of the attachment at point, assuming in collection."
