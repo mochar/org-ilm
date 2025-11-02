@@ -6989,10 +6989,13 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm-import-buffer ()
   (interactive)
-  (let ((link (org-store-link '(4)))
-        props)
-    (when link
-      (setq props (list :ROAM_REFS link)))
+  (let (props)
+    (pcase major-mode
+      ('gptel-mode
+       (gptel-org--save-state))
+      (_
+       (when-let ((link (org-store-link '(4))))
+         (setq props (list :ROAM_REFS link)))))
     (org-ilm--capture-capture
      'material
      :collection (org-ilm--active-collection)
