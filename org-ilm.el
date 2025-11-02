@@ -8265,7 +8265,7 @@ parents, which is defined differently for concepts and extracts/cards:
            ;; Headline is self or incremental ancestor, store linked concepts
            ((or is-self
                 (and (not headline-is-concept) ; Concept never inherit!
-                     (eq type 'material)))
+                     (or (eq type 'material) (string= state "DONE"))))
             (when-let ((prop (org-mem-entry-property "CONCEPTS+" entry)))
               (setq property-concepts-str
                     (concat property-concepts-str " " prop))))
