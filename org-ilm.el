@@ -138,7 +138,7 @@ be due starting 2am."
   "t" #'org-ilm-attachment-transclude
   ";" org-ilm-context-map
   "n" org-ilm-concept-map
-  "d" #'org-ilm-element-delete
+  "k" #'org-ilm-element-delete
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim
@@ -1928,6 +1928,38 @@ ELEMENT may be nil, in which case try to read it from point."
   (let ((position (org-ilm-pqueue-select-position (org-ilm-element-priority element))))
     (org-ilm-element-priority element :rank (car position))))
 
+(defun org-ilm-element-done (element &optional duration timestamp)
+  "Apply done on ilm element at point."
+  (interactive
+   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
+  (cl-assert (org-ilm-element-p element) nil "Not an org-ilm element")
+
+  (when (or (not (called-interactively-p))
+            (yes-or-no-p "Apply done on element?"))
+    (atomic-change-group
+      (org-ilm-element-with-point-at element
+        ;; Log done state in drawer
+        (org-ilm--log-log
+         (org-ilm-element-type element)
+         (org-ilm-element-priority element)
+         nil ;; due
+         (org-ilm-element-sched element)
+         :state :done
+         :duration duration :timestamp timestamp)
+
+        ;; Remove scheduling
+        (org-schedule '(4))
+        
+        ;; Set tood state to DONE
+        (org-todo "DONE")
+        
+        ;; Remove from priority queue
+        (org-ilm-pqueue-remove (org-ilm-element-id element)
+                               (org-ilm-element-collection element))
+
+        ;; TODO Go through all queues and remove from their ost
+        ))))
+
 (defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
   (interactive
@@ -2221,7 +2253,12 @@ ELEMENT may be nil, in which case try to read it from point."
      (lambda ()
        (interactive)
        (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
-    ("D" "Delete"
+    ("D" "Done"
+     (lambda ()
+       (interactive)
+       (org-ilm-element-with-point-at org-ilm--element-transient-element
+         (call-interactively #'org-ilm-element-done))))
+    ("K" "Delete"
      (lambda ()
        (interactive)
        (org-ilm-element-with-point-at org-ilm--element-transient-element
@@ -2234,7 +2271,7 @@ ELEMENT may be nil, in which case try to read it from point."
        (org-ilm--org-new
         'card
         (org-ilm-element-id org-ilm--element-transient-element))))
-    ("X" "New material"
+    ("M" "New material"
      (lambda ()
        (interactive)
        (org-ilm--capture-capture
@@ -5892,6 +5929,7 @@ If the queue has a query, run it again. Else re-parse elements."
   (let ((buffer (generate-new-buffer
                  (format "*Ilm Queue (%s)*" (org-ilm-queue--name queue)))))
     (with-current-buffer buffer
+      (special-mode) ;; has to be first
       (setq-local org-ilm-queue queue)
 
       ;; Make sure that when the queue buffer is killed we update the active
@@ -5914,6 +5952,8 @@ If the queue has a query, run it again. Else re-parse elements."
 
       ;; This doesn't seem to activate when called in `org-ilm--queue-buffer-build'
       (eldoc-mode 1)
+
+      (org-ilm-queue-mode 1)
       
       (when active-p
         (org-ilm-queue--set-active-buffer buffer)))
@@ -6119,6 +6159,13 @@ If point on concept, add all headlines of concept."
 
 
 ;;;; Queue view
+
+;; TODO Added this just so i can integrate with meow. Move key binding and stuff to here?
+(define-minor-mode org-ilm-queue-mode
+  "Minor mode in org-ilm queue buffers."
+  :lighter nil
+  :group 'org-il
+  :interactive nil)
 
 (defvar-keymap org-ilm-queue-base-map
   :doc "Base map of ilm queue, regardless if empty or not."
@@ -8396,7 +8443,6 @@ Gets reset after org-mem refreshes.")
             ;; Return data
             data)))))
 
-
 ;;;; Review
 
 ;; TODO Pass headline id to clock in to during review
@@ -8817,6 +8863,15 @@ needs the attachment buffer."
       (let ((org-ilm--review-update-schedule nil))
         (org-ilm--review-next)))))
 
+(defun org-ilm-review-done ()
+  "Apply done on current element."
+  (interactive)
+  (cl-assert (org-ilm-reviewing-p))
+  (org-ilm--org-with-point-at (plist-get org-ilm--review-data :id)
+    (call-interactively #'org-ilm-element-done)
+    (let ((org-ilm--review-update-schedule nil))
+      (org-ilm--review-next))))
+
 (defun org-ilm-review-open-collection ()
   (interactive)
   (cl-assert (org-ilm-reviewing-p))
@@ -8844,6 +8899,7 @@ needs the attachment buffer."
    ["Actions"
     ("n" "Next" org-ilm-review-next)
     ("p" "Postpone" org-ilm-review-postpone)
+    ("d" "Done" org-ilm-review-done)
     ("q" "Quit" org-ilm-review-quit)]
    ["Element"
     ("e" "Element..." org-ilm-element-actions)
