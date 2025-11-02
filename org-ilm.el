@@ -995,11 +995,13 @@ Properties:
 
 (defun org-ilm--active-collection ()
   "Return or infer the active collection. If missing, prompt user."
-  (or org-ilm--active-collection
-      (when-let ((collection (org-ilm--collection-from-context)))
-        (setq org-ilm--active-collection collection))
-      (let ((collection (org-ilm--select-collection)))
-        (setq org-ilm--active-collection (car collection)))))
+  (cond-let*
+    ([collection (org-ilm--collection-from-context)]
+     (setq org-ilm--active-collection collection))
+    ([collection org-ilm--active-collection]
+     collection)
+    ([collection (org-ilm--select-collection)]
+     (setq org-ilm--active-collection collection))))
 
 (defun org-ilm--collection-from-context ()
   "Infer collection based on the current buffer."
@@ -6933,15 +6935,6 @@ A lot of formatting code from org-ql."
 
 ;;;; Import
 
-(transient-define-infix org-ilm--import-transient-collection ()
-  :class 'transient-lisp-variable
-  :variable 'org-ilm--active-collection
-  :transient t
-  :allow-empty nil
-  :reader
-  (lambda (prompt initial-input history)
-    (org-ilm--select-collection)))
-
 (transient-define-suffix org-ilm--import-transient-resource ()
   (interactive)
   (let ((hook (mochar-utils--add-hook-once
@@ -6958,7 +6951,14 @@ A lot of formatting code from org-ql."
 (transient-define-prefix org-ilm--import-transient ()
   :refresh-suffixes t
   ["Ilm"
-   ("C" "Collection" org-ilm--import-transient-collection)
+   ("C" "Collection"
+    (lambda ()
+      (interactive)
+      (org-ilm--select-collection))
+    :description
+    (lambda ()
+      (concat "Collection " (propertize (format "%s" (org-ilm--active-collection))
+                                        'face 'transient-value))))
    ]
 
   [
