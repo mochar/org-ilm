@@ -5874,7 +5874,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   "Build a queue and return it."
   (let* ((collection (or collection
                          (org-ilm--collection-from-context)
-                         (car (org-ilm--select-collection))))
+                         (org-ilm--select-collection)))
          (query (or query (car (org-ilm--query-select))))
          (elements (org-ilm-query-collection collection query)))
     (org-ilm--queue-create
@@ -5883,7 +5883,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 (defun org-ilm-queue-build (&optional collection)
   (let* ((collection (or collection
                          (org-ilm--collection-from-context)
-                         (car (org-ilm--select-collection))))
+                         (org-ilm--select-collection)))
          (queues (append
                   (list (cons "Priority queue" "All elements")
                         (cons "Outstanding queue" "Due elements"))
@@ -7206,6 +7206,8 @@ A lot of formatting code from org-ql."
           :id id
           :title title
 
+          :as-child (transient-arg-value "--child" args)
+          
           :file-method (intern (or (transient-arg-value "--file-method" args) "cp"))
 
           :html-download (transient-arg-value "--html-download" args)
@@ -7383,7 +7385,7 @@ A lot of formatting code from org-ql."
     (lambda ()
       (interactive)
       (cl-destructuring-bind
-          (&key source source-type type bibtex key title id
+          (&key source source-type type bibtex key title id as-child
                 file-method
                 html-download
                 paper-download
@@ -7408,8 +7410,9 @@ A lot of formatting code from org-ql."
           
           (org-ilm--capture-capture
            'material
-           :parent (when-let ((el (transient-scope)))
-                     (org-ilm-element-id el))
+           :parent (when as-child
+                     (when-let ((el (transient-scope)))
+                       (org-ilm-element-id el)))
            :collection (org-ilm--active-collection)
            :title title
            :id id
