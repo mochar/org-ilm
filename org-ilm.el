@@ -6207,6 +6207,7 @@ If point on concept, add all headlines of concept."
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
   "M u" #'org-ilm-queue-mark-unmark-all
+  "M i" #'org-ilm-queue-mark-invert
   "M ?" #'org-ilm-queue-mark-missing
   )
 
@@ -6325,6 +6326,18 @@ DAYS can be specified as numeric prefix arg."
     (unless (org-ilm-element-p object)
       (org-ilm--queue-mark-objects object)))
   (org-ilm-queue-revert))
+
+(defun org-ilm-queue-mark-invert ()
+  "Mark all unmarked elements, and unmark marked elements."
+  (interactive)
+  (let* ((marked org-ilm--queue-marked-objects)
+         (unmarked (seq-keep
+                    (lambda (element)
+                      (let ((id (org-ilm-element-id element)))
+                        (when (not (member id marked)) id)))
+                    (org-ilm--queue-elements))))
+    (setq-local org-ilm--queue-marked-objects unmarked)
+    (org-ilm-queue-revert)))
 
 (defun org-ilm-queue-mark-unmark-all ()
   "Unmark all marked elements."
