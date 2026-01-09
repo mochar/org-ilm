@@ -130,6 +130,7 @@ be due starting 2am."
   "i" #'org-ilm-import
   "e" #'org-ilm-element-actions
   "a" #'org-ilm-attachment-actions
+  "p" #'org-ilm-element-set-priority
   "s" #'org-ilm-schedule
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract
