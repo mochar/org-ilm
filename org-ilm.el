@@ -1739,7 +1739,9 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
   "Parse org-ilm data of headline at point."
   ;; TODO Was thinking of org-ql--value-at this whole function, but this is
   ;; wasteful if headline does not match query.
-  (when-let* ((headline (ignore-errors (org-element-headline-parser)))
+  (when-let* ((headline (save-excursion
+                          (beginning-of-line)
+                          (ignore-errors (org-element-headline-parser))))
               (id (org-element-property :ID headline))
               ;; TODO Need something like (org-node-at-point-ensure) to force
               ;; add it to cache if not already there, since it has to exist if
