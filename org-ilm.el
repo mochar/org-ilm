@@ -3316,7 +3316,7 @@ content in a capture buffer."
                            (org-footnote-get-definition label))))
           (push (concat fn " " (nth 3 def)) footnotes)))
       (goto-char (point-max))
-      (insert "\n\n")
+      (insert "\n\n* Footnotes\n")
       (dolist (fn (delete-dups (nreverse footnotes)))
         (insert fn "\n")))))
 
