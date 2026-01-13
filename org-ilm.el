@@ -6135,7 +6135,8 @@ If point on headline, add headline and descendants.
 If point on concept, add all headlines of concept."
   (interactive "P")
   (when-let* ((headline (org-ilm--org-headline-at-point))
-              (type (org-ilm-type headline))
+              ;; We also want this to work on headlines that are not ilm elements.
+              (type (or (org-ilm-type headline) 'headline))
               (queue-buffer (org-ilm--queue-completing-read
                              (format "[%s] %s" (upcase (symbol-name type))
                                      (org-element-property :title headline))))
