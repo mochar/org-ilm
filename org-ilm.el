@@ -2259,12 +2259,12 @@ ELEMENT may be nil, in which case try to read it from point."
      (lambda ()
        (interactive)
        (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
-    ("D" "Done"
+    ("d" "Done"
      (lambda ()
        (interactive)
        (org-ilm-element-with-point-at org-ilm--element-transient-element
          (call-interactively #'org-ilm-element-done))))
-    ("K" "Delete"
+    ("k" "Delete"
      (lambda ()
        (interactive)
        (org-ilm-element-with-point-at org-ilm--element-transient-element
@@ -6186,9 +6186,9 @@ If point on concept, add all headlines of concept."
   "b" #'backward-char
   "f" #'forward-char
   "q" #'quit-window
-  "k" (lambda ()
-        (interactive)
-        (kill-buffer (current-buffer)))
+  ;; "k" (lambda ()
+  ;;       (interactive)
+  ;;       (kill-buffer (current-buffer)))
   "g" #'org-ilm-queue-revert
   "G" #'org-ilm-queue-rebuild)
   
