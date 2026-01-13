@@ -514,6 +514,7 @@ The returned function can be used to call `remove-hook' if needed."
   "Cleanup TEXT so that it can be used in as an org header."
   (let* ((text (replace-regexp-in-string "\n" " " text))
          (text (org-link-display-format text)) ;; Remove org links
+         (text (replace-regexp-in-string org-footnote-re "" text)) ;; Remove footnotes (errors otherwise (from ox.el))
          (text (string-trim text))) ;; Trim whitespace
     (substring text 0 (min 50 (length text)))))
 
