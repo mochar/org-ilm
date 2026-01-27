@@ -3993,7 +3993,7 @@ When not specified, PAGE is current page."
   "If region select, return first region, if text select, return bounding box."
   (interactive)
   (if pdf-view--have-rectangle-region
-      (car (pdf-view-active-region))
+      (cadr (pdf-view-active-region))
     (pcase-let* ((boxes (pdf-info-getselection
                          (pdf-view-current-page)
                          (cadr (pdf-view-active-region))))
