@@ -5857,7 +5857,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   name collection query type
   (ost (make-ost-tree))
   (elements (make-hash-table :test #'equal))
-  key reversed)
+  key reversed randomness)
 
 (defun org-ilm-queue--element-value (queue element &optional no-key)
   "Return the value of ELEMENT by which it is sorted in QUEUE."
@@ -5887,7 +5887,8 @@ If available, the last alias in the ROAM_ALIASES property will be used."
   (hash-table-empty-p (org-ilm-queue--elements queue)))
 
 (defun org-ilm-queue--insert (queue element &optional value)
-  "Insert ELEMENT in QUEUE."
+  "Insert ELEMENT in QUEUE.
+A custom VALUE may be passed on which to sort the element in the queue."
   (let ((id (org-ilm-element-id element)))
     (puthash id element (org-ilm-queue--elements queue))
     (ost-tree-insert (org-ilm-queue--ost queue)
@@ -5957,14 +5958,36 @@ ELEMENT may be an `org-ilm-element' or its id."
 NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   (ost-tree-move-many (org-ilm-queue--ost queue) new-ranks-alist))
 
+(defun org-ilm-queue--shuffle (queue randomness)
+  "Shuffle the queue with a RANDOMNESS between 0 (no change) and 1 (complete randomness).
+
+Calling this function repeatedly will stack the shuffling, rather than sorting
+the queue and shuffling it afterwards. To achieve the latter, call
+`org-ilm--queue-sort' first, or pass it the RANDOMNESS parameter directly."
+  (cl-assert (<= 0 randomness 1) nil "Queue shuffle RANDOMNESS must be between 0 and 1.")
+  (unless (= randomness 0)
+    (let ((ost (org-ilm-queue--ost queue)))
+      (setf (org-ilm-queue--ost queue) (make-ost-tree)
+            (org-ilm-queue--randomness queue) randomness)
+      (ost-map-in-order
+       (lambda (node rank)
+         (let* ((element (gethash (ost-node-id node)
+                                  (org-ilm-queue--elements queue)))
+                (quantile (org-ilm--ost-rank-to-quantile ost rank))
+                ;; New score mixing current rank and noise
+                (new-score (+ (* (- 1.0 randomness) quantile)
+                              (* randomness (org-ilm--random-uniform)))))
+           (org-ilm-queue--insert queue element new-score)))
+       ost))))
 
 ;;;;; Building a queue 
 
 ;; Queues are stored locally within each queue buffer.
 
-(cl-defun org-ilm--queue-create (collection &key elements query name key reversed type)
+(cl-defun org-ilm--queue-create (collection &key elements query name key reversed randomness type)
   "Create a new ilm queue object."
   (setq key (or key "prank"))
+  (setq randomness (or randomness 0))
   (let ((queue (make-org-ilm-queue
                 :name (or name
                           (when query (symbol-name query))
@@ -5973,9 +5996,14 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
                 :query query
                 :type type
                 :key key
-                :reversed reversed)))
+                :reversed reversed
+                :randomness randomness)))
+    ;; This inserts the elements in order of their value, which when not
+    ;; explicitely given to `org-ilm-queue--insert' is the value of the key.
     (dolist (element elements)
       (org-ilm-queue--insert queue element))
+    ;; In addition add some randomness if requested
+    (org-ilm-queue--shuffle queue randomness)
     queue))
 
 (defun org-ilm--queue-build (&optional collection query)
@@ -6027,14 +6055,22 @@ If the queue has a query, run it again. Else re-parse elements."
                queue))))
     (current-buffer)))
 
-(defun org-ilm--queue-sort (key reversed &optional buffer)
+(defun org-ilm--queue-shuffle (randomness &optional buffer)
+  "Shuffle the queue with a RANDOMNESS between 0 (no change) and 1 (complete randomness)."
   (org-ilm-with-queue-buffer buffer
-    (unless (string= (org-ilm-queue--key org-ilm-queue) key)
+    (org-ilm-queue--shuffle org-ilm-queue randomness)
+    (org-ilm-queue-revert)))
+
+(defun org-ilm--queue-sort (key reversed &optional randomness buffer)
+  (org-ilm-with-queue-buffer buffer
+    (unless (and (string= (org-ilm-queue--key org-ilm-queue) key)
+                 (= (org-ilm-queue--randomness org-ilm-queue) randomness))
       (setf (org-ilm-queue--ost org-ilm-queue) (make-ost-tree)
             (org-ilm-queue--key org-ilm-queue) key)
       (dolist (element (hash-table-values (org-ilm-queue--elements org-ilm-queue)))
         (org-ilm-queue--insert org-ilm-queue element)))
     (setf (org-ilm-queue--reversed org-ilm-queue) reversed)
+    (when randomness (org-ilm--queue-shuffle randomness))
     org-ilm-queue))
 
 (cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
@@ -6221,12 +6257,18 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
 
 ;;;;; Queue building
 
+(defcustom org-ilm-outstanding-randomness .1
+  "The default level of randomness applied to the outstanding queue."
+  :type 'number
+  :group 'org-ilm)
+
 (defun org-ilm--queue-build-outstanding (collection)
   (org-ilm--queue-create
    collection
    :name (format "Outstanding queue (%s)" collection)
    :type 'outstanding
-   :elements (org-ilm-query-collection collection #'org-ilm-query-outstanding)))
+   :elements (org-ilm-query-collection collection #'org-ilm-query-outstanding)
+   :randomness org-ilm-outstanding-randomness))
 
 ;; TODO With prefix arg: transient with additional settings
 ;; - Mainly queue-specific priorities.
@@ -6795,21 +6837,25 @@ A lot of formatting code from org-ql."
            ("sched" '("--key=schedule"))))
        (when (org-ilm-queue--reversed org-ilm-queue)
          '("--reversed"))
+       (list (format "--randomness=%s"
+                     (org-ilm--round-float (org-ilm-queue--randomness org-ilm-queue) 3)))
        )))
 
   ["queue sort"
    ("k" "Key" "--key=" :choices ("priority" "schedule") :always-read t :transient t)
    ("r" "Reversed" "--reversed" :transient t)
+   ("m" "Randomness" "--randomness=" :always-read t :prompt "Randomness: " :transient t)
    ("RET" "Sort"
     (lambda ()
       (interactive)
       (let* ((args (transient-args transient-current-command))
              (reversed (transient-arg-value "--reversed" args))
-             (key (transient-arg-value "--key=" args)))
+             (key (transient-arg-value "--key=" args))
+             (randomness (string-to-number (transient-arg-value "--randomness=" args))))
         (org-ilm-with-queue-buffer org-ilm--queue-transient-buffer
           (pcase key
-            ("priority" (org-ilm--queue-sort "prank" reversed))
-            ("schedule" (org-ilm--queue-sort "sched" reversed))
+            ("priority" (org-ilm--queue-sort "prank" reversed randomness))
+            ("schedule" (org-ilm--queue-sort "sched" reversed randomness))
             (_ (user-error "Invalid key: %s" key)))
           (org-ilm-queue-revert))))
     :inapt-if-not
