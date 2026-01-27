@@ -341,5 +341,11 @@ Returns t if the tree is valid, nil otherwise."
        )
 
      )
+ (it "ost-map-in-order"
+     (let ((tree (ost--random-tree 1000)))
+       (ost-map-in-order
+        (lambda (node rank)
+          (expect rank :to-equal (ost-rank tree node)))
+        tree)))
  )
               

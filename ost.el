@@ -475,6 +475,24 @@ starting from 0. Requires NODE to be a node within TREE."
       (setq current (ost-node-parent current)))
     rank))
 
+(defun ost-map-in-order (func tree)
+  "Apply FUNC to each node in TREE in rank order.
+FUNC is called with two arguments: (NODE RANK).
+This is O(N), whereas calling `ost-select' in a loop is O(N log N)."
+  (let ((rank 0))
+    (cl-labels ((traverse (node)
+                  (when node
+                    ;; 1. Traverse Left (lower ranks)
+                    (traverse (ost-node-left node))
+                    
+                    ;; 2. Visit Node
+                    (funcall func node rank)
+                    (setq rank (1+ rank))
+                    
+                    ;; 3. Traverse Right (higher ranks)
+                    (traverse (ost-node-right node)))))
+      (traverse (ost-tree-root tree)))))
+
 ;;;; Insert
 
 (cl-defun ost--insert-fixup (tree node)
