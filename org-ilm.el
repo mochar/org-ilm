@@ -2688,14 +2688,11 @@ An empty log implies a new card, so step is 0."
 
 (defun org-ilm--card-cloze-bounds ()
   "Return (beg . end) of what will be clozed."
-  (let (begin end)
-    (if (region-active-p)
-        (setq begin (region-beginning)
-              end (region-end))
-      (if-let ((bounds (bounds-of-thing-at-point 'word)))
-          (setq begin (car bounds)
-                end (cdr bounds))))
-    (cons begin end)))
+  (cond-let
+   ((region-active-p)
+    (cons (region-beginning) (region-end)))
+   ([bounds (bounds-of-thing-at-point 'word)]
+    bounds)))
 
 (defun org-ilm--card-cloze-region (begin end &optional hint)
   "Coze the region between BEGIN and END."
@@ -2723,24 +2720,62 @@ An empty log implies a new card, so step is 0."
       (while (setq cloze (org-ilm--card-cloze-match-forward end))
         (org-ilm--card-uncloze)))))
 
+(defun org-ilm-clozeify ()
+  (interactive)
+  (let* ((cloze (org-ilm--card-cloze-match-around-point))
+         (bounds (and (not cloze) (org-ilm--card-cloze-bounds)))
+         content hint begin end)
+    (cond
+     (cloze 
+      (setq content (org-ilm-cloze-content cloze)
+            hint (org-ilm-cloze-hint cloze)
+            begin (car (org-ilm-cloze-pos cloze))
+            end (cdr (org-ilm-cloze-pos cloze))))
+     (bounds
+      (setq content (buffer-substring-no-properties (car bounds) (cdr bounds))
+            begin (car bounds)
+            end (cdr bounds)))
+     (t ;; Create new and insert at point
+      (setq begin (point))))
+        
+    (let* ((content (read-string "Content: " content))
+           (hint (read-string "Hint: " hint)))
+      (when (string-empty-p hint) (setq hint nil))
+      (when (string-empty-p content) (setq content "<cloze>"))
+      (if end
+          (delete-region begin end)
+        (setq end (+ begin (length content))))
+      (insert content)
+      (org-ilm--card-cloze-region begin end hint))))
+
 ;;;;; Font lock
 
 (defun org-ilm--card-cloze-font-lock-matcher (limit)
   (when-let ((cloze (org-ilm--card-cloze-match-forward limit 'pos-only)))
-    (with-slots (pos content-pos hint-pos) cloze
+    (with-slots (pos content-pos hint-pos content hint) cloze
       ;; Hide opening: {{c::
       (put-text-property (car pos) (car content-pos) 'invisible 'org-ilm-cloze)
       ;; Content face
       (put-text-property (car content-pos) (cdr content-pos) 'face 'org-ilm-cloze-content-face)
 
-      (when hint-pos
+      (if (not hint-pos)
+          ;; Hide final braces: }}
+          (put-text-property (- (cdr pos) 2) (cdr pos) 'invisible 'org-ilm-cloze)
+        
         ;; Hide in-between braces: }{
-        (put-text-property (- (car hint-pos) 2) (car hint-pos) 'invisible 'org-ilm-cloze)
-        ;; Hint face
-        (put-text-property (car hint-pos) (cdr hint-pos) 'face 'org-ilm-cloze-hint-face))
+        ;; (put-text-property (- (car hint-pos) 2) (car hint-pos) 'invisible 'org-ilm-cloze)
 
-      ;; Hide final braces: }}
-      (put-text-property (- (cdr pos) 2) (cdr pos) 'invisible 'org-ilm-cloze)
+        ;; Hint face
+        (put-text-property (car hint-pos) (cdr hint-pos) 'face 'org-ilm-cloze-hint-face)
+        
+        ;; Replace surrounding braces with ()
+        (add-text-properties (- (car hint-pos) 2) (car hint-pos)
+                             '(display " (" face org-ilm-cloze-hint-face))
+        (add-text-properties (- (cdr pos) 2) (cdr pos)
+                             '(display ")" face org-ilm-cloze-hint-face))
+        
+        
+        )
 
       ;; Font-lock needs match-data, which we set manually
       (set-match-data (list (car pos) (cdr pos)))
@@ -2751,17 +2786,20 @@ An empty log implies a new card, so step is 0."
 (defvar org-ilm--card-cloze-font-lock-keywords
   '((org-ilm--card-cloze-font-lock-matcher 0 nil)))
 
+(defun org-ilm--card-cloze-font-lock-setup ()
+  (add-to-invisibility-spec 'org-ilm-cloze)
+  (setq-local font-lock-extra-managed-props
+              (cons 'display font-lock-extra-managed-props)))
+
 (add-hook 'org-ilm-global-minor-mode-hook
           (lambda ()
             (cond
              (org-ilm-global-minor-mode
-              (add-hook 'org-mode-hook
-                        (lambda () (add-to-invisibility-spec 'org-ilm-cloze)))
+              (add-hook 'org-mode-hook #'org-ilm--card-cloze-font-lock-setup)
               (font-lock-add-keywords
                'org-mode org-ilm--card-cloze-font-lock-keywords))
              (t
-              (remove-hook 'org-mode-hook
-                           (lambda () (add-to-invisibility-spec 'org-ilm-cloze)))
+              (remove-hook 'org-mode-hook #'org-ilm--card-cloze-font-lock-setup)
               (font-lock-remove-keywords
                'org-mode org-ilm--card-cloze-font-lock-keywords)))))
               
@@ -2780,9 +2818,9 @@ An empty log implies a new card, so step is 0."
 (defface org-ilm-cloze-hint-face
   '((t (:foreground "black"
         :background "pink"
-        :weight bold
-        :height 1.1
-        :slant italic)))
+        :height .8
+        :slant italic
+        )))
   "Face for cloze hints.")
 
 (defun org-ilm--card-cloze-format-latex (latex)
