@@ -2600,34 +2600,50 @@ An empty log implies a new card, so step is 0."
                               (opt (nested (peg (region text)))))))
          `(v1 v2 v3 v4 -- (when v1 (cons v1 v2)) (cons v3 v4))))
 
-(defun org-ilm--card-cloze-match-at-point ()
+;; Simplified, but this does not handle nesting.
+;; Eg: {{c::{}}}
+;; (define-peg-ruleset org-ilm-card-cloze
+;;   (cloze () 
+;;          (and "{{c::"
+;;               (substring content)
+;;               (or (and "}{" (substring hint) "}}")
+;;                   (and "}}" `(-- nil)))
+;;               `(c h -- (list :content c :hint h))))
+;;   (content () (+ (and (not "}{") (not "}}") (any))))
+;;   (hint    () (+ (and (not "}") (any)))))
+
+(defun org-ilm--card-cloze-match-at-point (&optional pos-only-p)
   (with-peg-rules (org-ilm-card-cloze)
     (when-let* ((cloze (peg-run (peg cloze))))
       (setq cloze (if (cadr cloze) (nreverse cloze) cloze))
-      (let ((content-pos (car cloze))
-            (hint-pos (cadr cloze)))
+      (let* ((content-pos (car cloze))
+             (hint-pos (cadr cloze))
+             content hint)
+        (unless pos-only-p
+          (setq content (buffer-substring-no-properties
+                         (car content-pos) (cdr content-pos))
+                hint (when hint-pos (buffer-substring-no-properties
+                                     (car hint-pos) (cdr hint-pos)))))
         (make-org-ilm-cloze
-         :content (buffer-substring-no-properties
-                   (car content-pos) (cdr content-pos))
-         :hint (when hint-pos (buffer-substring-no-properties
-                               (car hint-pos) (cdr hint-pos)))
+         :content content
+         :hint hint
          :content-pos content-pos
          :hint-pos hint-pos
          :pos (cons (- (car content-pos) 5)
                     (+ (cdr (or hint-pos content-pos)) 2)))))))
 
-(defun org-ilm--card-cloze-match-around-point ()
+(defun org-ilm--card-cloze-match-around-point (&optional pos-only-p)
   "Match cloze around point."
   (save-excursion
     (cond-let*
-      ([cloze (org-ilm--card-cloze-match-at-point)]
+      ([cloze (org-ilm--card-cloze-match-at-point pos-only-p)]
        cloze)
       ([pos (org-in-regexp "{{c::")]
        (goto-char (car pos))
-       (org-ilm--card-cloze-match-at-point))
+       (org-ilm--card-cloze-match-at-point pos-only-p))
       (t (when-let ((point (point))
-                    ((re-search-backward "{{c::" nil t))
-                    (cloze (org-ilm--card-cloze-match-at-point)))
+                    ((save-match-data (re-search-backward "{{c::" nil t)))
+                    (cloze (org-ilm--card-cloze-match-at-point pos-only-p)))
            (when (<= point (cdr (org-ilm-cloze-pos cloze)))
              cloze))))))
 
@@ -2635,15 +2651,15 @@ An empty log implies a new card, so step is 0."
   "Return t if point on cloze."
   (if (org-ilm--card-cloze-match-around-point) t nil))
 
-(defun org-ilm--card-cloze-match-forward (&optional end)
+(defun org-ilm--card-cloze-match-forward (&optional end pos-only-p)
   "Jump to and return the first matching cloze."
-  (let ((cloze (org-ilm--card-cloze-match-at-point)))
+  (let ((cloze (org-ilm--card-cloze-match-at-point pos-only-p)))
     (while (and (not cloze)
                 (re-search-forward "{{c::" end t))
       ;; Back to beginning
       (goto-char (match-beginning 0))
       ;; We might match regex but not cloze
-      (setq cloze (org-ilm--card-cloze-match-at-point)))
+      (setq cloze (org-ilm--card-cloze-match-at-point pos-only-p)))
     cloze))
 
 (defun org-ilm--card-cloze-gather (&optional begin end)
@@ -2707,25 +2723,75 @@ An empty log implies a new card, so step is 0."
       (while (setq cloze (org-ilm--card-cloze-match-forward end))
         (org-ilm--card-uncloze)))))
 
+;;;;; Font lock
+
+(defun org-ilm--card-cloze-font-lock-matcher (limit)
+  (when-let ((cloze (org-ilm--card-cloze-match-forward limit 'pos-only)))
+    (with-slots (pos content-pos hint-pos) cloze
+      ;; Hide opening: {{c::
+      (put-text-property (car pos) (car content-pos) 'invisible 'org-ilm-cloze)
+      ;; Content face
+      (put-text-property (car content-pos) (cdr content-pos) 'face 'org-ilm-cloze-content-face)
+
+      (when hint-pos
+        ;; Hide in-between braces: }{
+        (put-text-property (- (car hint-pos) 2) (car hint-pos) 'invisible 'org-ilm-cloze)
+        ;; Hint face
+        (put-text-property (car hint-pos) (cdr hint-pos) 'face 'org-ilm-cloze-hint-face))
+
+      ;; Hide final braces: }}
+      (put-text-property (- (cdr pos) 2) (cdr pos) 'invisible 'org-ilm-cloze)
+
+      ;; Font-lock needs match-data, which we set manually
+      (set-match-data (list (car pos) (cdr pos)))
+
+      ;; Matcher needs to return non-nil to indicate success
+      t)))
+
+(defvar org-ilm--card-cloze-font-lock-keywords
+  '((org-ilm--card-cloze-font-lock-matcher 0 nil)))
+
+(add-hook 'org-ilm-global-minor-mode-hook
+          (lambda ()
+            (cond
+             (org-ilm-global-minor-mode
+              (add-hook 'org-mode-hook
+                        (lambda () (add-to-invisibility-spec 'org-ilm-cloze)))
+              (font-lock-add-keywords
+               'org-mode org-ilm--card-cloze-font-lock-keywords))
+             (t
+              (remove-hook 'org-mode-hook
+                           (lambda () (add-to-invisibility-spec 'org-ilm-cloze)))
+              (font-lock-remove-keywords
+               'org-mode org-ilm--card-cloze-font-lock-keywords)))))
+              
 ;;;;; Review interaction
 
 ;; TODO Extensible system where cloze types can be added based on thing at point
 ;; like in org-registry. Instead cond in function like now.
 
-(defface org-ilm-cloze-face
+(defface org-ilm-cloze-content-face
   '((t (:foreground "black"
         :background "pink" 
         :weight bold
         :height 1.2)))
-  "Face for clozes.")
+  "Face for cloze content.")
+
+(defface org-ilm-cloze-hint-face
+  '((t (:foreground "black"
+        :background "pink"
+        :weight bold
+        :height 1.1
+        :slant italic)))
+  "Face for cloze hints.")
 
 (defun org-ilm--card-cloze-format-latex (latex)
   "Translate emacs face to latex code and apply to LATEX."
-  (when (face-bold-p 'org-ilm-cloze-face)
+  (when (face-bold-p 'org-ilm-cloze-content-face)
     (setq latex (format "\\textbf{%s}" latex)))
-  (when-let ((bg (face-background 'org-ilm-cloze-face)))
+  (when-let ((bg (face-background 'org-ilm-cloze-content-face)))
     (setq latex (format "\\fcolorbox{%s}{%s}{%s}" bg bg latex)))
-  (when-let ((height (face-attribute 'org-ilm-cloze-face :height))
+  (when-let ((height (face-attribute 'org-ilm-cloze-content-face :height))
              (size (cond
                     ((< height 0.8)  "\\tiny")
                     ((< height 0.9)  "\\scriptsize")
@@ -2800,7 +2866,7 @@ An empty log implies a new card, so step is 0."
               ;; skip entire fragment.
               (goto-char latex-end)))
            (t 
-            (overlay-put ov 'face 'org-ilm-cloze-face)
+            (overlay-put ov 'face 'org-ilm-cloze-content-face)
             (overlay-put ov 'display (concat "[...]" (when hint (concat "(" hint ")"))))
             (mochar-utils--add-hook-once
              'org-ilm-review-reveal-hook
