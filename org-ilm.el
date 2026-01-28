@@ -5781,12 +5781,6 @@ the context frame."
 ;; + Prefer query over custom predicate
 ;; + Use regex preambles to quickly filter candidates
 
-(defun org-ilm--compare-priority (first second)
-  "Comparator of two headlines by sampled priority."
-  (when-let ((priority-first (org-ilm-element-psample first))
-             (priority-second (org-ilm-element-psample second)))
-    (< priority-first priority-second)))
-
 (defun org-ilm-query-collection (collection query)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
   (unless (functionp query)
