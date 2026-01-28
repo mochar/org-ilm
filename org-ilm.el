@@ -1077,6 +1077,7 @@ The collections are stored in `org-ilm-collections'."
      ((f-file-p file-or-dir)
       (list (expand-file-name file-or-dir)))
      ((f-dir-p file-or-dir)
+      ;; TODO Skip registry.org
       (directory-files file-or-dir 'full "^[^.].*\\.org$"))
      (t (error "No files in collection %s" collection)))))
 
@@ -1724,6 +1725,9 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
 
 ;;;; Element
 
+;; TODO: Rather than storing data already stored in org-mem cache, load from it
+;; Eg org-ilm-element-level becomes a function that gets org-mem entry by id
+;; and returns org-mem-entry-level
 (cl-defstruct org-ilm-element
   "A piece of knowledge."
   id collection state level pcookie rawval title tags sched
@@ -1749,10 +1753,7 @@ each element belongs to, as this takes some time in
   "Parse org-ilm data of headline at point."
   ;; TODO Was thinking of org-ql--value-at this whole function, but this is
   ;; wasteful if headline does not match query.
-  (when-let* ((headline (save-excursion
-                          (beginning-of-line)
-                          (ignore-errors (org-element-headline-parser))))
-              (id (org-element-property :ID headline))
+  (when-let* ((id (org-entry-get nil "ID"))
               ;; TODO Need something like (org-node-at-point-ensure) to force
               ;; add it to cache if not already there, since it has to exist if
               ;; it has an ID. Wait for https://github.com/meedstrom/org-mem/issues/31
@@ -1760,29 +1761,27 @@ each element belongs to, as this takes some time in
                          (progn
                            (org-mem-updater-ensure-id-node-at-point-known)
                            (org-mem-entry-by-id id)))))
-    (let* ((todo-keyword (org-element-property :todo-keyword headline))
+    (let* ((todo-keyword (org-mem-entry-todo-state entry))
            (type (org-ilm-type todo-keyword)))
       (when (and type id)
         (make-org-ilm-element
          ;; Headline element properties
          :id id
          :state todo-keyword
-         :level (org-element-property :level headline)
-         :pcookie (org-element-property :priority headline)
-         :rawval (org-element-property :raw-value headline)
-         :tags (org-element-property :tags headline)
-         :title (org-no-properties ; Remove text properties from title
-                 (org-element-interpret-data (org-element-property :title headline)))
+         :level (org-mem-entry-level entry)
+         :pcookie (org-mem-entry-priority entry)
+         :tags (org-mem-entry-tags entry)
+         :title (org-mem-entry-title entry)
 
          ;; Ilm stuff
          :collection (or org-ilm--assumed-collection (org-ilm--collection-file))
-         :sched (when-let ((s (org-element-property :scheduled headline)))
-                        (ts-parse-org-element s))
+         :sched (when-let ((s (org-mem-entry-scheduled entry))) (ts-parse s))
          :type type
+         ;; TODO Is this still used?!?!
          :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
          :media (org-ilm--media-compile entry)
          ;; cdr to get rid of headline priority in the car - redundant
-         :concepts (org-ilm--concept-cache-gather headline))))))
+         :concepts (org-ilm--concept-cache-gather id))))))
 
 (defun org-ilm-element-from-id (id)
   (org-ilm--org-with-point-at id
@@ -8424,45 +8423,43 @@ outline, and/or property concept."
 ;; org-mem's cached ancestry to do the lookup, without having to go up each
 ;; time.
 
-(defun org-ilm--concepts-get-parent-concepts (&optional headline-thing all-ancestors)
-  "Retrieve parent concepts of a headline, either in outline or through property.
+(defun org-ilm--concepts-get-parent-concepts (&optional id all-ancestors)
+  "Retrieve parent concepts of a headline with ID, either in outline or through property.
 When ALL-ANCESTORS, retrieve full ancestry recursively.
 
 Eeach call of this function (recursive or not) only retrives _direct_
 parents, which is defined differently for concepts and extracts/cards:
 - Concept: First outline parent + _not_ inherited property links
 - Others: First outline parent + property links of itself or inherited from _non-concept_ ancestors only"
-  (let* ((headline (org-ilm--org-headline-from-thing headline-thing 'assert))
-         (headline-id (org-element-property :ID headline))
-         (headline-entry (org-mem-entry-by-id headline-id))
-         (headline-ancestry (org-ilm--org-mem-ancestry-ids headline-entry))
-         (headline-is-concept (member (org-element-property :todo-keyword headline) org-ilm-concept-states))
+  (let* ((entry (org-mem-entry-by-id id))
+         (ancestry (org-ilm--org-mem-ancestry-ids entry))
+         (is-concept (member (org-mem-entry-todo-state entry) org-ilm-concept-states))
          (property-concepts-str "")
          outline-parent-concept concept-ids)
 
     ;; Check for ancestor concept headline in outline hierarchy. As we explore
     ;; up the hierarchy, store linked concepts of extracts.
     (cl-block nil
-      (dolist (ancestor (org-mem-entry-crumbs headline-entry))
-        (let* ((id (nth 4 ancestor))
-               (is-self (string= id headline-id))
-               (entry (org-mem-entry-by-id id))
-               (state (when entry (org-mem-entry-todo-state entry)))
-               (type (when state (org-ilm-type state))))
+      (dolist (ancestor (org-mem-entry-crumbs entry))
+        (let* ((ancestor-id (nth 4 ancestor))
+               (is-self (string= ancestor-id id))
+               (ancestor-entry (org-mem-entry-by-id ancestor-id))
+               (ancestor-state (when ancestor-entry (org-mem-entry-todo-state ancestor-entry)))
+               (ancestor-type (when ancestor-state (org-ilm-type ancestor-state))))
           (cond
            ;; Headline is self or incremental ancestor, store linked concepts
            ((or is-self
-                (and (not headline-is-concept) ; Concept never inherit!
-                     (or (eq type 'material) (string= state "DONE"))))
-            (when-let ((prop (org-mem-entry-property "CONCEPTS+" entry)))
+                (and (not is-concept) ; Concept never inherit!
+                     (or (eq ancestor-type 'material) (string= ancestor-state "DONE"))))
+            (when-let ((prop (org-mem-entry-property "CONCEPTS+" ancestor-entry)))
               (setq property-concepts-str
                     (concat property-concepts-str " " prop))))
            
            ;; Headline is concept, store as outline parent concept
-           ((eq type 'concept)
-            (cl-pushnew id concept-ids :test #'equal)
+           ((eq ancestor-type 'concept)
+            (cl-pushnew ancestor-id concept-ids :test #'equal)
             (unless outline-parent-concept
-              (setq outline-parent-concept id))
+              (setq outline-parent-concept ancestor-id))
             (unless all-ancestors (cl-return)))))))
 
     ;; Process inherited CONCEPTS property.
@@ -8478,34 +8475,34 @@ parents, which is defined differently for concepts and extracts/cards:
         (setq link-match-pos (match-end 1))
 
         ;; First we gather valid concept-ids as well as their individual ancestries
-        (when-let* ((org-id (org-ilm--org-id-from-string concept-string))
+        (when-let* ((concept-id (org-ilm--org-id-from-string concept-string))
                     ;; Skip if linked to itself
-                    (_ (not (string= org-id headline-id)))
+                    (_ (not (string= concept-id id)))
                     ;; Skip if ancestor of headline
                     ;; TODO we do this later again as post-processing stop, so
                     ;; remove?
-                    (_ (not (member org-id headline-ancestry)))
+                    (_ (not (member concept-id ancestry)))
                     ;; Should have org id and therefore cached by org-mem
-                    (entry (org-mem-entry-by-id org-id))
+                    (concept-entry (org-mem-entry-by-id concept-id))
                     ;; Should be concept todo state
-                    (_ (member (org-mem-entry-todo-state entry)
+                    (_ (member (org-mem-entry-todo-state concept-entry)
                                org-ilm-concept-states))
                     ;; Skip if is concept is descendant of headline - this
                     ;; will lead to circular DAG, causing infinite loops, and
                     ;; doesn't make sense anyway. Add a root string so
-                    ;; concepts with no org-id parents don't return nil,
+                    ;; concepts with no concept-id parents don't return nil,
                     ;; terminating the when-let.
-                    (ancestry (org-ilm--org-mem-ancestry-ids entry 'with-root-str))
-                    (_ (not (member headline-id ancestry))))
-          (cl-pushnew org-id property-concept-ids :test #'equal)
-          (cl-pushnew ancestry property-concept-ancestors)
+                    (concept-ancestry (org-ilm--org-mem-ancestry-ids concept-entry 'with-root-str))
+                    (_ (not (member id concept-ancestry))))
+          (cl-pushnew concept-id property-concept-ids :test #'equal)
+          (cl-pushnew concept-ancestry property-concept-ancestors)
 
           ;; Recursively handle case where property derived concepts
           ;; themselves might link to other concepts in their properties.
           ;; Note, no need to do this for outline ancestors (previous step),
           ;; as properties are inherited.
           (when all-ancestors
-            (dolist (parent-id (cdr (org-ilm--concepts-get-parent-concepts org-id all-ancestors)))
+            (dolist (parent-id (org-ilm--concepts-get-parent-concepts concept-id all-ancestors))
               (cl-pushnew parent-id property-concept-ids :test #'equal)
               (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-concept-ancestors))))
 
@@ -8515,7 +8512,7 @@ parents, which is defined differently for concepts and extracts/cards:
             (unless (member concept-id ancestries)
               (cl-pushnew concept-id concept-ids :test #'equal))))))
 
-    (cons headline concept-ids)))
+    concept-ids))
 
 (defun org-ilm--concepts-get-with-descendant-concepts (concept)
   "Retrieve descendant concepts of a headline.
@@ -8606,14 +8603,12 @@ Gets reset after org-mem refreshes.")
               (org-element-property :ID headline-or-id))))
     
     (or (gethash id org-ilm-concept-cache)
-        (let* ((parents-data
+        (let* ((parent-ids
                 ;; Non-recursively, just direct parents in DAG
-                (org-ilm--concepts-get-parent-concepts headline-or-id))
-               (headline (car parents-data))
-               (type (org-ilm-type headline))
-               (is-concept (eq type 'concept))
-               (parent-ids (cdr parents-data))
+                (org-ilm--concepts-get-parent-concepts id))
                (entry (org-mem-entry-by-id id))
+               (type (org-ilm-type (org-mem-entry-todo-state entry)))
+               (is-concept (eq type 'concept))
                (ancestor-ids (copy-sequence parent-ids)))
 
           ;; Recursively call this function on all direct parent concepts to get
