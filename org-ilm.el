@@ -1044,8 +1044,10 @@ Properties:
 
 (defun org-ilm--collection-file (&optional file collection)
   "Return collection of which FILE belongs to.
-A collection symbol COLLECTION can be passed to test if file belongs to
- that collection."
+
+A collection symbol COLLECTION can be passed to test if file belongs to that
+ collection.
+When FILE is nil, file of current buffer."
   (when-let ((file (or file (buffer-file-name (buffer-base-buffer))))
              (path (expand-file-name file))
              (test (lambda (f place)
@@ -1735,6 +1737,14 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
 (defun org-ilm-element-card-p (element)
   (eq (org-ilm-element-type element) 'card))
 
+
+(defvar org-ilm--assumed-collection nil
+  "Assume any parsed element belongs to this collection.
+This is used in `org-ilm-element-at-point' and
+`org-ilm-query-collection' to save time figuring out what collection
+each element belongs to, as this takes some time in
+`org-ilm--collection-file'.")
+
 (defun org-ilm-element-at-point ()
   "Parse org-ilm data of headline at point."
   ;; TODO Was thinking of org-ql--value-at this whole function, but this is
@@ -1765,7 +1775,7 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
                  (org-element-interpret-data (org-element-property :title headline)))
 
          ;; Ilm stuff
-         :collection (org-ilm--collection-file)
+         :collection (or org-ilm--assumed-collection (org-ilm--collection-file))
          :sched (when-let ((s (org-element-property :scheduled headline)))
                         (ts-parse-org-element s))
          :type type
@@ -5781,7 +5791,8 @@ the context frame."
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
   (unless (functionp query)
     (setq query (cdr (assoc query org-ilm-queries))))
-  (let ((files (org-ilm--collection-files collection)))
+  (let ((files (org-ilm--collection-files collection))
+        (org-ilm--assumed-collection collection))
     (org-ql-select files
       (funcall query)
       ;; TODO Pass as sexp so that org-ql can byte compile it
