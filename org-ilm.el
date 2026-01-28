@@ -135,7 +135,8 @@ be due starting 2am."
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract
   "z" #'org-ilm-cloze
-  "c" #'org-ilm-cloze-toggle
+  ;; "c" #'org-ilm-cloze-toggle
+  "c" #'org-ilm-clozeify
   "t" #'org-ilm-attachment-transclude
   ";" org-ilm-context-map
   "n" org-ilm-concept-map
@@ -2729,33 +2730,37 @@ An empty log implies a new card, so step is 0."
       (while (setq cloze (org-ilm--card-cloze-match-forward end))
         (org-ilm--card-uncloze)))))
 
-(defun org-ilm-clozeify ()
-  (interactive)
-  (let* ((cloze (org-ilm--card-cloze-match-around-point))
-         (bounds (and (not cloze) (org-ilm--card-cloze-bounds)))
-         content hint begin end)
-    (cond
-     (cloze 
-      (setq content (org-ilm-cloze-content cloze)
-            hint (org-ilm-cloze-hint cloze)
-            begin (car (org-ilm-cloze-pos cloze))
-            end (cdr (org-ilm-cloze-pos cloze))))
-     (bounds
-      (setq content (buffer-substring-no-properties (car bounds) (cdr bounds))
-            begin (car bounds)
-            end (cdr bounds)))
-     (t ;; Create new and insert at point
-      (setq begin (point))))
-        
-    (let* ((content (read-string "Content: " content))
-           (hint (read-string "Hint: " hint)))
-      (when (string-empty-p hint) (setq hint nil))
-      (when (string-empty-p content) (setq content "<cloze>"))
-      (if end
-          (delete-region begin end)
-        (setq end (+ begin (length content))))
-      (insert content)
-      (org-ilm--card-cloze-region begin end hint))))
+(defun org-ilm-clozeify (&optional toggle)
+  (interactive "P")
+  (if toggle
+      (call-interactively #'org-ilm-cloze-toggle)
+    (let* ((cloze (org-ilm--card-cloze-match-around-point))
+           (bounds (and (not cloze) (org-ilm--card-cloze-bounds)))
+           content hint begin end)
+      (cond
+       (cloze 
+        (setq content (org-ilm-cloze-content cloze)
+              hint (org-ilm-cloze-hint cloze)
+              begin (car (org-ilm-cloze-pos cloze))
+              end (cdr (org-ilm-cloze-pos cloze))))
+       (bounds
+        (setq content (buffer-substring-no-properties (car bounds) (cdr bounds))
+              begin (car bounds)
+              end (cdr bounds)))
+       (t ;; Create new and insert at point
+        (setq begin (point))))
+      
+      (let* ((content (read-string "Content: " content))
+             (hint (read-string "Hint: " hint)))
+        (when (string-empty-p hint) (setq hint nil))
+        (when (string-empty-p content) (setq content "<cloze>"))
+        (atomic-change-group
+          (save-excursion
+            (goto-char begin)
+            (when end
+              (delete-region begin end))
+            (insert content)
+            (org-ilm--card-cloze-region begin (+ begin (length content)) hint)))))))
 
 ;;;;; Font lock
 
