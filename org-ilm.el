@@ -6085,6 +6085,12 @@ If the queue has a query, run it again. Else re-parse elements."
       ;; buffer.
       (add-hook 'kill-buffer-hook
                 (lambda ()
+                  ;; Though not necessary as buffer will be killed anyway, this
+                  ;; prevents the queue buffer from being reverted/rebuilt again
+                  ;; before being destroyed, which is unnecessary and slow.
+                  (remove-hook 'org-ilm-queue-active-buffer-change-hook
+                               #'org-ilm-queue-revert 'local)
+                  
                   (when (eq (current-buffer) org-ilm-queue-active-buffer)
                     (org-ilm-queue--set-active-buffer nil)))
                 nil 'local)
