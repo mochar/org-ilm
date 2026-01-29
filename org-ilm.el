@@ -3009,10 +3009,11 @@ The callback ON-ABORT is called when capture is cancelled."
     ;; Target, parent id, and collection
     (cond
      ((stringp parent)
-      ;; If no priority given, set same as parent.
+      ;; If no priority given, decide based on parent
       (unless priority
-        (when-let ((p (org-ilm-pqueue-priority parent :nil-if-absent t)))
-          (setq priority (org-ilm-pqueue-parse-new-position (car p)))))
+        (when-let* ((parent-p (org-ilm-pqueue-priority parent :nil-if-absent t))
+                    (p (org-ilm--priority-calculate-child-priority parent-p type)))
+          (setq priority p)))
 
       ;; Determine collection. Note that TARGET is ignored as PARENT specifies
       ;; this.
@@ -8055,6 +8056,42 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
   (cl-assert (>= count 0 ))
   (min count 5))
 
+;;;; Priority
+
+(defcustom org-ilm-priority-factor-extract 0.8
+  "Multiplication factor for extracts relative to parent rank.
+0.5 means the extract is placed halfway between the top of the queue and the parent."
+  :type 'float
+  :group 'org-ilm-priority)
+
+(defcustom org-ilm-priority-factor-card 0.6
+  "Multiplication factor for cards relative to parent rank.
+0.1 means the card is placed at 10% of the parent's rank (very high priority)."
+  :type 'float
+  :group 'org-ilm-priority)
+
+(defun org-ilm--priority-calculate-child-priority (parent-priority type)
+  "Calculate child capture's priority based on PARENT-PRIORITY and capture TYPE.
+Uses a multiplicative factor to ensure children are prioritized ahead of parents."
+  (if-let* ((parent-priority (org-ilm-pqueue-parse-position parent-priority))
+            (parent-rank (car parent-priority))
+            (factor (pcase type
+                      ('card org-ilm-priority-factor-card)
+                      ('material org-ilm-priority-factor-extract)
+                      (_ 1.0))))
+      (let* ((new-rank (floor (* parent-rank factor)))
+             ;; Add slight jitter so multiple extracts created in succession
+             ;; don't land on the exact same integer index.  This spreads them
+             ;; out slightly (e.g., +/- 2 spots).
+             (jitter (random 5))
+             (new-rank (max 0 (+ new-rank jitter))))
+        (org-ilm-pqueue-parse-new-position new-rank))
+    ;; If parent not in queue, fallback to top of queue (0) or end?
+    ;; Defaulting to 0 (highest priority) for captured items without 
+    ;; queued parents is usually safe for active learners.
+    ;; TODO This should probably be an error
+    (cons 0 0.0)))
+
 ;;;; Scheduling
 
 (defun org-ilm--days-from-now (days)
@@ -9108,4 +9145,3 @@ needs the attachment buffer."
 (provide 'org-ilm)
 
 ;;; org-ilm.el ends here
-
