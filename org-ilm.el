@@ -5289,6 +5289,45 @@ missing, something else is wrong, so throw an error."
        :a (car update-params)
        :b (cdr update-params)))))
 
+;;;;; Navigation
+
+(defun org-ilm--attachment-navigate (org-nav-cmd &rest args)
+  (if-let ((attachment (org-ilm--attachment-data))
+           (buffer (current-buffer)))
+      (org-ilm--org-with-point-at (car attachment)
+        (org-with-wide-buffer
+         (let ((point (point)))
+           (apply org-nav-cmd args)
+           (when (= point (point))
+             (user-error "Nothing there")))
+         (condition-case err
+             (progn
+               (org-ilm--attachment-open)
+               (kill-buffer buffer))
+           (error
+            (user-error "%s" (error-message-string err))))))
+    (user-error "Not in an ilm attachment!")))
+
+(defun org-ilm-attachment-navigate-forward ()
+  (interactive)
+  (org-ilm--attachment-navigate #'org-forward-heading-same-level 1 t))
+
+(defun org-ilm-attachment-navigate-backward ()
+  (interactive)
+  (org-ilm--attachment-navigate #'org-backward-heading-same-level 1 t))
+
+(defun org-ilm-attachment-navigate-previous ()
+  (interactive)
+  (org-ilm--attachment-navigate #'org-previous-visible-heading 1))
+
+(defun org-ilm-attachment-navigate-next ()
+  (interactive)
+  (org-ilm--attachment-navigate #'org-next-visible-heading 1))
+
+(defun org-ilm-attachment-navigate-up ()
+  (interactive)
+  (org-ilm--attachment-navigate #'org-up-heading 1 t))
+
 ;;;;; Transient
 
 (defun org-ilm-attachment-actions ()
@@ -5333,6 +5372,13 @@ missing, something else is wrong, so throw an error."
      (lambda ()
        (interactive)
        (org-ilm--media-insert-chapters)))
+    ]
+   ["Navigation"
+    ("f" "Forward" org-ilm-attachment-navigate-forward)
+    ("b" "Backward" org-ilm-attachment-navigate-backward)
+    ("n" "Next" org-ilm-attachment-navigate-next)
+    ("p" "Previous" org-ilm-attachment-navigate-previous)
+    ("u" "Up" org-ilm-attachment-navigate-up)
     ]
    ]
 
