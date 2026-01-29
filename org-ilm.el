@@ -5303,7 +5303,8 @@ missing, something else is wrong, so throw an error."
          (condition-case err
              (progn
                (org-ilm--attachment-open)
-               (kill-buffer buffer))
+               (kill-buffer buffer)
+               attachment)
            (error
             (user-error "%s" (error-message-string err))))))
     (user-error "Not in an ilm attachment!")))
@@ -5326,7 +5327,9 @@ missing, something else is wrong, so throw an error."
 
 (defun org-ilm-attachment-navigate-up ()
   (interactive)
-  (org-ilm--attachment-navigate #'org-up-heading 1 t))
+  (let ((orig-attachment (org-ilm--attachment-navigate #'org-up-heading 1 t)))
+    (goto-char (point-min))
+    (re-search-forward (car orig-attachment) nil t)))
 
 ;;;;; Transient
 
