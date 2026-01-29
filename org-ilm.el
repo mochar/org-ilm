@@ -7311,6 +7311,9 @@ A lot of formatting code from org-ql."
   (let* ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
          (id (org-id-new))
          (title (buffer-name (get-buffer buf)))
+         (parent-el (transient-scope))
+         (as-child (transient-arg-value "--child"
+                                        (transient-args 'org-ilm--import-transient)))
          props file)
 
     (with-current-buffer buf
@@ -7339,8 +7342,7 @@ A lot of formatting code from org-ql."
       (org-ilm--capture-capture
        'material
        :id id
-       :parent (when-let ((element (transient-scope)))
-                 (org-ilm-element-id element))
+       :parent (when (and as-child parent-el) (org-ilm-element-id parent-el))
        :collection (org-ilm--active-collection)
        :content (unless file (buffer-string))
        :title title
