@@ -799,6 +799,13 @@ If `HEADLINE' is passed, read it as org-property."
   (org-mark-subtree)
   (delete-region (region-beginning) (region-end)))
 
+(defun org-ilm--org-add-todo-face (state)
+  (let* ((org-done-keywords org-done-keywords-for-agenda)
+         (face (org-get-todo-face state)))
+    (when face
+      (add-text-properties 0 (length state) (list 'face face) state))
+    state))
+
 ;;;;; Org-node / org-mem
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
@@ -1995,6 +2002,7 @@ ELEMENT may be nil, in which case try to read it from point."
   (when (called-interactively-p)
     (org-mark-subtree)
     (unless (yes-or-no-p "Delete element?")
+      (pop-mark)
       (user-error "Abort deletion")))
     
   (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
@@ -2307,10 +2315,10 @@ ELEMENT may be nil, in which case try to read it from point."
    ]
   )
 
-(defun org-ilm-element-actions ()
+(defun org-ilm-element-actions (&optional arg id)
   "Open menu to apply an action on an element."
-  (interactive)
-  (let ((element (org-ilm-element-from-context)))
+  (interactive "P")
+  (let ((element (if id (org-ilm-element-from-id id) (org-ilm-element-from-context))))
     (cond
      ((null element)
       (user-error "No ilm element!"))
@@ -5201,7 +5209,8 @@ This is used to keep track of changes in priority and scheduling.")
   
 (defun org-ilm--attachment-open-by-id (id)
   (org-ilm--org-with-point-at id
-    (org-ilm--attachment-open)))
+    (org-with-wide-buffer
+     (org-ilm--attachment-open))))
 
 (defun org-ilm--attachment-prepare-buffer ()
   "Prepare ilm attachment buffers."
@@ -5638,6 +5647,8 @@ the context frame."
 ;; one for each target element to hide it, and one that encapsulates the whole
 ;; target region to visually indicate it with a color.
 
+;;;;; Parsing
+
 (defvar org-ilm-target-value-regexp "\\(extr\\|card\\):\\(beg\\|end\\):\\([^>]+\\)"
   "Regexp to match values of targets enclosing extracts and clozes.")
 
@@ -5684,23 +5695,26 @@ the context frame."
     (setq target (plist-put target :end end))
     target))
 
-(defun org-ilm--target-around-point (pos)
+(defun org-ilm--target-around-point (pos &optional id)
   "Returns start target or end target around point, depending if `POS' is 'begin or 'end."
   (cl-assert (memq pos '(begin end)))
   (let* ((find-begin (eq pos 'begin))
          (re-func (if find-begin #'re-search-backward #'re-search-forward))
-         (pos-string (if find-begin "beg" "end")))
+         (pos-string (if find-begin "beg" "end"))
+         found)
     (save-excursion
-      (when (funcall re-func org-ilm-target-regexp nil t)
+      (while (and (not found) (funcall re-func org-ilm-target-regexp nil t))
         (let ((target (org-ilm--target-parse-match)))
-          (when (string-equal (plist-get target :pos) pos-string)
-            target))))))
+          (when (and (string-equal (plist-get target :pos) pos-string)
+                     (if id (string-equal (plist-get target :id) id) t))
+            (setq found target)))))
+    found))
 
 (defun org-ilm--targets-around-point ()
-  "Returns begin and targets around point, or nil if not in highlight."
-  (when-let ((target-begin (org-ilm--target-around-point 'begin))
-             (target-end (org-ilm--target-around-point 'end)))
-    (list target-begin target-end)))
+  "Returns cons with begin and targets around point, or nil if not in highlight."
+  (when-let* ((target-begin (org-ilm--target-around-point 'begin))
+              (target-end (org-ilm--target-around-point 'end (plist-get target-begin :id))))
+    (cons target-begin target-end)))
 
 (defun org-ilm-targets-remove-around-point ()
   "Removes targets around point if exists."
@@ -5708,11 +5722,13 @@ the context frame."
   (when-let ((targets (org-ilm--targets-around-point)))
     (atomic-change-group
       (let ((org-ilm--targets-editable t))
-        (delete-region (plist-get (nth 1 targets) :begin)
-                       (plist-get (nth 1 targets) :end))
-        (delete-region (plist-get (nth 0 targets) :begin)
-                       (plist-get (nth 0 targets) :end)))
+        (delete-region (plist-get (cdr targets) :begin)
+                       (plist-get (cdr targets) :end))
+        (delete-region (plist-get (car targets) :begin)
+                       (plist-get (car targets) :end)))
       (org-ilm-recreate-overlays))))
+
+;;;;; Overlays
 
 (defun org-ilm--target-ov-block-edit (ov after-change-p beg end &optional len-pre)
   ;; The hook functions are called both before and after each change. If the functions save the information they receive, and compare notes between calls, they can determine exactly what change has been made in the buffer text.
@@ -5825,6 +5841,61 @@ the context frame."
            (yes-or-no-p "Attachment does not exist. Open anyway?"))
         (find-file attachment))
     id))
+
+;;;;; Embark
+
+;; Integration with embark so that we can apply actions on elements without
+;; opening them.
+
+(defun org-ilm-element-actions-embark (target)
+  (let ((id (get-text-property 0 :id target)))
+    (org-ilm-element-actions nil id)))
+
+(defun org-ilm-element-delete-embark (target)
+  (let ((element (get-text-property 0 :element target))
+        (ov (get-text-property 0 :ov target)))
+    (org-ilm-element-with-point-at element
+      (call-interactively #'org-ilm-element-delete element))
+    (save-excursion
+      (goto-char (ov-beg ov))
+      (save-match-data
+        (re-search-forward org-ilm-target-regexp)
+        (org-ilm-targets-remove-around-point)))))
+
+(defun org-ilm-element-enter-embark (target)
+  (let ((ov (get-text-property 0 :ov target)))
+    (org-ilm--open-from-ov ov)))
+
+(defvar-keymap org-ilm-element-embark-map
+  ;; :parent embark-general-map
+  "e" #'org-ilm-element-actions-embark
+  "k" #'org-ilm-element-delete-embark
+  "RET" #'org-ilm-element-enter-embark)
+
+(add-to-list 'embark-keymap-alist '(ilm-element . org-ilm-element-embark-map))
+
+(defun org-ilm--target-embark-finder ()
+  ;; We look at overlays rather than parsing with `org-ilm--target-around-point'
+  ;; as it can deal with overlapping overlays faster, parsing already done.
+  (when-let* ((ovs (seq-filter
+                    (lambda (ov) (overlay-get ov 'org-ilm-id))
+                    (overlays-at (point)))))
+    (seq-keep
+     (lambda (ov)
+       (when-let* ((id (overlay-get ov 'org-ilm-id))
+                   (element (ignore-errors (org-ilm-element-from-id id)))
+                   (target (concat
+                            (org-ilm--org-add-todo-face (org-ilm-element-state element))
+                            ": "
+                            (org-ilm-element-title element)))
+                   (beg (ov-beg ov))
+                   (end (ov-end ov)))
+         (add-text-properties 0 (length target) (list :id id :ov ov :element element) target)
+         `(ilm-element ,target ,beg . ,end)))
+     ovs)))
+
+(add-to-list 'embark-target-finders 'org-ilm--target-embark-finder)
+
 
 ;;;; Query
 
@@ -6650,7 +6721,7 @@ A lot of formatting code from org-ql."
           (org-ilm--vtable-format-cell
            (if missing
                "NA"
-             (org-ql-view--add-todo-face
+             (org-ilm--org-add-todo-face
               (upcase (pcase type
                         ('material (car org-ilm-material-states))
                         ('card (car org-ilm-card-states))
