@@ -7308,22 +7308,71 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm-import-buffer ()
   (interactive)
-  (let ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
-        props)
+  (let* ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
+         (id (org-id-new))
+         (title (buffer-name (get-buffer buf)))
+         props file)
+
     (with-current-buffer buf
+      ;; Process buffer
       (pcase major-mode
         ('gptel-mode
          (gptel-org--save-state))
         (_
+         ;; Link roam ref
          (when-let ((link (org-store-link '(4))))
-           (setq props (list :ROAM_REFS link)))))
+           (setq props (list :ROAM_REFS link))
+           (when-let* ((m (string-match org-bracket-link-regexp link))
+                       (desc (match-string 2 link)))
+             (setq title desc)))
+
+         ;; Convert to html 
+         (when-let ((html-buf (ignore-errors (hfy-fontify-buffer)))
+                    (tmp-file (make-temp-file nil)))
+           (with-current-buffer html-buf
+             (write-region nil nil tmp-file))
+           (setq file tmp-file)
+           (kill-buffer html-buf))
+         ))
+
+      ;; Capture
       (org-ilm--capture-capture
        'material
+       :id id
        :parent (when-let ((element (transient-scope)))
                  (org-ilm-element-id element))
        :collection (org-ilm--active-collection)
-       :content (buffer-string)
-       :props props))))
+       :content (unless file (buffer-string))
+       :title title
+       :props props
+       :on-success
+       (lambda (id attach-dir collection)
+         (when file
+           (convtools--convert-multi
+            :process-name "buffer"
+            :process-id id
+            :converters
+            (list
+             (cons #'convtools--convert-with-marker
+                   (list
+                    :input-path file
+                    :format "markdown"
+                    :output-dir attach-dir
+                    :move-content-out t
+                    :flags '("--disable_ocr")))
+             (cons #'convtools--convert-with-pandoc
+                   (list
+                    :input-path (expand-file-name (concat (file-name-base file) ".md") attach-dir)
+                    :input-format "markdown"
+                    :output-name id))
+             )
+            :on-error nil
+            :on-final-success
+            (lambda (proc buf id)
+              (message "[Convtools] Buffer conversion completed")
+              (mochar-utils--org-with-point-at id
+                (org-attach-sync))))))
+       ))))
 
 ;;;;; File
 

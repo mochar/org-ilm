@@ -140,16 +140,15 @@ final converter succeeds."
 
 ;;;; Pandoc
 
-(cl-defun convtools--convert-with-pandoc (&rest args &key process-id process-name input-path input-format output-dir &allow-other-keys)
+(cl-defun convtools--convert-with-pandoc (&rest args &key process-id process-name input-path input-format output-dir output-name &allow-other-keys)
   "Convert a file to Org mode format using Pandoc."
   (unless (and process-id input-path input-format)
     (error "Required args: PROCESS-ID INPUT-PATH INPUT-FORMAT"))
   (let* ((input-path (expand-file-name input-path))
          (output-dir (expand-file-name
                       (or output-dir (file-name-directory input-path))))
-         (output-path (expand-file-name
-                       (concat (file-name-base input-path) ".org")
-                       output-dir))
+         (output-name (or output-name (file-name-base input-path)))
+         (output-path (expand-file-name (concat output-name ".org") output-dir))
          ;; Make sure we are in output dir so that media files references correct
          (default-directory output-dir))
     (apply
@@ -222,7 +221,7 @@ final converter succeeds."
   :type 'file
   :group 'convtools-marker)
 
-(cl-defun convtools--convert-with-marker (&rest args &key process-id process-name input-path format output-dir pages disable-image-extraction move-content-out new-name to-org on-success &allow-other-keys)
+(cl-defun convtools--convert-with-marker (&rest args &key process-id process-name input-path format output-dir pages disable-image-extraction move-content-out new-name to-org flags on-success &allow-other-keys)
   "Convert a PDF document or image using Marker.
 
 OUTPUT-DIR is the output directory. If not specified, will be the same
@@ -283,7 +282,8 @@ does not have an option for this so it is done here.
          "--layout_batch_size" "1"
          "--recognition_batch_size" "1"
          "--equation_batch_size" "1"
-         "--table_rec_batch_size" "1"))
+         "--table_rec_batch_size" "1")
+        flags)
        :on-success
        (lambda (proc buf id)
          ;; Renaming the files is done by replacing the input base file
@@ -316,8 +316,9 @@ does not have an option for this so it is done here.
                 'ok-if-exists)))
            (when move-content-out
              (delete-directory output-dir-dir)))
-         
-         (funcall on-success proc buf id)))))))
+
+         (when on-success
+           (funcall on-success proc buf id))))))))
 
 (cl-defun convtools--convert-to-org-with-marker-pandoc (&key process-id input-path new-name pdf-pages on-success on-error)
   "Convert a PDF file or image to Markdown using Marker, then to Org mode using Pandoc."
