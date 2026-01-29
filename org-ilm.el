@@ -1974,7 +1974,17 @@ ELEMENT may be nil, in which case try to read it from point."
                                (org-ilm-element-collection element))
 
         ;; TODO Go through all queues and remove from their ost
-        ))))
+
+        (save-buffer)
+        )
+
+      ;; When this is the element being reviewed, move on to review the next
+      ;; element in the queue.
+      (when (and (org-ilm-reviewing-p)
+                 (equal (plist-get org-ilm--review-data :id) (org-ilm-element-id element)))
+        (let ((org-ilm--review-update-schedule nil))
+          (org-ilm--review-next)))
+      )))
 
 (defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
@@ -9093,9 +9103,9 @@ needs the attachment buffer."
   (interactive)
   (cl-assert (org-ilm-reviewing-p))
   (org-ilm--org-with-point-at (plist-get org-ilm--review-data :id)
-    (call-interactively #'org-ilm-element-done)
-    (let ((org-ilm--review-update-schedule nil))
-      (org-ilm--review-next))))
+    ;; `org-ilm-element-done' already checks if we are reviewing this element,
+    ;; and if so move on to the next element.
+    (call-interactively #'org-ilm-element-done)))
 
 (defun org-ilm-review-open-collection ()
   (interactive)
