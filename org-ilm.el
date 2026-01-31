@@ -1172,10 +1172,10 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
 
 (defun org-ilm--collection-prepare-buffer ()
   (when (org-ilm--collection-file)
-    (add-hook 'eldoc-documentation-functions
-              #'org-ilm--collection-eldoc-element-info
-              nil 'local)))
-
+    ;; (add-hook 'eldoc-documentation-functions
+    ;;           #'org-ilm--collection-eldoc-element-info
+    ;;           nil 'local)
+    ))
 
 
 ;;;; Priority queue
@@ -1757,43 +1757,50 @@ This is used in `org-ilm-element-at-point' and
 each element belongs to, as this takes some time in
 `org-ilm--collection-file'.")
 
-(defun org-ilm-element-at-point ()
-  "Parse org-ilm data of headline at point."
-  ;; TODO Was thinking of org-ql--value-at this whole function, but this is
-  ;; wasteful if headline does not match query.
-  (when-let* ((id (org-entry-get nil "ID"))
-              ;; TODO Need something like (org-node-at-point-ensure) to force
-              ;; add it to cache if not already there, since it has to exist if
-              ;; it has an ID. Wait for https://github.com/meedstrom/org-mem/issues/31
-              (entry (or (org-mem-entry-by-id id)
-                         (progn
-                           (org-mem-updater-ensure-id-node-at-point-known)
-                           (org-mem-entry-by-id id)))))
-    (let* ((todo-keyword (org-mem-entry-todo-state entry))
-           (type (org-ilm-type todo-keyword)))
-      (when (and type id)
-        (make-org-ilm-element
-         ;; Headline element properties
-         :id id
-         :state todo-keyword
-         :level (org-mem-entry-level entry)
-         :pcookie (org-mem-entry-priority entry)
-         :tags (org-mem-entry-tags entry)
-         :title (org-mem-entry-title entry)
+(defun org-ilm--org-mem-get-entry-ensured (&optional id)
+  ;; TODO Need something like (org-node-at-point-ensure) to force add it to
+  ;; cache if not already there, since it has to exist if it has an ID. Wait for
+  ;; https://github.com/meedstrom/org-mem/issues/31
+  (or (if id (org-mem-entry-by-id id) (org-node-at-point))
+      (progn
+        (org-ilm--org-with-point-at id
+          (org-mem-updater-ensure-id-node-at-point-known))
+        (org-mem-entry-by-id id))))
 
-         ;; Ilm stuff
-         :collection (or org-ilm--assumed-collection (org-ilm--collection-file))
-         :sched (when-let ((s (org-mem-entry-scheduled entry))) (ts-parse s))
-         :type type
-         ;; TODO Is this still used?!?!
-         :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
-         :media (org-ilm--media-compile entry)
-         ;; cdr to get rid of headline priority in the car - redundant
-         :concepts (org-ilm--concept-cache-gather id))))))
+(defun org-ilm-element-from-entry (entry)
+  (cl-assert (org-mem-entry-p entry))
+  (let* ((todo-keyword (org-mem-entry-todo-state entry))
+         (type (org-ilm-type todo-keyword))
+         (id (org-mem-entry-id entry)))
+    (when type
+      (make-org-ilm-element
+       ;; Headline element properties
+       :id id
+       :state todo-keyword
+       :level (org-mem-entry-level entry)
+       :pcookie (org-mem-entry-priority entry)
+       :tags (org-mem-entry-tags entry)
+       :title (org-mem-entry-title entry)
+
+       ;; Ilm stuff
+       :collection (or org-ilm--assumed-collection
+                       (org-ilm--collection-file (org-mem-entry-file entry)))
+       :sched (when-let ((s (org-mem-entry-scheduled entry))) (ts-parse s))
+       :type type
+       ;; TODO Is this still used?!?!
+       :registry (org-mem-entry-property-with-inheritance "REGISTRY" entry)
+       :media (org-ilm--media-compile entry)
+       ;; cdr to get rid of headline priority in the car - redundant
+       :concepts (org-ilm--concept-cache-gather id)))))
 
 (defun org-ilm-element-from-id (id)
-  (org-ilm--org-with-point-at id
-    (org-ilm-element-at-point)))
+  (when-let* ((entry (org-ilm--org-mem-get-entry-ensured id)))
+    (org-ilm-element-from-entry entry)))
+
+(defun org-ilm-element-at-point ()
+  "Parse org-ilm data of headline at point."
+  (when-let* ((entry (org-ilm--org-mem-get-entry-ensured)))
+    (org-ilm-element-from-entry entry)))
 
 (defun org-ilm-element-from-context ()
   (let ((location (org-ilm--where-am-i)))
@@ -5312,7 +5319,8 @@ missing, something else is wrong, so throw an error."
          (condition-case err
              (progn
                (org-ilm--attachment-open)
-               (kill-buffer buffer)
+               (when (called-interactively-p)
+                 (kill-buffer buffer))
                attachment)
            (error
             (user-error "%s" (error-message-string err))))))
@@ -7258,11 +7266,12 @@ A lot of formatting code from org-ql."
    ("C" "Collection"
     (lambda ()
       (interactive)
-      (org-ilm--select-collection))
+      (setq org-ilm--active-collection (org-ilm--select-collection)))
     :description
     (lambda ()
       (concat "Collection " (propertize (format "%s" (org-ilm--active-collection))
-                                        'face 'transient-value))))
+                                        'face 'transient-value)))
+    :transient transient--do-call)
    ("." "As child" "--child"
     :inapt-if-not (lambda () (transient-scope)))
    (:info
