@@ -32,6 +32,7 @@
 (require 'eldoc)
 (require 'transient)
 (require 'cond-let)
+(require 'embark)
 
 (require 'mochar-utils)
 (require 'convtools)
@@ -330,17 +331,6 @@ be due starting 2am."
   (interactive)
   (org-registry-open))
 
-(defun org-ilm-bibliography ()
-  (interactive)
-  (if-let ((path (org-ilm--collection-bib)))
-      (let ((key (ignore-errors
-                   (car (mochar-utils--org-mem-cite-refs)))))
-        (with-current-buffer (find-file path)
-          (when key 
-            (goto-char (point-min))
-            (when (re-search-forward key nil t)
-              (beginning-of-line)))))
-    (user-error "Path to bibliography not found")))
   
 ;;;; Utilities
 
@@ -1050,6 +1040,18 @@ Properties:
     (unless (file-exists-p bib) (make-empty-file bib))
     bib))
 
+(defun org-ilm-bibliography ()
+  (interactive)
+  (if-let ((path (org-ilm--collection-bib)))
+      (let ((key (ignore-errors
+                   (car (mochar-utils--org-mem-cite-refs)))))
+        (with-current-buffer (find-file path)
+          (when key 
+            (goto-char (point-min))
+            (when (re-search-forward key nil t)
+              (beginning-of-line)))))
+    (user-error "Path to bibliography not found")))
+
 (defun org-ilm--collection-file (&optional file collection)
   "Return collection of which FILE belongs to.
 
@@ -1188,7 +1190,7 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
   :type 'directory
   :group 'org-ilm-pqueue)
 
-(defcustom org-ilm-pqueue-save-every-n-changes 5
+(defcustom org-ilm-pqueue-save-every-n-changes 1
   "Save the priority queue to disk after this many changes."
   :type 'integer
   :group 'org-ilm-pqueue)
@@ -1292,6 +1294,8 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
   "Alist collection -> pqueue.")
 
 (defun org-ilm--pqueue-new (collection)
+  "Create a new priority queue associated with COLLECTION.
+This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
   (let* ((ost (make-ost-tree :dynamic t))
          (pqueue (make-org-ilm-pqueue :collection collection :ost ost))
          ;; TODO Use org-mem instead?
@@ -1303,7 +1307,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 (defun org-ilm--pqueue (collection)
   "Return the priority queue of COLLECTION."
   (cond-let*
-    ([pqueue (cdr (assoc collection org-ilm--pqueues))]
+    ([pqueue (alist-get collection org-ilm--pqueues)]
      pqueue)
     ([pqueue (org-ilm--pqueue-read collection)]
      (setf (alist-get collection org-ilm--pqueues) pqueue))
