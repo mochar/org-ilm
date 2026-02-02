@@ -72,3 +72,8 @@ External:
 - [[https://github.com/datalab-to/marker][Marker]] to convert PDF files to Markdown 
 
 Thanks to all for the developers for the tools on which I rely on daily.
+
+** Development
+Code is a total mess.
+
+For some reason I have decided to use =org-ilm--module-func= rather than the more common =org-ilm-module--func= to name "private" functions. Maybe this makes more sense since I store most of my code in one file. Related to this, cl-struct accessors/functions I name =org-ilm-struct--field= so that I can differentiate between module-level functions (=org-ilm--pqueue-new=) and struct functions (=org-ilm-pqueue--write=). 
