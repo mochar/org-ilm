@@ -1206,8 +1206,16 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 
 (cl-defstruct (org-ilm-pqueue (:conc-name org-ilm-pqueue--))
   "Priority queue."
-  collection ost
-  (changes-since-save 0 :type integer))
+  (collection
+   nil
+   :type symbol
+   :documentation "Collection symbol")
+  (ost
+   nil
+   :documentation "ost.el struct")
+  (changes-since-save
+   0
+   :type integer))
 
 (defun org-ilm--pqueue-dir (collection)
   "Return the directory path where the queue of COLLECTION is stored."
@@ -1222,6 +1230,10 @@ Note that priority may change frequently due to the nature of a queue. Therefore
   "Return the file path where the queue of COLLECTION is stored."
   (expand-file-name "element-queue.el" (org-ilm--pqueue-dir collection)))
 
+(defun org-ilm-pqueue--file (pqueue)
+  (cl-assert (org-ilm-pqueue-p pqueue))
+  (org-ilm--pqueue-file (org-ilm-pqueue--collection pqueue)))
+
 (defun org-ilm--pqueue-read (collection)
   (when-let ((ost (ost-read (org-ilm--pqueue-file collection))))
     (make-org-ilm-pqueue :collection collection :ost ost)))
@@ -1229,7 +1241,7 @@ Note that priority may change frequently due to the nature of a queue. Therefore
 ;; TODO Schedule for write in background process
 ;; If new scheduled, old one cancelled. Use org-mem thing?
 (defun org-ilm-pqueue--write (pqueue)
-  (let* ((file (org-ilm--pqueue-file (org-ilm-pqueue--collection pqueue)))
+  (let* ((file (org-ilm-pqueue--file pqueue))
          (backup-file (concat file ".bak")))
     (make-directory (file-name-directory file) 'parents)
     (when (file-exists-p file)
@@ -1245,14 +1257,6 @@ Note that priority may change frequently due to the nature of a queue. Therefore
             org-ilm-pqueue-save-every-n-changes)
     (org-ilm-pqueue--write pqueue)
     (setf (org-ilm-pqueue--changes-since-save pqueue) 0)))
-
-(defun org-ilm--pqueue-write-all ()
-  "Force-save all pqueues that have pending changes."
-  (interactive)
-  (dolist (pqueue-cons org-ilm--pqueues)
-    (let ((pqueue (cdr pqueue-cons)))
-      (when (org-ilm-pqueue-p pqueue)
-        (org-ilm-pqueue--write pqueue)))))
 
 (defun org-ilm-pqueue--contains-p (pqueue id)
   "Return ID if it is in QUEUE."
@@ -1291,7 +1295,7 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 ;;;;; Create
 
 (defvar org-ilm--pqueues nil
-  "Alist collection -> pqueue.")
+  "Alist that maps collection symbol -> pqueue.")
 
 (defun org-ilm--pqueue-new (collection)
   "Create a new priority queue associated with COLLECTION.
@@ -1299,7 +1303,9 @@ This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
   (let* ((ost (make-ost-tree :dynamic t))
          (pqueue (make-org-ilm-pqueue :collection collection :ost ost))
          ;; TODO Use org-mem instead?
-         (elements (org-ilm-query-collection collection #'org-ilm-query-all)))
+         (elements (org-ilm-query-collection
+                    #'org-ilm--queries-query-all
+                    collection)))
     (dolist (element elements)
       (org-ilm-pqueue--insert pqueue (org-ilm-element-id element) 0))
     pqueue))
@@ -1316,6 +1322,14 @@ This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
        (let* ((pqueue (org-ilm--pqueue-new collection)))
          (org-ilm-pqueue--write pqueue)
          (setf (alist-get collection org-ilm--pqueues) pqueue))))))
+
+(defun org-ilm--pqueue-write-all ()
+  "Force-save all pqueues that have pending changes."
+  (interactive)
+  (dolist (pqueue-cons org-ilm--pqueues)
+    (let ((pqueue (cdr pqueue-cons)))
+      (when (org-ilm-pqueue-p pqueue)
+        (org-ilm-pqueue--write pqueue)))))
 
 (defun org-ilm-pqueue (&optional collection)
   "Return the priority queue of COLLECTION, or active collection."
@@ -1362,7 +1376,7 @@ object."
                  :name (format "Priority queue (%s)" collection)
                  :collection collection
                  :type 'pqueue))
-         (elements (org-ilm-query-collection collection #'org-ilm-query-all)))
+         (elements (org-ilm-query-collection #'org-ilm--queries-query-all collection)))
 
     ;; First go through the elements that have been found and add them to ost
     ;; and nodes map as normal.
@@ -1871,8 +1885,8 @@ each element belongs to, as this takes some time in
          (save-restriction
            (org-ilm--org-narrow-to-header)
            (car (org-ilm-query-buffer
-                 (current-buffer)
                  if-matches-query
+                 (current-buffer)
                  t))))
         (_ (org-ilm-element-at-point))))))
 
@@ -5928,7 +5942,7 @@ the context frame."
 ;; + Prefer query over custom predicate
 ;; + Use regex preambles to quickly filter candidates
 
-(defun org-ilm-query-collection (collection query)
+(defun org-ilm-query-collection (query collection)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
   (unless (functionp query)
     (setq query (cdr (assoc query org-ilm-queries))))
@@ -5939,7 +5953,7 @@ the context frame."
       ;; TODO Pass as sexp so that org-ql can byte compile it
       :action #'org-ilm-element-at-point)))
 
-(defun org-ilm-query-buffer (buffer query &optional narrow)
+(defun org-ilm-query-buffer (query buffer &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
   (org-ql-select buffer
     (funcall (cdr (assoc query org-ilm-queries)))
@@ -5952,19 +5966,20 @@ the context frame."
 TODO parse-headline pass arg to not sample priority to prevent recusrive concept search?"
   (let ((collection (or collection (plist-get org-ilm-queue :collection))))
     (cl-assert collection)
-    (org-ql-select (org-ilm--collection-files collection)
-      `(and (property "ID")
-            ,(cons 'todo org-ilm-concept-states))
-      :action #'org-ilm-element-at-point)))
+    (org-ilm-query-collection #'org-ilm--queries-concepts collection)))
 
-(defun org-ilm-query-all ()
+(defun org-ilm--queries-concepts ()
+  `(and (property "ID")
+        ,(cons 'todo org-ilm-concept-states)))  
+
+(defun org-ilm--queries-query-all ()
   "Query for org-ql to retrieve all elements."
   `(and
     (property "ID")
     (or ,(cons 'todo org-ilm-material-states)
         ,(cons 'todo org-ilm-card-states))))
 
-(defun org-ilm-query-outstanding ()
+(defun org-ilm--queries-query-outstanding ()
   "Query for org-ql to retrieve the outstanding elements."
   (let ((today (ts-adjust 'minute (org-ilm-midnight-shift-minutes) (ts-now))))
     `(and
@@ -6164,7 +6179,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
                          (org-ilm--collection-from-context)
                          (org-ilm--select-collection)))
          (query (or query (car (org-ilm--query-select))))
-         (elements (org-ilm-query-collection collection query)))
+         (elements (org-ilm-query-collection query collection)))
     (org-ilm--queue-create
      collection :elements elements :query query)))
 
@@ -6425,7 +6440,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
    collection
    :name (format "Outstanding queue (%s)" collection)
    :type 'outstanding
-   :elements (org-ilm-query-collection collection #'org-ilm-query-outstanding)
+   :elements (org-ilm-query-collection #'org-ilm--queries-query-outstanding collection)
    :randomness org-ilm-outstanding-randomness))
 
 ;; TODO With prefix arg: transient with additional settings
