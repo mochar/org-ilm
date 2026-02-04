@@ -905,6 +905,14 @@ See `parsebib-read-entry'."
   (name "ost" :type string :documentation "Name used as filename when tree saved to disk.")
   (collection nil :type symbol :documentation "Collection symbol."))
 
+(cl-defmethod ost-serialize ((ost org-ilm-ost))
+  (list :collection (org-ilm-ost--collection ost)
+        :name (org-ilm-ost--name ost)))
+
+(cl-defmethod ost-deserialize ((ost org-ilm-ost) data)
+  (setf (org-ilm-ost--collection ost) (plist-get data :collection)
+        (org-ilm-ost--name ost) (plist-get data :name)))
+
 (defun org-ilm--ost-file (collection name)
   "Return the file path where the COLLECTION's OST with NAME is stored."
   (expand-file-name
@@ -918,7 +926,6 @@ See `parsebib-read-entry'."
    (org-ilm-ost--collection ost)
    (org-ilm-ost--name ost)))
 
-;; TODO Make this safer? Seems risky...
 (defun org-ilm-ost--read (ost)
   "Replace OST data with what is stored in disk."
   (ost-read (org-ilm-ost--file ost) ost))
@@ -5999,10 +6006,41 @@ If available, the last alias in the ROAM_ALIASES property will be used."
                (:conc-name org-ilm-queue--)
                (:include org-ilm-ost))
   "Queue of elements."
-  query type
+  query
+  type
   (elements (make-hash-table :test #'equal)
             :documentation "Map id to org-ilm-element.")
-  key reversed randomness)
+  key ;; Used to call `org-ilm-element--KEY'
+  reversed
+  randomness)
+
+(cl-defmethod ost-serialize ((queue org-ilm-queue))
+  ;; Don't serialize elements, instead get IDs from ost and parse them again
+  ;; when deserializing.
+  (append (cl-call-next-method)
+          (list :query (org-ilm-queue--query queue)
+                :type (org-ilm-queue--type queue)
+                :key (org-ilm-queue--key queue)
+                :reversed (org-ilm-queue--reversed queue)
+                :randomness (org-ilm-queue--randomness queue))))
+
+(cl-defmethod ost-deserialize ((queue org-ilm-queue) data)
+  (cl-call-next-method)
+  
+  (setf (org-ilm-queue--query queue) (plist-get data :query)
+        (org-ilm-queue--type queue) (plist-get data :type)
+        (org-ilm-queue--key queue) (plist-get data :key)
+        (org-ilm-queue--reversed queue) (plist-get data :reversed)
+        (org-ilm-queue--randomness queue) (plist-get data :randomness))
+
+  ;; Reconstruct the elements hash table
+  (let ((elements (make-hash-table :test #'equal)))
+    (dolist (id (hash-table-keys (org-ilm-queue--nodes queue)))
+      ;; Try to fetch the full element object. If not found, store ID as fallback
+      ;; (Matches `org-ilm-pqueue--queue')
+      (let ((element (or (org-ilm--element-by-id id) id)))
+        (puthash id element elements)))
+    (setf (org-ilm-queue--elements queue) elements)))
 
 (defun org-ilm-queue--element-value (queue element &optional no-key)
   "Return the value of ELEMENT by which it is sorted in QUEUE."
@@ -6121,6 +6159,13 @@ the queue and shuffling it afterwards. To achieve the latter, call
            (org-ilm-queue--insert queue element new-score)))
        ost))))
 
+(defun org-ilm--queue-saved-queues (&optional collection)
+  (let* ((dir (org-ilm--collection-data-dir (or collection (org-ilm--active-collection))))
+         (queue-files (directory-files dir t "\\.el$")))
+    (seq-filter
+     (lambda (f) (not (string= (file-name-base f) org-ilm-pqueue-name)))
+     queue-files)))
+
 ;;;;; Building a queue 
 
 ;; Queues are stored locally within each queue buffer.
@@ -6158,21 +6203,46 @@ the queue and shuffling it afterwards. To achieve the latter, call
      collection :elements elements :query query)))
 
 (defun org-ilm-queue-build (&optional collection)
+  "Build a `org-ilm-queue' object."
   (let* ((collection (or collection
                          (org-ilm--collection-from-context)
                          (org-ilm--select-collection)))
-         (queues (append
-                  (list (cons "Priority queue" "All elements")
-                        (cons "Outstanding queue" "Due elements"))
-                  org-ilm-queries))
-         (choice (org-ilm--select-alist queues "Queue: ")))
-    (pcase (car choice)
-      ("Priority queue"
-       (org-ilm--pqueue-queue collection))
-      ("Outstanding queue"
-       (org-ilm--queue-build-outstanding collection))
-      (_
-       (org-ilm--queue-build collection (car choice))))))
+         (annotate (lambda (option)
+                     (get-text-property 0 :desc option)))
+         (choice (consult--multi
+                  (list
+                   (list
+                    :name "Query"
+                    :narrow ?q
+                    :annotate annotate
+                    :items
+                    (list
+                     (propertize "Priority queue"
+                                 :desc "All elements"
+                                 :action (lambda () (org-ilm--pqueue-queue collection)))
+                     (propertize "Outstanding queue"
+                                 :desc "Due elements"
+                                 :action (lambda () (org-ilm--queue-build-outstanding
+                                                     collection))))
+                    )
+                   (list
+                    :name "Saved"
+                    :narrow ?s
+                    :annotate annotate
+                    :items
+                    (mapcar
+                     (lambda (f)
+                       (propertize (file-name-base f)
+                                   :path f
+                                   :action
+                                   (lambda ()
+                                     (ost-read f))))
+                     (org-ilm--queue-saved-queues))
+                    )
+                   )
+                  :require-match t
+                  :prompt "Queue: ")))
+    (funcall (get-text-property 0 :action (car choice)))))
 
 (defun org-ilm--queue-rebuild (&optional buffer)
   "Replace the queue object by a rebuild one.
@@ -6221,6 +6291,14 @@ If the queue has a query, run it again. Else re-parse elements."
     (with-current-buffer buffer
       (special-mode) ;; has to be first
       (setq-local org-ilm-queue queue)
+
+      ;; Make `save-buffer' command write queue to disk.
+      (setq-local write-contents-functions (list #'org-ilm-queue-save))
+      ;; This is not necessary, but I added it because org-mem save-buffer hook
+      ;; throws an error when file is not buffer visiting. But perhaps there is
+      ;; some utility to having this..
+      ;; (setq-local buffer-file-name (org-ilm-ost--file org-ilm-queue))
+      ;; (set-visited-file-name )
 
       ;; Make sure that when the queue buffer is killed we update the active
       ;; buffer.
@@ -6318,40 +6396,45 @@ queue buffer."
 (defun org-ilm-queue (new &optional dont-switch)
   "Build a queue and view it in Agenda-like buffer."
   (interactive "P")
-  (if new
-      (org-ilm--queue-buffer-create
-       (org-ilm-queue-build) :switch-p (not dont-switch))
-    (cond
-     ;; If current buffer is queue buffer, switch to active queue buffer, or ask
-     ;; to make this the active queue buffer.
-     ((org-ilm--queue-buffer-p (current-buffer))
-      (if org-ilm-queue-active-buffer
-          (unless (eq (current-buffer) org-ilm-queue-active-buffer)
-            (switch-to-buffer org-ilm-queue-active-buffer))
-        (when (yes-or-no-p "Make current queue the active queue?")
-          (org-ilm-queue--set-active-buffer (current-buffer)))))
-     ;; If outside a queue buffer and there is an active queue buffer, switch to
-     ;; it.
-     (org-ilm-queue-active-buffer
-      (switch-to-buffer org-ilm-queue-active-buffer))
-     (t
-      (if-let ((buffers (org-ilm--queue-buffers)))
-          ;; If outside a queue buffer and there is no active queue buffer but there
-          ;; are inactive ones, user can choose between switching to one of those,
-          ;; making it active, or creating a new one, making it active.
-          (let* ((candidates (mapcar #'buffer-name buffers))
-                 (choice (completing-read "Queue: " candidates)))
-            (if (string-empty-p choice)
-                (org-ilm--queue-buffer-create
-                 (org-ilm-queue-build)
-                 :active-p t :switch-p (not dont-switch))
-              (with-current-buffer (switch-to-buffer choice)
-                (org-ilm-queue--set-active-buffer (current-buffer)))))
-        ;; If outside a queue buffer and there are no active or inactive queue
-        ;; buffers, make one and make it active.
-        (org-ilm--queue-buffer-create
-         (org-ilm-queue-build)
-         :active-p t :switch-p (not dont-switch)))))))
+  (cond-let*
+    ;; With prefix argument, create new buffer
+    (new
+     (org-ilm--queue-buffer-create
+      (org-ilm-queue-build) :switch-p (not dont-switch)))
+    
+    ;; If current buffer is queue buffer, switch to active queue buffer, or ask
+    ;; to make this the active queue buffer.
+    ((org-ilm--queue-buffer-p (current-buffer))
+     (if org-ilm-queue-active-buffer
+         (unless (eq (current-buffer) org-ilm-queue-active-buffer)
+           (switch-to-buffer org-ilm-queue-active-buffer))
+       (when (yes-or-no-p "Make current queue the active queue?")
+         (org-ilm-queue--set-active-buffer (current-buffer)))))
+    
+    ;; If outside a queue buffer and there is an active queue buffer, switch to
+    ;; it.
+    (org-ilm-queue-active-buffer
+     (switch-to-buffer org-ilm-queue-active-buffer))
+
+    ;; If outside a queue buffer and there is no active queue buffer but there
+    ;; are inactive ones, user can choose between switching to one of those,
+    ;; making it active, or creating a new one, making it active.
+    ([buffers (org-ilm--queue-buffers)]
+     (let* ((candidates (mapcar #'buffer-name buffers))
+            (choice (completing-read "Queue: " candidates)))
+       (if (string-empty-p choice)
+           (org-ilm--queue-buffer-create
+            (org-ilm-queue-build)
+            :active-p t :switch-p (not dont-switch))
+         (with-current-buffer (switch-to-buffer choice)
+           (org-ilm-queue--set-active-buffer (current-buffer))))))
+    
+    ;; If outside a queue buffer and there are no active or inactive queue
+    ;; buffers, make one and make it active.
+    (t
+     (org-ilm--queue-buffer-create
+      (org-ilm-queue-build)
+      :active-p t :switch-p (not dont-switch)))))
 
 ;;;;; Queue operations
 
@@ -6492,14 +6575,14 @@ If point on concept, add all headlines of concept."
   "r" #'org-ilm-queue-review
   "e" #'org-ilm-element-actions
   "v" #'org-ilm-queue-sort
-  "m" #'org-ilm-queue-object-mark
-  "RET" #'org-ilm-queue-open-attachment
-  "SPC" #'org-ilm-queue-open-element
-  "P" #'org-ilm-queue-set-priority
-  "#" #'org-ilm-queue-set-position
-  "S" #'org-ilm-queue-set-schedule
-  "D" #'org-ilm-queue-delete
-  "-" #'org-ilm-queue-remove
+  "m" #'org-ilm-queue-element-mark
+  "RET" #'org-ilm-queue-open-element
+  "SPC" #'org-ilm-queue-open-attachment
+  "P" #'org-ilm-queue-element-priority
+  "#" #'org-ilm-queue-element-position
+  "S" #'org-ilm-queue-element-schedule
+  "D" #'org-ilm-queue-element-delete
+  "-" #'org-ilm-queue-element-remove
   "M n" #'org-ilm-queue-mark-by-concept
   "M :" #'org-ilm-queue-mark-by-tag
   "M s" #'org-ilm-queue-mark-by-scheduled
@@ -6561,7 +6644,7 @@ If point on concept, add all headlines of concept."
   (interactive (list (cdr (org-ilm--vtable-get-object))))
   (org-ilm--org-goto-id (org-ilm-element--id object)))
 
-(defun org-ilm-queue-object-mark (object)
+(defun org-ilm-queue-element-mark (object)
   "Mark the object at point."
   (interactive (list (cdr (org-ilm--vtable-get-object))))
   ;; Only toggle if called interactively
@@ -6862,12 +6945,26 @@ A lot of formatting code from org-ql."
 
 ;;;;; Actions
 
+(defun org-ilm-queue-save ()
+  "Save queue to disk."
+  (interactive)
+  (org-ilm-ost--write org-ilm-queue)
+  (message "Saved queue to %s" (org-ilm-ost--file org-ilm-queue))
+  t)
+
+(defun org-ilm-queue-delete ()
+  "Delete queue file from disk."
+  (interactive)
+  (when (yes-or-no-p "Delete queue file from disk?")
+    (delete-file (org-ilm-ost--file org-ilm-queue))
+    (message "Deleted queue %s" (org-ilm-ost--file org-ilm-queue))))
+
 (defun org-ilm-queue-review ()
   "Start reviewing current queue."
   (interactive)
   (org-ilm-review-start :queue-buffer (current-buffer)))
 
-(defun org-ilm-queue-set-priority ()
+(defun org-ilm-queue-element-priority ()
   "Set the priority of the element at point, or bulk spread of marked elements."
   (interactive)
   (if org-ilm--queue-marked-objects
@@ -6875,19 +6972,19 @@ A lot of formatting code from org-ql."
     (org-ilm-element-set-priority (org-ilm--element-from-context))
     (org-ilm-queue-revert)))
 
-(defun org-ilm-queue-set-position ()
+(defun org-ilm-queue-element-position ()
   "Set the position of the element at point, or bulk spread of marked elements."
   (interactive)
   (if org-ilm--queue-marked-objects
       (org-ilm--queue-spread-position)
-    (org-ilm--ost-move
+    (ost-tree-move
      org-ilm-queue
      (org-ilm-element--id (org-ilm--element-from-context))
      ;; TODO Pass current position as initial position
      (car (org-ilm--queue-select-read org-ilm-queue)))
     (org-ilm-queue-revert)))
 
-(defun org-ilm-queue-set-schedule ()
+(defun org-ilm-queue-element-schedule ()
   "Set the schedule of the element at point, or bulk set of marked elements."
   (interactive)
   (let ((elements (org-ilm-queue--elements org-ilm-queue)))
@@ -6918,7 +7015,7 @@ A lot of formatting code from org-ql."
         (puthash (org-ilm-element--id element) element elements)))
     (org-ilm-queue-revert)))
 
-(defun org-ilm-queue-remove ()
+(defun org-ilm-queue-element-remove ()
   "Remove current or selected elements from this queue."
   (interactive)
   (let ((ids (copy-sequence
@@ -6930,7 +7027,7 @@ A lot of formatting code from org-ql."
       (org-ilm--queue-unmark-objects ids)
       (org-ilm-queue-revert))))
 
-(defun org-ilm-queue-delete ()
+(defun org-ilm-queue-element-delete ()
   "Delete current or selected elements from the collection."
   (interactive)
   (let* ((queue-buffer (current-buffer))

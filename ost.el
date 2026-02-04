@@ -891,8 +891,26 @@ This assumes PARENT has already replace NODE with nil."
 
 ;;;; Storage
 
+(cl-defgeneric ost-serialize (tree)
+  "Return a plist of additional slots to save for this TREE struct.
+To be implemented by structs inheriting from `ost-tree'.")
+
+(cl-defmethod ost-serialize ((_ ost-tree))
+  nil)
+
+(cl-defgeneric ost-deserialize (tree data)
+  "Restore additional slots into TREE using DATA plist.
+To be implemented by structs inheriting from `ost-tree'.")
+
+(cl-defmethod ost-deserialize ((_ ost-tree) _)
+  nil)
+
 (defun ost-write (tree file)
+  "Write contents of TREE into FILE."
   (let (nodes)
+
+    ;; Rather than storing the graph where nodes point to other nodes, save them
+    ;; as flat list.
     (maphash
      (lambda (id node)
        (let* ((parent (ost-node-parent node))
@@ -907,25 +925,42 @@ This assumes PARENT has already replace NODE with nil."
                      (when right (ost-node-id right)))
                nodes)))
      (ost-tree-nodes tree))
+    
     (with-temp-file file
       (let* ((print-level nil)
              (print-length nil)
              (root (ost-tree-root tree))
-             (data (list :root (when root (ost-node-id root))
-                         :dynamic (ost-tree-dynamic tree)
-                         :nodes nodes)))
+             ;; Base graph and type data
+             (base-data (list :struct (type-of tree)
+                              :root (when root (ost-node-id root))
+                              :dynamic (ost-tree-dynamic tree)
+                              :nodes nodes))
+             ;; Additional data from generic method
+             (extra-data (ost-serialize tree))
+             ;; Merged data
+             (data (append base-data extra-data)))
         (prin1 data (current-buffer)))))
   nil)
 
 (defun ost-read (file &optional tree)
+  "Read contents of FILE into TREE.
+
+If TREE is nil, will try to infer type of tree from the :struct property in the
+data. If that fails, will read as `ost-tree'."
   (when (file-exists-p file)
-    (unless tree (setq tree (make-ost-tree)))
     (let* ((data (with-temp-buffer
                    (insert-file-contents file)
-                   (read (current-buffer)))))
+                   (read (current-buffer))))
+           (struct (plist-get data :struct)))
 
-      (setf (ost-tree-dynamic tree) (plist-get data :dynamic))
+      ;; Infer struct type from :struct property
+      (unless tree
+        (setq tree
+              (if (and struct (fboundp (intern (format "make-%s" struct))))
+                  (funcall (intern (format "make-%s" struct)))
+                (make-ost-tree))))
 
+      ;;; Process tree nodes and set them to :nodes slot
       ;; Pass 1: Create nodes without linking them
       (dolist (node-data (plist-get data :nodes))
         (cl-destructuring-bind (id key black size parent left right) node-data
@@ -941,12 +976,15 @@ This assumes PARENT has already replace NODE with nil."
                 (ost-node-right node) (gethash (ost-node-right node) (ost-tree-nodes tree))
                 (ost-node-parent node) (gethash (ost-node-parent node) (ost-tree-nodes tree)))))
 
-      ;; Tree root node
+      ;;; Tree root node
       (when-let ((root-id (plist-get data :root)))
         (setf (ost-tree-root tree) (gethash root-id (ost-tree-nodes tree))))
 
+      ;;; Set remaining fields
+      (setf (ost-tree-dynamic tree) (plist-get data :dynamic))
+      (ost-deserialize tree data)
+
       tree)))
-    
     
 
 ;;;; Footer
