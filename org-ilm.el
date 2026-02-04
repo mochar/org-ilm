@@ -1739,7 +1739,7 @@ DUE is the new scheduled review timestamp."
 
 ;;;; Types
 
-;; There are three headline types: Concepts, Materials, and Cards.
+;; Element types: Concepts, Materials, Cards, Queues.
 
 (defun org-ilm-type (&optional headline-or-state)
   "Return ilm type from an org headline or its todo state.
@@ -1757,7 +1757,8 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
     (cond
      ((member state org-ilm-card-states) 'card)
      ((member state org-ilm-material-states) 'material)
-     ((member state org-ilm-concept-states) 'concept))))
+     ((member state org-ilm-concept-states) 'concept)
+     ((string= state "QUEUE") 'queue))))
 
 ;;;; Element
 
@@ -2247,7 +2248,7 @@ ELEMENT may be nil, in which case try to read it from point."
          (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
          (with-current-buffer (switch-to-buffer queue-buffer)
            (org-ilm-queue-revert)))))
-    ("q+" "Add all"
+    ("qA" "Add all"
      (lambda ()
        (interactive)
        (transient-quit-all)
@@ -6333,24 +6334,42 @@ If the queue has a query, run it again. Else re-parse elements."
         (org-ilm-queue--set-active-buffer buffer)))
     buffer))
 
-(defun org-ilm--queue-buffer-p (buf)
+(defun org-ilm--queue-buffer-p (buf &optional collection)
   "Tests whether or not BUF is a queue buffer."
   (with-current-buffer buf
-    (bound-and-true-p org-ilm-queue)))
+    (and (bound-and-true-p org-ilm-queue)
+         (if collection
+             (eq collection (org-ilm-queue--collection org-ilm-queue))
+           t))))
 
-(defun org-ilm--queue-buffers ()
+(defun org-ilm--queue-buffers (&optional collection)
   "Return all queue buffers."
   (seq-filter
-   #'org-ilm--queue-buffer-p
+   (lambda (b) (org-ilm--queue-buffer-p b collection))
    (buffer-list)))
 
+(defun org-ilm--queue-buffers-select ()
+  "Select queue buffer."
+  (let ((choice (consult--multi
+                 (mapcar
+                  (lambda (collection)
+                    (list
+                     :name (format "%s" collection)
+                     :category 'buffer
+                     :face 'consult-buffer
+                     :state #'consult--buffer-preview
+                     :items (mapcar #'buffer-name (org-ilm--queue-buffers collection))
+                     ))
+                  (mapcar #'car org-ilm-collections)))))
+    (car choice)))
+
 (defun org-ilm-queue-buffers ()
-  "View queue buffers in ibuffer."
+  "View queue buffers using consult-buffer.
+
+Embark export all to view in ibuffer."
   (interactive)
-  ;; TODO use `org-ilm--queue-buffer-p'
-  ;; cannot seem to figure out how!!!!!!!!!!!!!!!!!!!
-  (ibuffer nil "*Ilm Queue Buffers*"
-           '((name . "^\\*Ilm Queue"))))
+  (when-let ((buf (org-ilm--queue-buffers-select)))
+    (consult--buffer-action buf)))
 
 (defun org-ilm-queue--set-active-buffer (buffer)
   (cl-assert (or (null buffer) (org-ilm--queue-buffer-p buffer)))
@@ -7361,6 +7380,7 @@ A lot of formatting code from org-ql."
    ("C" "Collection"
     (lambda ()
       (interactive)
+      ;; TODO Better not to change active collection, instead just parse transient args
       (setq org-ilm--active-collection (org-ilm--select-collection)))
     :description
     (lambda ()
@@ -7403,10 +7423,36 @@ A lot of formatting code from org-ql."
   (interactive "P")
   (transient-setup 'org-ilm--import-transient nil nil :scope scope))
 
+(defun org-ilm--import-transient-parent-el ()
+  "Return parent ilm element if chosen to save element as its child."
+  (when-let ((parent-el (transient-scope))
+             (as-child (transient-arg-value
+                        "--child"
+                        (transient-args 'org-ilm--import-transient))))
+    parent-el))
+
 (defun org-ilm-import ()
   "Import an item into your Ilm collection."
   (interactive)
   (org-ilm--import-transient (ignore-errors (org-ilm--element-from-context))))
+
+;;;;; Queue
+
+;; (defun org-ilm-import-queue ()
+;;   (interactive)
+;;   (let* ((buf (org-ilm--queue-buffers-select))
+;;          (queue (with-current-buffer buf org-ilm-queue))
+;;          (title (org-ilm-queue--name queue))
+;;          (id (org-id-new))
+;;          (parent-el (org-ilm--import-transient-parent-el)))
+;;     (org-ilm--capture-capture
+;;      'queue
+;;      :id id
+;;      :parent (when parent-el (org-ilm-element--id parent-el))
+;;      :collection (org-ilm--active-collection)
+;;      :title title
+;;      :props props
+;;      )))    
 
 ;;;;; Buffer
 
@@ -7415,9 +7461,7 @@ A lot of formatting code from org-ql."
   (let* ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
          (id (org-id-new))
          (title (buffer-name (get-buffer buf)))
-         (parent-el (transient-scope))
-         (as-child (transient-arg-value "--child"
-                                        (transient-args 'org-ilm--import-transient)))
+         (parent-el (org-ilm--import-transient-parent-el))
          props file)
 
     (with-current-buffer buf
@@ -7446,7 +7490,7 @@ A lot of formatting code from org-ql."
       (org-ilm--capture-capture
        'material
        :id id
-       :parent (when (and as-child parent-el) (org-ilm-element--id parent-el))
+       :parent (when parent-el (org-ilm-element--id parent-el))
        :collection (org-ilm--active-collection)
        :content (unless file (buffer-string))
        :title title
@@ -8967,14 +9011,14 @@ Nil to do nothing, 'out to clock out on review, 'out-in to also clock back in."
 
 ;;;;; Variables
 
-;; Thought about making review stuff buffer local to queue buffer (as
-;; `org-ilm-queue' itself is) but it might get messy. For example org only
-;; allows for having one headline clocked in. In reality there should be only
-;; one review session active anyway.
+(cl-defstruct (org-ilm-review
+               (:conc-name org-ilm-review--))
+  "Review data."
+  element
+  id
+  buffer
+  start)
 
-;; Besides storing the attachment buffer, this variable contains redundant data
-;; as the current element should be the first element in org-ilm-queue. However
-;; this redundancy is useful to make sure everything is still in sync.
 (defvar org-ilm--review-data nil
   "Info of the current element being reviewed.")
 
