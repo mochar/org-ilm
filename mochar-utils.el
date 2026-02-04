@@ -2,11 +2,6 @@
 
 ;; Copyright (C) 2025
 
-;; Author: M Charrout
-;; Version: 0.1
-;; Package-Requires: ((emacs "27.1"))
-;; Keywords: 
-
 ;;; Commentary:
 
 ;; Some shared utilities.

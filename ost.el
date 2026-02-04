@@ -129,7 +129,7 @@ First orders by key, then by id."
    :type ost-node)
   (dynamic
    nil
-   :documentation "Dynamic tree nodes do not hold keys - the rank act as the key."
+   :documentation "Dynamic tree nodes do not hold keys - the rank acts as the key."
    :type boolean)
   (nodes
    (make-hash-table :test #'equal)
@@ -142,19 +142,74 @@ First orders by key, then by id."
                  (hash-table-count (ost-tree-nodes s)))
          stream))
 
-(defun ost-tree-size (tree)
-  "Return the total number of nodes in TREE."
-  (ost--node-size (ost-tree-root tree)))
-
 (defun ost-tree-node-by-id (tree id)
   "Return the node with id ID."
   (gethash id (ost-tree-nodes tree)))
 
-(defun ost-tree-insert (tree key-or-rank id)
+(defun ost-tree-contains-p (tree id)
+  "Return ID if TREE contains node with this ID, else nil."
+  (when (ost-tree-node-by-id tree id) id))
+
+(defun ost-tree-size (tree &optional offset)
+  "Return the total number of nodes in TREE.
+Optional OFFSET is added to the true count."
+  (let ((size (+ (ost--node-size (ost-tree-root tree)) (or offset 0))))
+    (cl-assert (>= size 0) nil "OFFSET may not lead to negative size.")
+    size))
+
+(defun ost-tree--rank-to-quantile (tree rank &optional offset)
+  "Return the quantile of RANK in TREE.
+Optional OFFSET is added to the ost size for calculation."
+  (let ((size (ost-tree-size tree offset)))
+    (if (= 1 size) 0 (/ (float rank) (1- size)))))
+
+(defun ost-tree--quantile-to-rank (tree quantile &optional offset)
+  "Return the rank of QUANTILE in TREE.
+Optional OFFSET is added to the ost size for calculation."
+  (cl-assert (<= 0 quantile 1) nil "QUANTILE must be between 0 and 1")
+  (let ((size (ost-tree-size tree offset)))
+    (round (* quantile (1- size)))))
+
+(defun ost-tree-position (tree position &optional offset)
+  "Return (RANK . QUANTILE) given rank or quantile POSITION.
+
+POSITION may already be in (RANK . QUANTILE) form, in which case it is simply
+returned.
+
+OFFSET artificially increases the size of the TREE to correct the calculations,
+assuming POSITION was already corrected for this offset. For example, when
+POSITION represents the position of a new element at the end of a tree of size
+N: OFFSET should be 1, POSITION should be 1.0 if a quantile or N if a rank, and
+will return (N . 1.0)."
+  (let ((size (ost-tree-size tree offset)))
+    (cond
+     ;; Already in (RANK . QUANTILE) form
+     ((and (listp position) (numberp (car position)) (floatp (cdr position)))
+      ;; Make sure the rank fits the quantile
+      ;; TODO This calculation might fail due to rounding errors????
+      ;; (cl-assert (= (car position)
+      ;;               (ost-tree--quantile-to-rank tree (cdr position) offset)))
+      position)
+     ;; POSITION is quantile
+     ((and (floatp position) (<= 0.0 position 1.0))
+      (let ((rank (ost-tree--quantile-to-rank tree position offset)))
+        (cons rank position)))
+     ;; POSITION is rank
+     ((and (numberp position) (<= 0 position (1- size)))
+      (let ((quantile (ost-tree--rank-to-quantile tree position offset)))
+        (cons position quantile))))))
+
+(defun ost-tree-rank (tree position &optional offset)
+  (car (ost-tree-position tree position offset)))
+
+(defun ost-tree-quantile (tree position &optional offset)
+  (cdr (ost-tree-position tree position offset)))
+
+(defun ost-tree-insert (tree key-or-pos id) 
   "Insert a new node into the TREE.
 The node will be stored in the nodes slot of TREE.
 Returns the node."
-  (let ((node (ost-insert tree key-or-rank id)))
+  (let ((node (ost-insert tree key-or-pos id)))
     (puthash id node (ost-tree-nodes tree))
     node))
 
@@ -181,53 +236,67 @@ returned."
     (remhash id (ost-tree-nodes tree))
     swapped))
 
-(defun ost-tree-move (tree node new-rank)
-  "Move NODE in TREE to NEW-RANK."
+;; TODO Merge with `ost-tree-move-many'?
+(defun ost-tree-move (tree id-or-node new-pos)
+  "Move NODE in TREE to NEW-POS."
   ;; Size cannot increase when moving
-  (cl-assert (<= 0 new-rank (1- (ost-tree-size tree))))
-  (unless (ost-node-p node)
-    (setq node (ost-tree-node-by-id tree node)))
-  (cl-assert (ost-node-p node))
-  ;; Extract id first in case node gets swapped
-  (let ((id (ost-node-id node))
-        (swap-p (ost-tree-remove tree node))
-        (key-or-rank new-rank))
-    (unless (ost-tree-dynamic tree)
-      (setq key-or-rank (ost--key-for-rank tree new-rank)))
-    ;; Returns new node (useful in case of swap)
-    (ost-tree-insert tree key-or-rank id)))
+  ;; TODO Doesnt seem like we actually need the node here???
+  (let ((node (if (ost-node-p id-or-node)
+                  id-or-node
+                (ost-tree-node-by-id tree id-or-node)))
+        (new-rank (ost-tree-rank tree new-pos)))
+    (cl-assert (ost-node-p node))
+    (cl-assert new-rank
+               "Invalid position %s when moving node in tree of size %s"
+               new-pos (ost-tree-size tree))
+    ;; Extract id first in case node gets swapped
+    (let ((id (ost-node-id node))
+          (swap-p (ost-tree-remove tree node))
+          (key-or-pos new-rank))
+      ;; TODO At this point, node is removed from tree, so if an error occurs,
+      ;; we need to be able to recover by going back to previous state where
+      ;; node was still there.
+      (unless (ost-tree-dynamic tree)
+        (setq key-or-pos (ost--key-for-rank tree new-rank)))
+      ;; Returns new node (useful in case of swap)
+      (ost-tree-insert tree key-or-pos id))))
 
-(defun ost-tree-move-many (tree new-ranks-alist)
-  "Atomically move multiple nodes to new ranks in TREE.
+(defun ost-tree-move-many (tree new-pos-alist)
+  "Atomically move multiple nodes to new positions in TREE.
 
-NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
-  (when new-ranks-alist
+NEW-POS-ALIST is an alist of (ID . NEW-POS) pairs."
+  (when new-pos-alist
     (let ((tree-size (ost-tree-size tree))
           (nodes (ost-tree-nodes tree))
-          (ids (mapcar #'car new-ranks-alist))
-          (new-ranks (mapcar #'cdr new-ranks-alist)))
+          (ids (mapcar #'car new-pos-alist))
+          new-ranks-alist)
 
-      ;; Ensure there are no duplicate destination ranks
-      (when (> (length new-ranks)
-               (length (seq-uniq new-ranks)))
-        (error "Duplicate new-ranks found in NEW-RANKS-ALIST, which is ambiguous"))
+      ;; Ensure there are no duplicate destination positions
+      (let ((new-positions (mapcar #'cdr new-pos-alist)))
+        (when (> (length new-positions) (length (seq-uniq new-positions)))
+          (error "Duplicate positions found in NEW-POS-ALIST, which is ambiguous")))
 
-      (dolist (pair new-ranks-alist)
-        (let ((id (car pair))
-              (rank (cdr pair)))
+      (dolist (pair new-pos-alist)
+        (let* ((id (car pair))
+               (pos (cdr pair))
+               (rank (ost-tree-rank tree pos)))
           ;; Ensure id exists
           (unless (gethash id nodes)
             (error "Node with ID %S not found in tree" id))
-          ;; Ensure new rank is within bound
-          (when (or (< rank 0) (>= rank tree-size))
-            (error "New rank %d is out of bounds for tree of size %d"
-                   rank tree-size))))
+          
+          ;; Make sure rank is within bound
+          (unless rank
+            (error "New position %s is out of bounds for tree of size %d"
+                   pos tree-size))
+
+          (push (cons id rank) new-ranks-alist)))
 
       ;; Remove all the nodes that need to be moved.
-      (dolist (id ids)
-        (ost-tree-remove tree id))
+      ;; TODO If we get error afterwards, we are in invalid state. Make robust.
+      (dolist (id ids) (ost-tree-remove tree id))
 
-      ;; Sort the moves by their target rank to ensure orderly insertion.
+      ;; Sort the moves by their target rank in ascending order to ensure
+      ;; orderly insertion.
       (let ((sorted-moves (sort (copy-alist new-ranks-alist) :lessp #'< :key #'cdr)))
         (dolist (pair sorted-moves)
           (let* ((id (car pair))
@@ -271,10 +340,14 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 
 (defun ost--key-for-rank (tree rank)
   "Calculate a key that would place a node at RANK in TREE.
+
 This is a helper for move/set-rank operations. It assumes the tree is in
 an intermediate state and we are about to insert a new node. RANK is the
 rank in the final, larger tree."
   (let ((current-size (ost-tree-size tree)))
+    (cl-assert (<= 0 rank current-size) nil
+               "Cannot calculate key for rank %s becaus size of tree is %s"
+               rank current-size)
     (cond
      ;; Inserting at the very beginning
      ((= rank 0)
@@ -453,27 +526,39 @@ INDEX is out of bounds."
       ;; This part should not be reached if the bounds check is correct.
       nil)))
 
-(defun ost-rank (tree node)
-  "Return the 0-based rank (index) of NODE in TREE. NODE may also be its ID.
+(defun ost-rank (tree node-or-id)
+  "Return the 0-based rank (index) of NODE-OR-ID in TREE.
+
 The rank is its position in the in-order traversal of the tree,
 starting from 0. Requires NODE to be a node within TREE."
-  (unless (ost-node-p node)
-    (setq node (ost-tree-node-by-id tree node)))
-  (cl-assert (ost-node-p node) nil "Input must be a valid node")
-  ;; The rank starts as the number of nodes in its own left subtree.
-  (let ((rank (ost--node-size (ost-node-left node)))
-        (current node))
-    ;; Now, walk up to the root.
-    (while (ost-node-parent current)
-      ;; If we are coming from a right child, it means we have
-      ;; surpassed all the nodes in the parent's left subtree, plus
-      ;; the parent itself.
-      (when (eq (ost-node-direction current) 'right)
-        (let ((parent (ost-node-parent current)))
-          (setq rank (+ rank
-                        (1+ (ost--node-size (ost-node-left parent)))))))
-      (setq current (ost-node-parent current)))
-    rank))
+  (let ((node (if (ost-node-p node-or-id)
+                  node-or-id
+                (ost-tree-node-by-id tree node-or-id))))
+    (cl-assert (ost-node-p node) nil "Node of %s not found" node-or-id)
+    ;; The rank starts as the number of nodes in its own left subtree.
+    (let ((rank (ost--node-size (ost-node-left node)))
+          (current node))
+      ;; Now, walk up to the root.
+      (while (ost-node-parent current)
+        ;; If we are coming from a right child, it means we have
+        ;; surpassed all the nodes in the parent's left subtree, plus
+        ;; the parent itself.
+        (when (eq (ost-node-direction current) 'right)
+          (let ((parent (ost-node-parent current)))
+            (setq rank (+ rank
+                          (1+ (ost--node-size (ost-node-left parent)))))))
+        (setq current (ost-node-parent current)))
+      rank)))
+
+(defun ost-position (tree node-or-id)
+  "Return (rank . quantile) of NODE-OR-ID in TREE."
+  (let ((rank (ost-rank tree node-or-id)))
+    (ost-tree-position tree rank)))
+
+(defun ost-quantile (tree node-or-id)
+  "Return quantile of NODE-OR-ID in TREE."
+  (let ((rank (ost-rank tree node-or-id)))
+    (cdr (ost-tree-position tree rank))))
 
 (defun ost-map-in-order (func tree)
   "Apply FUNC to each node in TREE in rank order.
@@ -621,16 +706,26 @@ nodes cannot have red children."
     (puthash id node (ost-tree-nodes tree))
     node))
 
-(defun ost-insert (tree key-or-rank &optional id)
+(defun ost-insert (tree key-or-pos &optional id)
   "Insert new node into the tree.
-Dynamic trees require a rank, else a key."
-  (cl-assert (numberp key-or-rank))
+Dynamic trees require a position, else a key."
   (when (and id (ost-tree-node-by-id tree id))
     (error "Node with ID already exists."))
-  (if (not (ost-tree-dynamic tree))
-      (ost-insert-key tree key-or-rank id)
-    (cl-assert id)
-    (ost-insert-rank tree key-or-rank id)))
+  (cond
+   ((ost-tree-dynamic tree)
+    (cl-assert id nil "ID must be specified when inserting a node in a dynamic tree.")
+    ;; By using `ost-tree-rank', position may be a rank, which will be returned
+    ;; as-is or nil if invalid, or a quantile between 0.0 and 1.0, in which case
+    ;; it will its rank.
+    (let ((rank (ost-tree-rank tree key-or-pos 1)))
+      (unless rank
+        (error "Invalid rank %s when inserting into tree of size %s"
+               key-or-pos (ost-tree-size tree)))
+      (ost-insert-rank tree rank id)))
+   (t
+    (let ((key key-or-pos))
+      (cl-assert (numberp key))
+      (ost-insert-key tree key id)))))
 
 ;;;; Remove
 
@@ -822,12 +917,14 @@ This assumes PARENT has already replace NODE with nil."
         (prin1 data (current-buffer)))))
   nil)
 
-(defun ost-read (file)
+(defun ost-read (file &optional tree)
   (when (file-exists-p file)
+    (unless tree (setq tree (make-ost-tree)))
     (let* ((data (with-temp-buffer
                    (insert-file-contents file)
-                   (read (current-buffer))))
-           (tree (make-ost-tree :dynamic (plist-get data :dynamic))))
+                   (read (current-buffer)))))
+
+      (setf (ost-tree-dynamic tree) (plist-get data :dynamic))
 
       ;; Pass 1: Create nodes without linking them
       (dolist (node-data (plist-get data :nodes))

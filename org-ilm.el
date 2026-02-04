@@ -103,6 +103,16 @@ be due starting 2am."
   :type 'boolean
   :group 'org-ilm)
 
+(defcustom org-ilm-data-dir
+  (expand-file-name
+   (file-name-concat (convert-standard-filename "var/") "org-ilm")
+   user-emacs-directory)
+  "The directory where the org-ilm stores data.
+Currently only the queues are stored for single file collections are stored
+here."
+  :type 'directory
+  :group 'org-ilm)
+
 ;;;; Variables
 
 (defface org-ilm-face-extract
@@ -277,7 +287,7 @@ be due starting 2am."
       (unless (org-ilm-open-highlight)
         (org-ilm-open-collection)))
      ('collection
-      (if (org-ilm-element-at-point)
+      (if (org-ilm--element-at-point)
           (org-ilm-open-attachment)
         (user-error "No ilm element at point!")))
      ('registry
@@ -370,8 +380,14 @@ be due starting 2am."
             (id (cond
                   ((stringp object) object)
                   ((org-ilm-element-p object)
-                   (org-ilm-element-id object)))))
+                   (org-ilm-element--id object)))))
        (list 'queue (org-ilm-queue--collection org-ilm-queue) id)))))
+
+(defun org-ilm--thing-id (thing)
+  (cl-etypecase thing
+    (string thing)
+    (org-ilm-element (org-ilm-element--id thing))
+    (org-mem-entry (org-mem-entry-id thing))))
 
 (defun org-ilm-midnight-shift-minutes ()
   "Midnight shift as number of minutes past (or before) midnight."
@@ -826,6 +842,18 @@ If `HEADLINE' is passed, read it as org-property."
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
+(defun org-ilm--org-mem-get-entry-ensured (&optional id)
+  "Returns `org-mem-entry' at point, or if specified, with ID.
+
+If not found in the org-mem cache, this function will then try to force org-mem
+to parse the headline."
+  ;; TODO https://github.com/meedstrom/org-mem/issues/31
+  (or (if id (org-mem-entry-by-id id) (org-node-at-point))
+      (progn
+        (org-ilm--org-with-point-at id
+          (org-mem-updater-ensure-id-node-at-point-known))
+        (org-mem-entry-by-id id))))
+
 ;;;; Citation
 
 (defcustom org-ilm-bibtex-fields nil
@@ -868,106 +896,94 @@ See `parsebib-read-entry'."
 
 ;;;; Ost
 
-;; Shared code for structs that hold an ost.
+;; Both the `queue' and `pqueue' structs inherit from `ost-tree'. Some
+;; functionality is therefore shared by both, which lives here.
 
-(defun org-ilm--ost-ost (obj)
-  (cond
-   ((ost-tree-p obj) obj)
-   ((cl-struct-p obj)
-    (let ((type (type-of obj)))
-      (cl-struct-slot-value type 'ost obj)))))
+(cl-defstruct (org-ilm-ost (:conc-name org-ilm-ost--)
+                           (:include ost-tree))
+  "An OST tree associated with a collection."
+  (name "ost" :type string :documentation "Name used as filename when tree saved to disk.")
+  (collection nil :type symbol :documentation "Collection symbol."))
 
-(defun org-ilm--ost-count (obj &optional offset)
-  "Return the number of elements in ost of OBJ.
-Optional OFFSET is added to the true count."
-  (setq offset (or offset 0))
-  (let ((size (+ (ost-size (org-ilm--ost-ost obj)) offset)))
-    (cl-assert (>= size 0) nil "OFFSET may not lead to negative size.")
-    size))
+(defun org-ilm--ost-file (collection name)
+  "Return the file path where the COLLECTION's OST with NAME is stored."
+  (expand-file-name
+   (concat name ".el")
+   (org-ilm--collection-data-dir collection)))
 
-(defun org-ilm--ost-move (obj id new-rank)
-  (ost-tree-move (org-ilm--ost-ost obj) id new-rank))
+(defun org-ilm-ost--file (ost)
+  "Return the file path where OST is stored."
+  (cl-assert (org-ilm-ost-p ost))
+  (org-ilm--ost-file
+   (org-ilm-ost--collection ost)
+   (org-ilm-ost--name ost)))
 
-(defun org-ilm--ost-move-many (obj new-ranks-alist)
-  (ost-tree-move-many (org-ilm--ost-ost obj) new-ranks-alist))
+;; TODO Make this safer? Seems risky...
+(defun org-ilm-ost--read (ost)
+  "Replace OST data with what is stored in disk."
+  (ost-read (org-ilm-ost--file ost) ost))
 
-(defun org-ilm--ost-contains-p (obj id)
-  (when (ost-tree-node-by-id (org-ilm--ost-ost obj) id)
-    id))
+;; TODO Schedule for write in background process
+;; If new scheduled, old one cancelled. Use org-mem el-job?
+(defun org-ilm-ost--write (ost)
+  (let* ((file (org-ilm-ost--file ost))
+         (backup-file (concat file ".bak")))
+    (make-directory (file-name-directory file) 'parents)
+    (when (file-exists-p file)
+      (copy-file file backup-file t))
+    (ost-write ost file))
+  ;; Return nil prevent printing
+  nil)
 
-(defun org-ilm--ost-rank-to-quantile (obj rank &optional offset)
-  "Return the quantile of RANK in ost of OBJ.
-Optional OFFSET is added to the ost size for calculation."
-  (let ((size (org-ilm--ost-count obj offset)))
-    (if (= 1 size) 0 (/ (float rank) (1- size)))))
+(defun org-ilm-ost--as-tree (ost)
+  (make-ost-tree :root (ost-tree-root ost)
+                 :dynamic (ost-tree-dynamic ost)
+                 :nodes (ost-tree-nodes ost)))
 
-(defun org-ilm--ost-quantile-to-rank (obj quantile &optional offset)
-  "Return the rank of QUANTILE in ost of OBJ.
-Optional OFFSET is added to the ost size for calculation."
-  (cl-assert (<= 0 quantile 1) nil "QUANTILE must be between 0 and 1")
-  (let ((size (org-ilm--ost-count obj offset)))
-    (round (* quantile (1- size)))))
+(defun org-ilm-ost--tree-clear (ost)
+  "Empty the root and nodes of the OST tree."
+  (setf (org-ilm-ost--root ost) nil
+        (org-ilm-ost--nodes ost) (make-hash-table :test #'equal)))
 
-(defun org-ilm--ost-parse-position (obj position &optional offset)
-  "Return (RANK . QUANTILE) given rank or quantile POSITION.
-
-OFFSET artificially increases the size of the queue to correct the
-calculations, assuming POSITION was already corrected for this
-offset. For example, when POSITION represents the position of a new
-element at the end of a queue of size N: OFFSET should be 1, POSITION
-should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
-  (let ((ost-size (org-ilm--ost-count obj offset)))
-    (cond
-     ;; Already correct
-     ((and (listp position) (numberp (car position)) (floatp (cdr position)))
-      ;; Make sure the rank fits the quantile
-      ;; TODO This calculation might fail due to rounding errors????
-      ;; (cl-assert (= (car position)
-      ;;               (org-ilm--ost-quantile-to-rank obj (cdr position) offset)))
-      position)
-     ;; Inputted quantile
-     ((and (floatp position) (<= 0.0 position 1.0))
-      (let ((rank (org-ilm--ost-quantile-to-rank obj position offset)))
-        (cons rank position)))
-     ;; Inputted rank
-     ((and (numberp position) (<= 0 position (1- ost-size)))
-      (let ((quantile (org-ilm--ost-rank-to-quantile obj position offset)))
-        (cons position quantile))))))
-
-(defun org-ilm--ost-read-position (obj &optional numnew-or-id)
-  (let* ((ost-size (org-ilm--ost-count obj))
+(defun org-ilm-ost--parse-position-str (ost pos-str)
+  (let* (;; Elisp interprets "1." as integer 1, i prefer it to be float 1.0
+         (pos (if (string= pos-str "1.") 1.0 (string-to-number pos-str)))
+         (pos-invalid (and (= pos 0) ;; string-to-number returns 0 for non-numbers
+                           (not (string= pos-str "0"))
+                           (not (string= pos-str ".0"))
+                           (not (string= pos-str "0.0")))))
+    (unless pos-invalid
+      (setq pos (if (integerp pos) (1- pos) pos))
+      (ost-tree-position ost pos))))
+  
+(defun org-ilm-ost--position-read (ost &optional initial-pos numnew-or-id)
+  (let* ((ost-size (ost-size ost))
          (numnew (cond
                   ((null numnew-or-id) 0)
                   ((numberp numnew-or-id) numnew-or-id)
                   ((stringp numnew-or-id)
                    ;; If element not yet in queue, max position is queue size + 1
-                   (if (org-ilm--ost-contains-p obj numnew-or-id) 0 1))
+                   (if (ost-tree-contains-p ost numnew-or-id) 0 1))
                   (t (error "Invalid value for NUMNEW-OR-ID"))))
          (min 1)
          (max (+ ost-size numnew))
          position)
     (while (not position)
-      (let* ((number (read-number
-                      (format "Priority (#%s-%s / 0.0-1.0): " min max)))
-             (number (if (integerp number) (1- number) number)))
-        (setq position (org-ilm--ost-parse-position obj number numnew))))
+      (let* ((number-str (read-string
+                          (format "Priority (#%s-%s / 0.0-1.0): " min max)
+                          nil nil
+                          (when initial-pos
+                            (number-to-string (1+ (ost-tree-rank ost initial-pos)))))))
+        (setq position (org-ilm-ost--parse-position-str ost number-str))))
     position))
 
-(defun org-ilm--ost-format-position (obj position)
-  (setq position (org-ilm--ost-parse-position obj position))
-  (when position
+(defun org-ilm-ost--position-format (ost position)
+  (when-let ((position (ost-tree-position ost position)))
     (let ((rank (car position))
           (quantile (cdr position)))
       (cl-assert (or rank quantile))
-      (unless quantile
-        (setq quantile (org-ilm--ost-rank-to-quantile obj rank)))
-      (unless rank
-        (setq rank (org-ilm--ost-quantile-to-rank obj quantile)))
       (format "#%s/%s (%.2f%s)"
-              (1+ rank)
-              (org-ilm--ost-count obj)
-              (* 100 quantile)
-              "%"))))
+              (1+ rank) (ost-size ost) (* 100 quantile) "%"))))
 
 
 ;;;; Collection
@@ -975,6 +991,7 @@ should be 1.0 if a quantile or N+1 if a rank, and will return (N+1 . 1.0)."
 (defcustom org-ilm-collections '((ilm . ((path . "~/ilm/")
                                          (bib . "refs.bib")
                                          (concepts . "concepts.org")
+                                         (registry . "registry.org")
                                          (default . "inbox.org"))))
   "Alist mapping collection name symbol to its configuration alist.
 
@@ -1015,6 +1032,15 @@ Properties:
   "Return path of COLLECTION."
   (alist-get 'path (alist-get collection org-ilm-collections)))
 
+(defun org-ilm--collection-data-dir (collection)
+  "Return the directory path where the data of COLLECTION is stored."
+  (when-let ((file-or-dir (org-ilm--collection-path collection)))
+    (if (f-file-p file-or-dir)
+        org-ilm-data-dir
+      (let ((dir (expand-file-name ".ilm/" file-or-dir)))
+        (make-directory dir 'parents)
+        dir))))
+
 (defun org-ilm--collection-default-file (collection)
   "Return path of the default file in COLLECTION to place imports."
   (or (alist-get 'default (alist-get collection org-ilm-collections))
@@ -1026,8 +1052,12 @@ Properties:
     (expand-file-name file (org-ilm--collection-path collection))))
 
 (defun org-ilm--collection-single-file-p (collection)
-  "Return t if COLLECTION is a single file collection."
-  (f-file-p (org-ilm--collection-path collection)))
+  "Return t if COLLECTION is a single file collection.
+Raise error if neither file nor folder."
+  (let ((path (org-ilm--collection-path collection)))
+    (if path
+        (f-file-p path)
+      (error "No path found for collection %s" collection))))
 
 (defun org-ilm--collection-bib (&optional collection)
   "Return path to bibtex file of COLLECTION."
@@ -1139,23 +1169,23 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
 
 (defun org-ilm--collection-eldoc-element-info (callback)
   "Return info about the element at point."
-  (when-let* ((element (ignore-errors (org-ilm-element-from-context)))
-              (_ (member (org-ilm-element-type element) '(material card)))
+  (when-let* ((element (ignore-errors (org-ilm--element-from-context)))
+              (_ (member (org-ilm-element--type element) '(material card)))
               (doc ""))
 
     (setq doc (concat doc
                       "🚩 "
                       ;; "P: "
-                      (org-ilm-element-priority-formatted element)
+                      (org-ilm-element--priority-formatted element)
                       " 📅 "
                       ;; " S: "
                       (org-ql-view--format-relative-date
-                       (round (org-ilm-element-schedrel element)))))
+                       (round (org-ilm-element--schedrel element)))))
 
 
     ;; Concepts
-    (let ((ids (car (org-ilm-element-concepts element)))
-          (n-direct (cdr (org-ilm-element-concepts element))))
+    (let ((ids (car (org-ilm-element--concepts element)))
+          (n-direct (cdr (org-ilm-element--concepts element))))
       (when ids
         (setq doc (concat
                    doc
@@ -1182,14 +1212,6 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
 
 ;;;; Priority queue
 
-(defcustom org-ilm-pqueue-data-dir
-  (expand-file-name
-   (file-name-concat (convert-standard-filename "var/") "org-ilm")
-   user-emacs-directory)
-  "The directory where the queues are stored for single file collections."
-  :type 'directory
-  :group 'org-ilm-pqueue)
-
 (defcustom org-ilm-pqueue-save-every-n-changes 1
   "Save the priority queue to disk after this many changes."
   :type 'integer
@@ -1202,97 +1224,147 @@ Hook arg is (id . priority-rank) or an alist of such cons's if many moved at onc
 
 Note that priority may change frequently due to the nature of a queue. Therefore not all changes are logged, only when explicitely set (`org-ilm-pqueue--move' and `org-ilm-pqueue--move-many'.")
 
-;;;;; Object
+;;;;; Pqueue object
 
-(cl-defstruct (org-ilm-pqueue (:conc-name org-ilm-pqueue--))
+(defconst org-ilm-pqueue-name "element-queue")
+
+(cl-defstruct (org-ilm-pqueue
+               (:conc-name org-ilm-pqueue--)
+               (:include org-ilm-ost (name org-ilm-pqueue-name) (dynamic t)))
   "Priority queue."
-  (collection
-   nil
-   :type symbol
-   :documentation "Collection symbol")
-  (ost
-   nil
-   :documentation "ost.el struct")
-  (changes-since-save
-   0
-   :type integer))
-
-(defun org-ilm--pqueue-dir (collection)
-  "Return the directory path where the queue of COLLECTION is stored."
-  (when-let ((file-or-dir (org-ilm--collection-path collection)))
-    (if (f-file-p file-or-dir)
-        org-ilm-pqueue-data-dir
-      (let ((dir (expand-file-name ".ilm/" file-or-dir)))
-        (make-directory dir 'parents)
-        dir))))
+  (changes-since-save 0 :type integer))
 
 (defun org-ilm--pqueue-file (collection)
   "Return the file path where the queue of COLLECTION is stored."
-  (expand-file-name "element-queue.el" (org-ilm--pqueue-dir collection)))
-
-(defun org-ilm-pqueue--file (pqueue)
-  (cl-assert (org-ilm-pqueue-p pqueue))
-  (org-ilm--pqueue-file (org-ilm-pqueue--collection pqueue)))
+  (org-ilm--ost-file collection org-ilm-pqueue-name))
 
 (defun org-ilm--pqueue-read (collection)
-  (when-let ((ost (ost-read (org-ilm--pqueue-file collection))))
-    (make-org-ilm-pqueue :collection collection :ost ost)))
+  "Read the priority queue of COLLECTION from disk."
+  (let ((pqueue (make-org-ilm-pqueue :collection collection)))
+    (ost-read (org-ilm-ost--file pqueue) pqueue)))
 
-;; TODO Schedule for write in background process
-;; If new scheduled, old one cancelled. Use org-mem thing?
-(defun org-ilm-pqueue--write (pqueue)
-  (let* ((file (org-ilm-pqueue--file pqueue))
-         (backup-file (concat file ".bak")))
-    (make-directory (file-name-directory file) 'parents)
-    (when (file-exists-p file)
-      (copy-file file backup-file t))
-    (ost-write (org-ilm-pqueue--ost pqueue) file))
-  ;; Return nil prevent printing
-  nil)
-
-(defun org-ilm-pqueue--mark-changes (pqueue &optional n-changes)
+(defun org-ilm-pqueue--write-maybe (pqueue &optional n-changes)
+  "Write PQUEUE to disk when enough changes have been applied."
+  (cl-assert (org-ilm-pqueue-p pqueue))
   (setq n-changes (or n-changes 1))
   (cl-incf (org-ilm-pqueue--changes-since-save pqueue) n-changes)
   (when (>= (org-ilm-pqueue--changes-since-save pqueue)
             org-ilm-pqueue-save-every-n-changes)
-    (org-ilm-pqueue--write pqueue)
+    (org-ilm-ost--write pqueue)
     (setf (org-ilm-pqueue--changes-since-save pqueue) 0)))
 
-(defun org-ilm-pqueue--contains-p (pqueue id)
-  "Return ID if it is in QUEUE."
-  (org-ilm--ost-contains-p pqueue id))
-
-(defun org-ilm-pqueue--insert (pqueue id rank)
-  "Insert element with ID in PQUEUE with RANK."
-  (ost-tree-insert (org-ilm-pqueue--ost pqueue) rank id)
-  (org-ilm-pqueue--mark-changes pqueue))
+(defun org-ilm-pqueue--insert (pqueue id pos)
+  "Insert element with ID in PQUEUE with POS."
+  (ost-tree-insert pqueue pos id)
+  (org-ilm-pqueue--write-maybe pqueue))
 
 (defun org-ilm-pqueue--remove (pqueue id)
   "Remove element with ID from PQUEUE."
-  (when (org-ilm-pqueue--contains-p pqueue id)
-    (ost-tree-remove (org-ilm-pqueue--ost pqueue) id)
-    (org-ilm-pqueue--mark-changes pqueue)))
+  (when (ost-tree-contains-p pqueue id)
+    (ost-tree-remove pqueue id)
+    (org-ilm-pqueue--write-maybe pqueue)))
 
 ;; TODO Keep copy of ost to restore in case of error midway?
-(defun org-ilm-pqueue--move (pqueue id new-rank)
-  "Move element ID in PQUEUE to NEW-RANK."
-  (ost-tree-move (org-ilm-pqueue--ost pqueue) id new-rank)
-  (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook (cons id new-rank))
-  (org-ilm-pqueue--mark-changes pqueue))
+;; See same todo in ost.el.
+(defun org-ilm-pqueue--move (pqueue id new-pos)
+  "Move element ID in PQUEUE to NEW-POS."
+  (ost-tree-move pqueue id new-pos)
+  (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook (cons id new-pos))
+  (org-ilm-pqueue--write-maybe pqueue))
 
-(defun org-ilm-pqueue--move-many (pqueue new-ranks-alist)
-  "Move many elements in PQUEUE to a new rank.
+(defun org-ilm-pqueue--move-many (pqueue new-pos-alist)
+  "Move many elements in PQUEUE to a new pos.
 
-NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
-  (ost-tree-move-many (org-ilm-pqueue--ost pqueue) new-ranks-alist)
-  (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook new-ranks-alist)
-  (org-ilm-pqueue--mark-changes pqueue (length new-ranks-alist)))
+NEW-POS-ALIST is an alist of (ID . NEW-POS) pairs."
+  (ost-tree-move-many pqueue new-pos-alist)
+  (run-hook-with-args 'org-ilm-pqueue-priority-changed-hook new-pos-alist)
+  (org-ilm-pqueue--write-maybe pqueue (length new-pos-alist)))
 
-(defun org-ilm-pqueue--count (pqueue)
-  "Return number of elements in PQUEUE."
-  (ost-size (org-ilm-pqueue--ost pqueue)))
+(defun org-ilm-pqueue--insert-element (pqueue element &optional position)
+  "Insert ELEMENT into PQUEUE, making sure they belong to the same collection.
+Read POSITION from user if not given. Return it."
+  (cl-assert (and (org-ilm-pqueue-p pqueue) (org-ilm-element-p element)))
+  (let* ((element-collection (org-ilm-element--collection element))
+         (pqueue-collection (org-ilm-pqueue--collection pqueue)))
+    (unless (eq element-collection pqueue-collection)
+      (error "Cannot add element of collection \"%s\" into priority queue of collection \"%s\""
+             element-collection pqueue-collection))
+    (setq position (or position (org-ilm-ost--position-read pqueue nil 1)))
+    (org-ilm-pqueue--insert pqueue id position)
+    position))
 
-;;;;; Create
+(defun org-ilm-pqueue--priority (pqueue id &optional position nil-if-absent)
+  "Position of the ID in PQUEUE as a cons (rank . quantile).
+With POSITION, set the new position in the queue, or insert there if not exists."
+  (cl-assert (org-ilm-pqueue-p pqueue))
+  (let ((node (ost-tree-node-by-id pqueue id)))
+    (cond
+     ;; Position specified: Move or add the element 
+     (position
+      (if node
+          (org-ilm-pqueue--move pqueue id position)
+        (org-ilm-pqueue--insert pqueue id position)))
+     ;; Node found, return position
+     (node (ost-position pqueue node))
+     ;; Element not found in priority queue
+     (t
+      (when (and (not nil-if-absent)
+                 (yes-or-no-p 
+                  (format "Element \"%s\" not found in priority queue. Add it?" id)))
+        (if-let* ((element (org-ilm--element-by-id id))
+                  (position (org-ilm-pqueue--insert-element pqueue element)))
+            ;; TODO Can we just return position?
+            (org-ilm-pqueue--priority pqueue id)
+          (error "Org heading \"%s\" not an ilm element." id)))))))
+
+;; TODO This function builds the queue by mapping over the priority queue's OST
+;; to determine the priorities, rather than looping over the elements and
+;; calling `ost-rank' for each. This can be much faster then
+;; `org-ilm--queue-build' when we want to sort by priority.
+(defun org-ilm-pqueue--queue (pqueue &optional query)
+  "Build an `org-ilm-queue' from all elements in PQUEUE.
+
+Because element headlines might be deleted, their ids will map to the id itself
+in `org-ilm-queue--elements', rather than `org-ilm-element' object."
+  (let* ((collection (org-ilm-pqueue--collection pqueue))
+         (queue (make-org-ilm-queue
+                 :name (format "Priority queue (%s)" collection)
+                 :collection collection
+                 :type 'pqueue))
+         (query (or query #'org-ilm--queries-query-all))
+         (element-map (org-ilm-query-collection query collection 'hash-table-p)))
+
+    ;; Map over OST
+    (ost-map-in-order
+     (lambda (node rank)
+       (let* ((id (ost-node-id node))
+              (element (gethash id element-map)))
+
+         (if element
+             (org-ilm-queue--insert queue element rank)
+           ;; For ids that have not been found by querying the collection but are
+           ;; present in the priority queue, put them in the queue as normal, but
+           ;; in the node map use the id also as value.
+           (puthash id id (org-ilm-queue--elements queue))
+           (ost-tree-insert queue rank id))
+
+         ;; Remove from map so that we are left with elements missing in the
+         ;; priority queue.
+         (remhash id element-map)))
+     pqueue)
+
+    ;; Handle elements that were found by querying the collection, but are
+    ;; missing in the priority queue.
+    ;; TODO Handle this. Present user options:
+    ;; 1. Ignore
+    ;; 2. Jump to each element, allow user to set priority, one after another
+    ;; 3. Dump elements in seperate queue, show queue view
+    (unless (hash-table-empty-p element-map)
+      (warn "Ilm: Parsed %s elements with missing priority." (hash-table-size element-map)))
+
+    queue))
+
+;;;;; Collection priority queue
 
 (defvar org-ilm--pqueues nil
   "Alist that maps collection symbol -> pqueue.")
@@ -1300,18 +1372,18 @@ NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
 (defun org-ilm--pqueue-new (collection)
   "Create a new priority queue associated with COLLECTION.
 This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
-  (let* ((ost (make-ost-tree :dynamic t))
-         (pqueue (make-org-ilm-pqueue :collection collection :ost ost))
+  (let* ((pqueue (make-org-ilm-pqueue :collection collection))
          ;; TODO Use org-mem instead?
          (elements (org-ilm-query-collection
                     #'org-ilm--queries-query-all
                     collection)))
     (dolist (element elements)
-      (org-ilm-pqueue--insert pqueue (org-ilm-element-id element) 0))
+      (org-ilm-pqueue--insert pqueue (org-ilm-element--id element) 0))
     pqueue))
 
-(defun org-ilm--pqueue (collection)
-  "Return the priority queue of COLLECTION."
+(defun org-ilm--pqueue (&optional collection)
+  "Return the priority queue of COLLECTION, or active collection."
+  (setq collection (or collection (org-ilm--active-collection)))
   (cond-let*
     ([pqueue (alist-get collection org-ilm--pqueues)]
      pqueue)
@@ -1320,7 +1392,7 @@ This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
     (t
      (when (yes-or-no-p (format "No priority queue found for collection \"%s\". Create a new one?" collection))
        (let* ((pqueue (org-ilm--pqueue-new collection)))
-         (org-ilm-pqueue--write pqueue)
+         (org-ilm-ost--write pqueue)
          (setf (alist-get collection org-ilm--pqueues) pqueue))))))
 
 (defun org-ilm--pqueue-write-all ()
@@ -1329,113 +1401,44 @@ This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
   (dolist (pqueue-cons org-ilm--pqueues)
     (let ((pqueue (cdr pqueue-cons)))
       (when (org-ilm-pqueue-p pqueue)
-        (org-ilm-pqueue--write pqueue)))))
+        (org-ilm-ost--write pqueue)))))
 
-(defun org-ilm-pqueue (&optional collection)
-  "Return the priority queue of COLLECTION, or active collection."
-  (setq collection (or collection (org-ilm--active-collection)))
-  (org-ilm--pqueue collection))
+(defun org-ilm--pqueue-size (&optional collection)
+  (ost-size (org-ilm--pqueue collection)))
 
-(defun org-ilm-pqueue-parse-position (position &optional offset collection)
-  (org-ilm--ost-parse-position
-   (org-ilm-pqueue collection)
-   position offset))
+(defun org-ilm--pqueue-insert (id position &optional collection)
+  (org-ilm-pqueue--insert (org-ilm--pqueue collection) id position))
 
-(defun org-ilm-pqueue-parse-new-position (position &optional collection)
-  (org-ilm-pqueue-parse-position position 1 collection))
+(defun org-ilm--pqueue-remove (id &optional collection)
+  (org-ilm-pqueue--remove (org-ilm--pqueue collection) id))
 
-(defun org-ilm-pqueue-count (&optional collection)
-  (org-ilm-pqueue--count (org-ilm-pqueue collection)))
+(defun org-ilm--pqueue-select (position &optional collection)
+  (let* ((pqueue (org-ilm--pqueue collection))
+         (rank (car (ost-tree-position pqueue position))))
+    (ost-node-id (ost-select pqueue rank))))
 
-(defun org-ilm-pqueue-insert (id priority &optional collection)
-  (let* ((pqueue (org-ilm-pqueue collection))
-         (rank (car (org-ilm--ost-parse-position pqueue priority 1))))
-    (org-ilm-pqueue--insert pqueue id rank)))
+(defun org-ilm--pqueue-position (position &optional offset collection)
+  (ost-tree-position (org-ilm--pqueue collection) position offset))
 
-(defun org-ilm-pqueue-remove (id &optional collection)
-  (org-ilm-pqueue--remove (org-ilm-pqueue collection) id))
+(defun org-ilm--pqueue-position-new (position &optional collection)
+  (ost-tree-position (org-ilm--pqueue collection) position 1))
 
-(defun org-ilm-pqueue-select (priority &optional collection)
-  (let* ((pqueue (org-ilm-pqueue collection))
-         (rank (car (org-ilm--ost-parse-position pqueue priority))))
-    (ost-node-id
-     (ost-select (org-ilm-pqueue--ost (org-ilm-pqueue collection)) rank))))
+(defun org-ilm--pqueue-position-read (&optional numnew-or-id collection)
+  (org-ilm--ost-position-read (org-ilm--pqueue collection) numnew-or-id))
 
-(defun org-ilm-pqueue-read-rank (&optional numnew-or-id collection)
-  (car (org-ilm--ost-read-position (org-ilm-pqueue collection) numnew-or-id)))
-
-(defun org-ilm-pqueue-queue (&optional collection)
-  "Return `org-ilm-queue' from all elements in the priority queue.
-
-Because element headlines might be deleted, their ids will map to the id
-itself in `org-ilm-queue--elements', rather than `org-ilm-element'
-object."
-  (let* ((pqueue (org-ilm-pqueue collection))
-         (collection (org-ilm-pqueue--collection pqueue))
-         (queue (make-org-ilm-queue
-                 :name (format "Priority queue (%s)" collection)
-                 :collection collection
-                 :type 'pqueue))
-         (elements (org-ilm-query-collection #'org-ilm--queries-query-all collection)))
-
-    ;; First go through the elements that have been found and add them to ost
-    ;; and nodes map as normal.
-    (dolist (element elements)
-      (org-ilm-queue--insert
-       queue element
-       (car (org-ilm-pqueue-priority (org-ilm-element-id element) :pqueue pqueue))))
-
-    ;; For ids that have not been found, i.e. were not added in the previous
-    ;; loop, put them in the ost as normal, but in the node map use the id also
-    ;; as value.
-    (dolist (id (hash-table-keys (ost-tree-nodes (org-ilm-pqueue--ost pqueue))))
-      (unless (gethash id (org-ilm-queue--elements queue))
-        (puthash id id (org-ilm-queue--elements queue))
-        (ost-tree-insert (org-ilm-queue--ost queue)
-                         (car (org-ilm-pqueue-priority id :pqueue pqueue))
-                         id)))
-    
-    queue))
-
-(defun org-ilm-pqueue-select-position (&optional initial)
-  "Select a position in the priority queue interactively."
-  (org-ilm--queue-select-read (org-ilm-pqueue-queue) initial))
-
-(cl-defun org-ilm-pqueue-priority (id &key pqueue collection rank quantile nil-if-absent)
+(defun org-ilm--pqueue-priority (id &optional position nil-if-absent collection)
   "Position of the ID in PQUEUE as a cons (rank . quantile).
-With RANK or QUANTILE, set the new position in the queue, or insert there if not exists."
-  (cl-assert (not (and pqueue collection)))
-  (cl-assert (not (and rank quantile)))
-  (setq pqueue (or pqueue (org-ilm-pqueue collection)))
-  (cl-assert (org-ilm-pqueue-p pqueue))
-  (let* ((ost (org-ilm-pqueue--ost pqueue))
-         (node (ost-tree-node-by-id ost id)))
-    (cond
-     ;; Position specified: Move or add the element 
-     ((or rank quantile)
-      (unless rank
-        (setq rank (org-ilm--ost-quantile-to-rank pqueue quantile)))
-      (if node
-          (org-ilm-pqueue--move pqueue id rank)
-        (org-ilm-pqueue--insert pqueue id rank)))
-     ;; Retrieve position
-     (node
-      (let* ((rank (ost-rank ost id))
-             (quantile (org-ilm--ost-rank-to-quantile pqueue rank)))
-        (cons rank quantile)))
-     ;; Element not found in priority queue
-     (t
-      (when (and (not nil-if-absent)
-                 (yes-or-no-p 
-                  (format "Element \"%s\" not found in priority queue. Add it?" id)))
-        (if-let ((element (org-ilm-element-from-id id))
-                 (pqueue-collection (org-ilm-pqueue--collection pqueue)))
-            (if (eq (org-ilm-element-collection element) pqueue-collection)
-                (progn
-                  (org-ilm-pqueue--insert pqueue id (org-ilm-pqueue-read-rank))
-                  (org-ilm-pqueue-priority id :pqueue pqueue))
-              (error "Element \"%s\" not part of collection \"%s\"" id pqueue-collectoin))
-          (error "Org heading \"%s\" not an ilm element." id)))))))
+With POSITION, set the new position in the queue, or insert there if not exists."
+  (org-ilm-pqueue--priority (org-ilm--pqueue collection) id position nil-if-absent))
+
+(defun org-ilm--pqueue-queue (&optional collection)
+  "Return `org-ilm-queue' from all elements in the priority queue."
+  (org-ilm-pqueue--queue (org-ilm--pqueue collection)))
+
+(defun org-ilm--pqueue-select-read (&optional init-position)
+  "Select a position in the priority queue interactively."
+  (org-ilm--queue-select-read (org-ilm--pqueue-queue) init-position))
+
 
 ;;;; Logging
 
@@ -1701,9 +1704,9 @@ DUE is the new scheduled review timestamp."
                 ('card (org-ilm--ts-format-utc-date-maybe-time due))
                 ('material (org-ilm--ts-format-utc-date due)))))
   (let* ((timestamp (or (plist-get review-data :timestamp) (ts-now)))
-         (priority (org-ilm-pqueue-parse-new-position priority))
+         (priority (org-ilm--pqueue-position-new priority))
          (rank (car priority))
-         (size (org-ilm-pqueue-count))
+         (size (org-ilm--pqueue-size))
          (review-log (org-ilm--log-read)))
 
     (cl-assert (ts-p timestamp))
@@ -1751,41 +1754,33 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
 
 ;;;; Element
 
-;; TODO: Rather than storing data already stored in org-mem cache, load from it
-;; Eg org-ilm-element-level becomes a function that gets org-mem entry by id
+;; TODO: Rather than storing data already stored in org-mem cache, load from it.
+;; Eg org-ilm-element--level becomes a function that gets org-mem entry by id
 ;; and returns org-mem-entry-level
-(cl-defstruct org-ilm-element
+(cl-defstruct (org-ilm-element
+               (:conc-name org-ilm-element--))
   "A piece of knowledge."
   id collection state level pcookie rawval title tags sched
   type concepts registry media)
 
-(defun org-ilm-element-schedrel (element)
-  (when-let ((scheduled (org-ilm-element-sched element)))
+(defun org-ilm-element--schedrel (element)
+  "Return distance from now to scheduled date in days."
+  (when-let ((scheduled (org-ilm-element--sched element)))
     ;; convert from sec to days
     (/ (ts-diff (ts-now) scheduled) 86400)))
 
-(defun org-ilm-element-card-p (element)
-  (eq (org-ilm-element-type element) 'card))
-
+(defun org-ilm-element--card-p (element)
+  (eq (org-ilm-element--type element) 'card))
 
 (defvar org-ilm--assumed-collection nil
   "Assume any parsed element belongs to this collection.
-This is used in `org-ilm-element-at-point' and
+This is used in `org-ilm--element-at-point' and
 `org-ilm-query-collection' to save time figuring out what collection
 each element belongs to, as this takes some time in
 `org-ilm--collection-file'.")
 
-(defun org-ilm--org-mem-get-entry-ensured (&optional id)
-  ;; TODO Need something like (org-node-at-point-ensure) to force add it to
-  ;; cache if not already there, since it has to exist if it has an ID. Wait for
-  ;; https://github.com/meedstrom/org-mem/issues/31
-  (or (if id (org-mem-entry-by-id id) (org-node-at-point))
-      (progn
-        (org-ilm--org-with-point-at id
-          (org-mem-updater-ensure-id-node-at-point-known))
-        (org-mem-entry-by-id id))))
-
-(defun org-ilm-element-from-entry (entry)
+(defun org-ilm--element-from-entry (entry)
+  "Returns an `org-ilm-element' from an `org-mem-entry' object ENTRY."
   (cl-assert (org-mem-entry-p entry))
   (let* ((todo-keyword (org-mem-entry-todo-state entry))
          (type (org-ilm-type todo-keyword))
@@ -1811,92 +1806,69 @@ each element belongs to, as this takes some time in
        ;; cdr to get rid of headline priority in the car - redundant
        :concepts (org-ilm--concept-cache-gather id)))))
 
-(defun org-ilm-element-from-id (id)
+(defun org-ilm--element-by-id (id)
+  "Return `org-ilm-element' object of headline with ID."
   (when-let* ((entry (org-ilm--org-mem-get-entry-ensured id)))
-    (org-ilm-element-from-entry entry)))
+    (org-ilm--element-from-entry entry)))
 
-(defun org-ilm-element-at-point ()
-  "Parse org-ilm data of headline at point."
+(defun org-ilm--element-at-point ()
+  "Parse `org-ilm-element' of headline at point."
   (when-let* ((entry (org-ilm--org-mem-get-entry-ensured)))
-    (org-ilm-element-from-entry entry)))
+    (org-ilm--element-from-entry entry)))
 
-(defun org-ilm-element-from-context ()
+(defun org-ilm--element-from-context ()
+  "Return `org-ilm-element' associated with whatever point is at.
+
+If we are in...
+- Collection: Return element at point
+- Attachment: Return this attachment's element
+- Queue: Return element at point in queue."
   (let ((location (org-ilm--where-am-i)))
     (pcase (car location)
       ('collection
-       (condition-case-unless-debug err
-           (org-ilm-element-at-point)
-         (error nil)))
+       (org-ilm--element-at-point))
       ('attachment
-       (org-ilm--org-with-point-at (nth 1 location)
-         (org-ilm-element-at-point)))
+       (org-ilm--element-by-id (nth 1 location)))
       ('queue
-       (org-ilm--org-with-point-at (nth 2 location)
-         (org-ilm-element-at-point))))))
+       (org-ilm--element-by-id (nth 2 location))))))
 
-(defun org-ilm-element-entry (element)
-  (org-mem-entry-by-id (org-ilm-element-id element)))
+(defun org-ilm-element--entry (element)
+  "Return `org-mem-entry' of ELEMENT."
+  (org-mem-entry-by-id (org-ilm-element--id element)))
 
-(defmacro org-ilm-element-with-point-at (element &rest body)
+(defmacro org-ilm--element-with-point-at (element &rest body)
+  "Evaluate BODY with point at ELEMENT's headline."
   (declare (debug (body)) (indent 1))
-  `(org-ilm--org-with-point-at (org-ilm-element-id ,element)
+  `(org-ilm--org-with-point-at (org-ilm-element--id ,element)
      ,@body))
 
-(defmacro org-ilm-element-with-point-at-registry (element &rest body)
+(defmacro org-ilm--element-with-point-at-registry (element &rest body)
+  "Evaluate BODY with point at ELEMENT's registry headline."
   (declare (debug (body)) (indent 1))
-  `(org-ilm--org-with-point-at (org-ilm-element-registry ,element)
+  `(org-ilm--org-with-point-at (org-ilm-element--registry ,element)
      ,@body))
 
-(defun org-ilm-element-is-card (element)
-  (cl-assert (org-ilm-element-p element))
-  (eq 'card (org-ilm-element-type element)))
-
-(defun org-ilm-element-last-review (element-or-id)
-  (org-ilm--org-with-point-at
-      (if (org-ilm-element-p element-or-id)
-          (org-ilm-element-id element-or-id)
-        element-or-id)
+(defun org-ilm--element-last-review (element-thing)
+  (org-ilm--org-with-point-at (org-ilm--thing-id element-thing)
     (when-let* ((review-log (org-ilm--log-read))
                 (last-review (car (last review-log))))
       (ts-parse (org-ilm-log-review-timestamp last-review)))))
 
-(defun org-ilm-element-interval (element)
+(defun org-ilm-element--interval (element)
   "Interval in days."
-  (when-let ((last-review (org-ilm-element-last-review element))
-             (sched (org-ilm-element-sched element)))
+  (when-let ((last-review (org-ilm--element-last-review element))
+             (sched (org-ilm-element--sched element)))
     ;; Seconds to days
     (/ (ts-diff last-review sched) 86400)))
-    
-(cl-defun org-ilm--element-by-id (org-id &key if-matches-query)
-  "Return an element by their org id."
-  (cond
-   ((null if-matches-query))
-   ;; Is a function - fine
-   ((and (symbolp if-matches-query) (fboundp if-matches-query)))
-   ((eq if-matches-query t)
-    (setq if-matches-query (plist-get org-ilm-queue :query))
-    (unless if-matches-query
-      (error "No query found"))))
-  
-  (save-excursion
-    (org-ilm--org-with-point-at org-id
-      (pcase if-matches-query
-        (t
-         (save-restriction
-           (org-ilm--org-narrow-to-header)
-           (car (org-ilm-query-buffer
-                 if-matches-query
-                 (current-buffer)
-                 t))))
-        (_ (org-ilm-element-at-point))))))
 
 ;;;;; Querying
 
-(defun org-ilm--element-children (id &optional return-type include-self all-descendants more-query)
-  "Return child elements of element with ID."
+(defun org-ilm--element-query-children (element-thing &optional return-type include-self all-descendants more-query)
+  "Return child elements of element."
   (cl-assert (member return-type '(entry element headline)))
-  (let ((marker (org-id-find id 'marker))
-        (parent (if all-descendants 'ancestors 'parent)))
+  (let* ((id (org-ilm--thing-id element-thing))
+         (marker (org-id-find id 'marker))
+         (parent (if all-descendants 'ancestors 'parent)))
     (unless marker
       (error "No entry with ID %s" id))
     (org-ql-select (list (marker-buffer marker))
@@ -1913,85 +1885,70 @@ each element belongs to, as this takes some time in
       (pcase (or return-type 'headline)
         ('headline) ;; default: org headline element
         ('entry #'org-node-at-point)
-        ('element #'org-ilm-element-at-point)
+        ('element #'org-ilm--element-at-point)
         (_ (error "Unrecognized return type"))))))
 
 ;;;;; Priority
 
-(cl-defun org-ilm-element-priority (element &key rank quantile)
-  "Return (rank . quantile) of ELEMENT in the priority queue.
-With RANK or QUANTILE, set the new position in the queue.
+(defun org-ilm-element--pqueue (element)
+  (org-ilm--pqueue (org-ilm-element--collection element)))
+
+(cl-defun org-ilm-element--priority (element &key position)
+  "Return (rank . quantile) of ELEMENT in its priority queue.
+With POSITION given, set the new position in the queue.
 ELEMENT may be nil, in which case try to read it from point."
-  (cl-assert (not (and rank quantile)))
-  (unless element (setq element (org-ilm-element-from-context)))
+  (unless element (setq element (org-ilm--element-from-context)))
   (cl-assert (org-ilm-element-p element))
-  (org-ilm-pqueue-priority
-   (org-ilm-element-id element)
-   :collection (org-ilm-element-collection element)
-   :rank rank :quantile quantile))
+  (org-ilm-pqueue--priority
+   (org-ilm-element--pqueue element)
+   (org-ilm-element--id element)
+   position))
 
-(defun org-ilm-element-pqueue (element)
-  (org-ilm-pqueue (org-ilm-element-collection element)))
-
-(defun org-ilm-element-prank (element)
+(defun org-ilm-element--prank (element)
   "Position of ELEMENT in the priority queue."
-  (car (org-ilm-element-priority element)))
+  (car (org-ilm-element--priority element)))
 
-(defun org-ilm-element-pquantile (element)
+(defun org-ilm-element--pquantile (element)
   "Quantile of ELEMENT in the priority queue."
-  (cdr (org-ilm-element-priority element)))
+  (cdr (org-ilm-element--priority element)))
 
-(defun org-ilm-element-priority-formatted (element)
-  (org-ilm--ost-format-position
-   (org-ilm-element-pqueue element)
-   (org-ilm-element-priority element)))
+(defun org-ilm-element--priority-formatted (element)
+  (org-ilm-ost--position-format
+   (org-ilm-element--pqueue element)
+   (org-ilm-element--priority element)))
 
 ;;;;; Actions
 
 (defun org-ilm-element-set-schedule (element)
   "Set the schedule of an ilm element."
   (interactive
-   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (org-ilm-element-with-point-at element
+   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
+  (org-ilm--element-with-point-at element
     (call-interactively #'org-ilm-schedule)))
-
-(defun org-ilm-element-set-priority--cookie (element)
-  "Set the priority of an ilm element."
-  (interactive
-   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (org-ilm-element-with-point-at element
-    (let ((min org-priority-highest)
-          (max org-priority-lowest)
-          priority)
-      (while (null priority)
-        (let ((number (read-number (format "Priority (%s-%s): " min max) org-priority-default)))
-          (when (<= min number max)
-            (setq priority number))))
-      (org-ilm--org-priority-set priority))))
 
 (defun org-ilm-element-set-priority (element)
   "Set the priority of an ilm element."
   (interactive
-   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
-  (let ((position (org-ilm-pqueue-select-position (org-ilm-element-priority element))))
-    (org-ilm-element-priority element :rank (car position))))
+   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
+  (let ((position (org-ilm--pqueue-select-read (org-ilm-element--priority element))))
+    (org-ilm-element--priority element :position position)))
 
 (defun org-ilm-element-done (element &optional duration timestamp)
   "Apply done on ilm element at point."
   (interactive
-   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
+   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
   (cl-assert (org-ilm-element-p element) nil "Not an org-ilm element")
 
   (when (or (not (called-interactively-p))
             (yes-or-no-p "Apply done on element?"))
     (atomic-change-group
-      (org-ilm-element-with-point-at element
+      (org-ilm--element-with-point-at element
         ;; Log done state in drawer
         (org-ilm--log-log
-         (org-ilm-element-type element)
-         (org-ilm-element-priority element)
+         (org-ilm-element--type element)
+         (org-ilm-element--priority element)
          nil ;; due
-         (org-ilm-element-sched element)
+         (org-ilm-element--sched element)
          :state :done
          :duration duration :timestamp timestamp)
 
@@ -2002,8 +1959,8 @@ ELEMENT may be nil, in which case try to read it from point."
         (org-todo "DONE")
         
         ;; Remove from priority queue
-        (org-ilm-pqueue-remove (org-ilm-element-id element)
-                               (org-ilm-element-collection element))
+        (org-ilm--pqueue-remove (org-ilm-element--id element)
+                                (org-ilm-element--collection element))
 
         ;; TODO Go through all queues and remove from their ost
 
@@ -2013,7 +1970,7 @@ ELEMENT may be nil, in which case try to read it from point."
       ;; When this is the element being reviewed, move on to review the next
       ;; element in the queue.
       (when (and (org-ilm-reviewing-p)
-                 (equal (plist-get org-ilm--review-data :id) (org-ilm-element-id element)))
+                 (equal (plist-get org-ilm--review-data :id) (org-ilm-element--id element)))
         (let ((org-ilm--review-update-schedule nil))
           (org-ilm--review-next)))
       )))
@@ -2021,7 +1978,7 @@ ELEMENT may be nil, in which case try to read it from point."
 (defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
   (interactive
-   (list (or org-ilm--element-transient-element (org-ilm-element-from-context))))
+   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
   (cl-assert (org-ilm-element-p element) nil "Not an ilm element")
 
   (when (called-interactively-p)
@@ -2029,7 +1986,7 @@ ELEMENT may be nil, in which case try to read it from point."
     (unless (yes-or-no-p "Delete element?")
       (pop-mark)
       (user-error "Abort deletion")))
-    
+  
   (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
     (cond-let*
       ((org-entry-get nil "DIR")
@@ -2043,15 +2000,14 @@ ELEMENT may be nil, in which case try to read it from point."
                    (file-name-concat
                     (org-attach-dir)
                     (concat (org-element-property :ID headline) "*"))))
-                (org-ilm--element-children
-                 (org-ilm-element-id element) 'headline t t)))]
+                (org-ilm--element-query-children element 'headline t t)))]
        (when (yes-or-no-p (format "Delete element %s attachtment(s)?" (length attachments)))
          (dolist (file attachments)
            (delete-file file))))))
-     
+  
   (org-ilm--org-delete-headline)
-  (org-ilm-pqueue-remove (org-ilm-element-id element)
-                         (org-ilm-element-collection element)))
+  (org-ilm--pqueue-remove (org-ilm-element--id element)
+                          (org-ilm-element--collection element)))
 
 ;;;;; Transient
 
@@ -2064,12 +2020,12 @@ ELEMENT may be nil, in which case try to read it from point."
     (concat
      "Schedule "
      (when-let* ((element org-ilm--element-transient-element)
-                 (sched (org-ilm-element-sched element)))
+                 (sched (org-ilm-element--sched element)))
        (propertize (ts-format "%Y-%m-%d" sched) 'face 'transient-value))))
   :transient 'transient--do-call
   (interactive)
   (call-interactively #'org-ilm-element-set-schedule)
-  (setq org-ilm--element-transient-element (org-ilm-element-from-context)))
+  (setq org-ilm--element-transient-element (org-ilm--element-from-context)))
 
 (transient-define-suffix org-ilm--element-transient-priority ()
   :key "p"
@@ -2078,15 +2034,15 @@ ELEMENT may be nil, in which case try to read it from point."
     (concat
      "Priority "
      (when-let* ((element org-ilm--element-transient-element)
-                 (priority (org-ilm-element-priority-formatted element)))
+                 (priority (org-ilm-element--priority-formatted element)))
        (propertize priority 'face 'transient-value))))
   :transient 'transient--do-call
   (interactive)
   (call-interactively #'org-ilm-element-set-priority)
-  (setq org-ilm--element-transient-element (org-ilm-element-from-context)))
+  (setq org-ilm--element-transient-element (org-ilm--element-from-context)))
 
 (defun org-ilm--element-transient-registry-attach-read ()
-  (org-ilm-element-with-point-at-registry
+  (org-ilm--element-with-point-at-registry
       org-ilm--element-transient-element
     (when-let* ((attach-dir (org-attach-dir))
                 (attachments (org-attach-file-list attach-dir)))
@@ -2118,12 +2074,12 @@ ELEMENT may be nil, in which case try to read it from point."
       (interactive)
       (let* ((args (transient-args transient-current-command))
              (attachment (transient-arg-value "--attachment=" args))
-             (attach-dir (org-ilm-element-with-point-at-registry
+             (attach-dir (org-ilm--element-with-point-at-registry
                              org-ilm--element-transient-element
                            (org-attach-dir)))
              (method (transient-arg-value "--method=" args))
              (main (transient-arg-value "--main" args)))
-        (org-ilm-element-with-point-at org-ilm--element-transient-element
+        (org-ilm--element-with-point-at org-ilm--element-transient-element
           (org-attach-attach (expand-file-name attachment attach-dir) nil (intern method))
           (when main
             (rename-file
@@ -2141,14 +2097,14 @@ ELEMENT may be nil, in which case try to read it from point."
   :refresh-suffixes t
   [:description
    (lambda ()
-     (pcase (org-ilm-element-type org-ilm--element-transient-element)
+     (pcase (org-ilm-element--type org-ilm--element-transient-element)
        ('material "Material")
        ('card "Card")
        (_ "Element")))
    (:info*
     (lambda ()
       (propertize
-       (org-ilm-element-title org-ilm--element-transient-element)
+       (org-ilm-element--title org-ilm--element-transient-element)
        'face 'italic)))
    (:info "")
    (org-ilm--element-transient-schedule)
@@ -2156,7 +2112,7 @@ ELEMENT may be nil, in which case try to read it from point."
    ("n" "Concepts..."
     (lambda ()
       (interactive)
-      (org-ilm-element-with-point-at org-ilm--element-transient-element
+      (org-ilm--element-with-point-at org-ilm--element-transient-element
         (org-ilm-concepts)))
     :transient t)
    ]
@@ -2190,43 +2146,43 @@ ELEMENT may be nil, in which case try to read it from point."
     ("ao" "Open"
      (lambda ()
        (interactive)
-       (org-ilm-element-with-point-at org-ilm--element-transient-element
+       (org-ilm--element-with-point-at org-ilm--element-transient-element
          (org-ilm-open-attachment))))
     ("ad" "Dired"
      (lambda ()
        (interactive)
        (let* ((element org-ilm--element-transient-element)
-              (id (org-ilm-element-id element))
+              (id (org-ilm-element--id element))
               attach-dir)
-         (org-ilm-element-with-point-at element
+         (org-ilm--element-with-point-at element
            (setq attach-dir (org-attach-dir)))
          (unless attach-dir (user-error "No attachment directory"))
          (find-name-dired attach-dir (concat id "*")))))
     ]
 
    ["Registry"
-    :if (lambda () (org-ilm-element-registry org-ilm--element-transient-element))
+    :if (lambda () (org-ilm-element--registry org-ilm--element-transient-element))
     ("gj" "Jump"
      (lambda ()
        (interactive)
-       (org-node-goto-id (org-ilm-element-registry org-ilm--element-transient-element))))
+       (org-node-goto-id (org-ilm-element--registry org-ilm--element-transient-element))))
     ("ga" "Attach..." org-ilm--element-transient-registry-attach
      :inapt-if-not
      (lambda ()
        (org-ilm--org-with-point-at
-           (org-ilm-element-registry org-ilm--element-transient-element)
+           (org-ilm-element--registry org-ilm--element-transient-element)
          (org-attach-dir))))
     ]
 
    ["Media"
-    :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
+    :if (lambda () (org-ilm-element--media org-ilm--element-transient-element))
     ("ms" "Set"
      (lambda ()
        (interactive)
        (let* ((element org-ilm--element-transient-element)
-              (id (org-ilm-element-id element))
+              (id (org-ilm-element--id element))
               (entry (org-mem-entry-by-id id))
-              (registry-entry (org-mem-entry-by-id (org-ilm-element-registry element)))
+              (registry-entry (org-mem-entry-by-id (org-ilm-element--registry element)))
               (element-medias (org-ilm--entry-media-sources entry))
               (registry-medias (org-ilm--entry-media-sources registry-entry))
               (choice (consult--multi
@@ -2253,7 +2209,7 @@ ELEMENT may be nil, in which case try to read it from point."
        (interactive)
        (org-ilm--media-open
         (org-ilm-element-entry org-ilm--element-transient-element)))
-     :if (lambda () (org-ilm-element-media org-ilm--element-transient-element)))
+     :if (lambda () (org-ilm-element--media org-ilm--element-transient-element)))
     ("mr" "Range"
      (lambda ()
        (interactive)
@@ -2266,12 +2222,12 @@ ELEMENT may be nil, in which case try to read it from point."
                                         (string-join (cdr parts) "-")
                                       (nth 1 parts)))))
               (source (car parts)))
-         (org-ilm--org-with-point-at (org-ilm-element-id element)
+         (org-ilm--org-with-point-at (org-ilm-element--id element)
            (org-entry-put nil "ILM_MEDIA+" range)
            (save-buffer)
            (org-mem-updater-ensure-id-node-at-point-known)
-           (setq org-ilm--element-transient-element (org-ilm-element-at-point)))))
-     :if (lambda () (org-ilm-element-media org-ilm--element-transient-element))
+           (setq org-ilm--element-transient-element (org-ilm--element-at-point)))))
+     :if (lambda () (org-ilm-element--media org-ilm--element-transient-element))
      :transient transient--do-call)
     ]
    ["Queue"
@@ -2280,7 +2236,7 @@ ELEMENT may be nil, in which case try to read it from point."
        (interactive)
        (let* ((element org-ilm--element-transient-element)
               (queue-buffer (org-ilm--queue-completing-read
-                             (org-ilm-element-title element))))
+                             (org-ilm-element--title element))))
          (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
          (with-current-buffer (switch-to-buffer queue-buffer)
            (org-ilm-queue-revert)))))
@@ -2293,7 +2249,7 @@ ELEMENT may be nil, in which case try to read it from point."
      (lambda ()
        (interactive)
        (let* ((element org-ilm--element-transient-element)
-              (children (org-ilm--element-children (org-ilm-element-id element) 'headline t t))
+              (children (org-ilm--element-query-children (org-ilm-element--id element) 'headline t t))
               (queue-buffer (org-ilm--queue-completing-read nil t)))
          (with-current-buffer queue-buffer
            (dolist (el children)
@@ -2311,16 +2267,16 @@ ELEMENT may be nil, in which case try to read it from point."
     ("o" "Open"
      (lambda ()
        (interactive)
-       (org-ilm--org-goto-id (org-ilm-element-id org-ilm--element-transient-element))))
+       (org-ilm--org-goto-id (org-ilm-element--id org-ilm--element-transient-element))))
     ("d" "Done"
      (lambda ()
        (interactive)
-       (org-ilm-element-with-point-at org-ilm--element-transient-element
+       (org-ilm--element-with-point-at org-ilm--element-transient-element
          (call-interactively #'org-ilm-element-done))))
     ("k" "Delete"
      (lambda ()
        (interactive)
-       (org-ilm-element-with-point-at org-ilm--element-transient-element
+       (org-ilm--element-with-point-at org-ilm--element-transient-element
          (call-interactively #'org-ilm-element-delete))))
     ]
    [
@@ -2329,13 +2285,13 @@ ELEMENT may be nil, in which case try to read it from point."
        (interactive)
        (org-ilm--org-new
         'card
-        (org-ilm-element-id org-ilm--element-transient-element))))
+        (org-ilm-element--id org-ilm--element-transient-element))))
     ("M" "New material"
      (lambda ()
        (interactive)
        (org-ilm--capture-capture
         'material
-        :parent (org-ilm-element-id org-ilm--element-transient-element))))
+        :parent (org-ilm-element--id org-ilm--element-transient-element))))
     ]
    ]
   )
@@ -2343,11 +2299,11 @@ ELEMENT may be nil, in which case try to read it from point."
 (defun org-ilm-element-actions (&optional arg id)
   "Open menu to apply an action on an element."
   (interactive "P")
-  (let ((element (if id (org-ilm-element-from-id id) (org-ilm-element-from-context))))
+  (let ((element (if id (org-ilm--element-by-id id) (org-ilm--element-from-context))))
     (cond
      ((null element)
       (user-error "No ilm element!"))
-     ((eq (org-ilm-element-type element) 'concept)
+     ((eq (org-ilm-element--type element) 'concept)
       (user-error "Element actions not available for concepts"))
      (t
       (setq org-ilm--element-transient-element element)
@@ -2427,9 +2383,9 @@ This will update the log table and the headline scheduled date."
     (let* ((review-log (org-ilm--log-read))
            (last-review (car (last review-log))))
       (cl-assert last-review nil "Element missing log")
-      (let* ((element (org-ilm-element-at-point))
-             (scheduled (org-ilm-element-sched element))
-             (priority (org-ilm-element-priority element))
+      (let* ((element (org-ilm--element-at-point))
+             (scheduled (org-ilm-element--sched element))
+             (priority (org-ilm-element--priority element))
              ;; TODO Inherit from concepts like fsrs retention?
              (multiplier (when-let ((m (org-entry-get nil org-ilm-property-multiplier)))
                            (setq m (string-to-number m))
@@ -2518,7 +2474,7 @@ FSRS default: t"
 (defun org-ilm--card-element-scheduler (element)
   "Return the FSRS scheduler with parameters based on ELEMENT and its
 concept properties."
-  (cl-assert (org-ilm-element-card-p element) nil "Element not a card")
+  (cl-assert (org-ilm-element--card-p element) nil "Element not a card")
   (let ((retention (or
                     (when-let ((r (org-entry-get nil org-ilm-property-desired-retention)))
                       (string-to-number r))
@@ -2530,7 +2486,7 @@ concept properties."
                                          (message "Detected invalid retention property: %s" r)
                                          nil)))
                                    (org-ilm--concept-property-or-inherited
-                                    (org-ilm-element-id element)
+                                    (org-ilm-element--id element)
                                     org-ilm-property-desired-retention))))
                       (apply #'org-ilm--mean r))
                     org-ilm-card-fsrs-desired-retention)))
@@ -2549,13 +2505,13 @@ concept properties."
   "Rate a card element with RATING, update log and scheduled date.
 If ORG-ID ommitted, assume point at card headline."
   (org-ilm--org-with-point-at org-id
-    (let ((element (org-ilm-element-at-point)))
+    (let ((element (org-ilm--element-at-point)))
       (cl-assert element nil "Not an ilm element")
-      (cl-assert (org-ilm-element-card-p element) nil "Element not a card")
+      (cl-assert (org-ilm-element--card-p element) nil "Element not a card")
       (atomic-change-group
         (let ((review (org-ilm--card-log-review
-                       (org-ilm-element-priority element)
-                       (org-ilm-element-sched element)
+                       (org-ilm-element--priority element)
+                       (org-ilm-element--sched element)
                        rating
                        (org-ilm--card-element-scheduler element)
                        timestamp duration)))
@@ -3052,18 +3008,19 @@ The callback ON-ABORT is called when capture is cancelled."
     ;; Target, parent id, and collection
     (cond
      ((stringp parent)
-      ;; If no priority given, decide based on parent
-      (unless priority
-        (when-let* ((parent-p (org-ilm-pqueue-priority parent :nil-if-absent t))
-                    (p (org-ilm--priority-calculate-child-priority parent-p type)))
-          (setq priority p)))
-
       ;; Determine collection. Note that TARGET is ignored as PARENT specifies
       ;; this.
       (if-let* ((file (org-id-find-id-file parent))
                 (col (org-ilm--collection-file file)))
           (setq collection col)
-        (error "Collection not found for PARENT %s" parent)))
+        (error "Collection not found for PARENT %s" parent))
+
+      ;; If no priority given, decide based on parent
+      (unless priority
+        (when-let* ((parent-p (org-ilm--pqueue-priority parent nil 'nil-if-absent collection))
+                    (p (org-ilm--priority-calculate-child-priority parent-p type)))
+          (setq priority p)))
+      )
      (parent
       (error "PARENT must be org-id string"))
      (target
@@ -3086,8 +3043,8 @@ The callback ON-ABORT is called when capture is cancelled."
     ;; Priority. We always need a priority value.
     (setq priority
           (if priority
-              (org-ilm-pqueue-parse-new-position priority)
-            (org-ilm-pqueue-select-position)))
+              (org-ilm--pqueue-position-new priority)
+            (org-ilm--pqueue-select-read)))
 
     ;; Schedule date. Always needed.
     (setq scheduled
@@ -3199,7 +3156,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
              ;; Add id to priority queue. An abort is detected in
              ;; `after-finalize' to remove the id.
-             (org-ilm-pqueue-insert id priority)
+             (org-ilm--pqueue-insert id priority)
 
              ;; Attachment extension if specified
              (when-let ((ext (org-ilm-capture-ext capture)))
@@ -3269,7 +3226,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              ;; `org-capture-kill'.
              (if org-note-abort
                  (progn
-                   (org-ilm-pqueue-remove id)
+                   (org-ilm--pqueue-remove id)
                    (when-let ((on-abort (org-ilm-capture-on-abort capture)))
                      (funcall on-abort)))
                (when org-ilm-update-org-mem-after-capture
@@ -3378,7 +3335,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
    (:info
     (lambda ()
       (let ((rank (nth 1 (org-ilm--capture-transient-values))))
-        (org-ilm--ost-format-position (org-ilm-pqueue) rank))))
+        (org-ilm-ost--position-format (org-ilm--pqueue) rank))))
    ("s" "Scheduled" "--scheduled="
     :transient transient--do-call
     :reader
@@ -4047,12 +4004,13 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
 REGION: Note that if in virtual view with region, already exports that region."
   (org-ilm--pdf-mode-assert)
   (let ((region (or region '(0 0 1 1)))
+        (page (or page (org-ilm--pdf-page-normalized)))
         (img-buffer (get-buffer-create "*Org Ilm PDF Image*"))
         img-type img-ext img-path)
     ;; TODO Supports combining multiple regions as one image, might be nice for
     ;; region export
     (pdf-view-extract-region-image
-     (list region) page nil img-buffer 'no-display)
+     (list page region) page nil img-buffer 'no-display)
     (with-current-buffer img-buffer
       (setq img-type (image-type-from-buffer)
             img-ext (symbol-name img-type) ;; TODO ???
@@ -4235,7 +4193,7 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
          (id (nth 0 data))
          (headline (nth 4 data))
          (include-self (eq (org-ilm-type headline) 'card))
-         (captures (org-ilm--element-children
+         (captures (org-ilm--element-query-children
                     id 'headline include-self nil '((property "ILM_PDF")))))
     (seq-keep
      (lambda (headline)
@@ -4580,6 +4538,7 @@ attachment from its highlight."
   (when-let* ((el-type (ignore-errors (org-ilm-type)))
               (pdf-range (org-entry-get nil "ILM_PDF"))
               (attachment (org-ilm--attachment-find-ancestor "pdf"))
+              (attach-dir (file-name-directory attachment))
               (spec (org-ilm--pdf-parse-spec
                      (org-ilm--pdf-range-from-string pdf-range)
                      attachment))
@@ -4602,9 +4561,9 @@ attachment from its highlight."
                       (plist-get spec :begin-page)
                       attachment)))))
 
-    (org-ilm--pdf-open-specs (list spec) buffer-name no-region)))
+    (org-ilm--pdf-open-specs (list spec) buffer-name attach-dir no-region)))
 
-(defun org-ilm--pdf-open-specs (specs buffer-name &optional no-region)
+(defun org-ilm--pdf-open-specs (specs buffer-name attach-dir &optional no-region)
   "Open a virtual pdf buffer with the given SPECS.
 With NO-REGION non-nil, view entire page instead of zooming to specified region.
 
@@ -4616,6 +4575,12 @@ TODO Handle two column layout"
   ;; TODO Maybe there is a way to make virtual-edit-mode invisible so it appears
   ;; less janky.
   (pop-to-buffer (get-buffer-create buffer-name))
+  
+  ;; Since buffer is not associated with a file, default directory is same as
+  ;; whereever we opened the attachment from. Set it to attach dir of original
+  ;; pdf instead.
+  (setq-local default-directory attach-dir)
+  
   (pdf-virtual-edit-mode)
   (erase-buffer)
   (insert ";; %VPDF 1.0\n\n")  
@@ -4734,7 +4699,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
   "Convert current PDF buffer into FORMAT."
   (cl-assert (member format '(org text image)))
   (pcase-let* ((pdf-buffer (current-buffer))
-               (`(,org-id ,collection) (org-ilm--attachment-data))
+               (`(,org-id ,collection, collection-file) (org-ilm--attachment-data))
                (headline (org-ilm--org-headline-element-from-id org-id))
                (num-pages (pdf-info-number-of-pages))
                ;; This will only return if in virtual page
@@ -4743,10 +4708,10 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (attach-dir (file-name-directory pdf-path))
                (out-path-format (expand-file-name (concat org-id ".%s") attach-dir))
                (on-success
-                (lambda ()
+                (lambda (ext)
                   (when as-main-p
                     (org-with-point-at headline
-                      (org-entry-put nil "ILM_EXT" "org"))))))
+                      (org-entry-put nil "ILM_EXT" ext))))))
 
     (pcase format
       ('text
@@ -4754,11 +4719,11 @@ See also `org-ilm-pdf-convert-org-respect-area'."
          (dolist (page (number-sequence 1 num-pages))
            (insert (pdf-info-gettext page '(0 0 1 1) nil pdf-buffer)))
          (write-region (point-min) (point-max) (format out-path-format "org")))
-       (funcall on-success))
+       (funcall on-success "org"))
       ('image
        ;; Note: Will convert current page only
-       (org-ilm--pdf-image-export org-id :dir attach-dir)
-       (funcall on-success))
+       (let ((img-path (org-ilm--pdf-image-export org-id :dir attach-dir)))
+         (funcall on-success (file-name-extension img-path))))
       ('org
        ;; Decide on whether to convert just the virtual pdf region or the entire
        ;; page.
@@ -4778,7 +4743,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                     (1- (org-ilm--pdf-page-normalized num-pages))))
             org-id
             :on-success
-            (lambda (proc buf id) (funcall on-success)))))))))
+            (lambda (proc buf id) (funcall on-success "org")))))))))
 
 ;;;;; Extract
 
@@ -5240,11 +5205,11 @@ This is used to keep track of changes in priority and scheduling.")
 (defun org-ilm--attachment-prepare-buffer ()
   "Prepare ilm attachment buffers."
   (when-let ((data (org-ilm--attachment-data)))
-    (pcase-let* ((`(,id ,collection) data)
-                 (element (org-ilm-element-from-id id))
+    (pcase-let* ((`(,id ,collection, collection-file) data)
+                 (element (org-ilm--element-by-id id))
                  (entry (org-mem-entry-by-id id))
                  (registry-entry (org-mem-entry-by-id
-                                  (org-ilm-element-registry element))))
+                                  (org-ilm-element--registry element))))
 
       ;; Prepare the buffer local data object which contains info about the
       ;; attachment as well as data used to update the priority.
@@ -5252,7 +5217,7 @@ This is used to keep track of changes in priority and scheduling.")
        org-ilm--data
        (list :id id
              :collection collection
-             ;; TODO porbably remove and just use `org-ilm-element-from-id' to
+             ;; TODO porbably remove and just use `org-ilm--element-by-id' to
              ;; get most recent
              :element element
              ;; :beta (org-ilm--priority-to-beta
@@ -5275,6 +5240,9 @@ This is used to keep track of changes in priority and scheduling.")
                (save-restriction
                  (widen)
                  (- (point-max) (point-min)))))
+        ('pdf-virtual-view-mode
+         (setq-local default-directory "")
+         )
         )
       )))
 
@@ -5372,7 +5340,7 @@ missing, something else is wrong, so throw an error."
   "Open menu with actions to be applied on current element attachment."
   (interactive)
   (if (eq (car (org-ilm--where-am-i)) 'attachment)
-      (if-let ((element (org-ilm-element-from-context)))
+      (if-let ((element (org-ilm--element-from-context)))
           (org-ilm--attachment-transient element)
         (user-error "Element not found"))
     (user-error "Not in an element attachment!")))
@@ -5382,7 +5350,7 @@ missing, something else is wrong, so throw an error."
    (:info*
     (lambda ()
       (propertize
-       (org-ilm-element-title (transient-scope))
+       (org-ilm-element--title (transient-scope))
        'face 'italic)))
    ]
   
@@ -5401,7 +5369,7 @@ missing, something else is wrong, so throw an error."
      :inapt-if-not-mode (org-mode pdf-view-mode pdf-virtual-view-mode))
     ]
    ["Media"
-    :if (lambda () (org-ilm-element-media (transient-scope)))
+    :if (lambda () (org-ilm-element--media (transient-scope)))
     ("ms" "Insert subtitles"
      (lambda ()
        (interactive)
@@ -5607,9 +5575,9 @@ the context frame."
 (defun org-ilm-context-new ()
   "Create a new context file for the element at point."
   (interactive)
-  (if-let* ((element (org-ilm-element-from-context))
-            (id (org-ilm-element-id element))
-            (attach-dir (org-ilm-element-with-point-at element
+  (if-let* ((element (org-ilm--element-from-context))
+            (id (org-ilm-element--id element))
+            (attach-dir (org-ilm--element-with-point-at element
                           (expand-file-name (org-attach-dir-get-create))))
             (entry (org-mem-entry-by-id id))
             (ancestory (seq-keep
@@ -5880,7 +5848,7 @@ the context frame."
 (defun org-ilm-element-delete-embark (target)
   (let ((element (get-text-property 0 :element target))
         (ov (get-text-property 0 :ov target)))
-    (org-ilm-element-with-point-at element
+    (org-ilm--element-with-point-at element
       (call-interactively #'org-ilm-element-delete element))
     (save-excursion
       (goto-char (ov-beg ov))
@@ -5909,11 +5877,11 @@ the context frame."
     (seq-keep
      (lambda (ov)
        (when-let* ((id (overlay-get ov 'org-ilm-id))
-                   (element (ignore-errors (org-ilm-element-from-id id)))
+                   (element (ignore-errors (org-ilm--element-by-id id)))
                    (target (concat
-                            (org-ilm--org-add-todo-face (org-ilm-element-state element))
+                            (org-ilm--org-add-todo-face (org-ilm-element--state element))
                             ": "
-                            (org-ilm-element-title element)))
+                            (org-ilm-element--title element)))
                    (beg (ov-beg ov))
                    (end (ov-end ov)))
          (add-text-properties 0 (length target) (list :id id :ov ov :element element) target)
@@ -5942,22 +5910,32 @@ the context frame."
 ;; + Prefer query over custom predicate
 ;; + Use regex preambles to quickly filter candidates
 
-(defun org-ilm-query-collection (query collection)
-  "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results."
+(defun org-ilm-query-collection (query collection &optional hash-table-p)
+  "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results.
+With HASH-TABLE-P, place each element in a hash table with ID as key."
   (unless (functionp query)
     (setq query (cdr (assoc query org-ilm-queries))))
-  (let ((files (org-ilm--collection-files collection))
+  (let ((query (funcall query))
+        (files (org-ilm--collection-files collection))
         (org-ilm--assumed-collection collection))
-    (org-ql-select files
-      (funcall query)
-      ;; TODO Pass as sexp so that org-ql can byte compile it
-      :action #'org-ilm-element-at-point)))
+    ;; TODO Pass action as sexp so that org-ql can byte compile it
+    (if hash-table-p
+        (let ((h (make-hash-table :test #'equal)))
+          (org-ql-select files query
+            :action (lambda ()
+                      (when-let* ((el (org-ilm--element-at-point))
+                                  (id (org-ilm-element--id el)))
+                        (puthash id el h))))
+          h)
+      (org-ql-select files
+        query
+        :action #'org-ilm--element-at-point))))
 
 (defun org-ilm-query-buffer (query buffer &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
   (org-ql-select buffer
     (funcall (cdr (assoc query org-ilm-queries)))
-    :action #'org-ilm-element-at-point
+    :action #'org-ilm--element-at-point
     :narrow narrow))
 
 (defun org-ilm--query-concepts (&optional collection)
@@ -6017,13 +5995,13 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 ;;;;; Queue object
 
-;; Use a double dash "--" for the accessor because want to generalize
-;; "org-ilm-queue-" functions to org-ilm-queue-buffer.
-(cl-defstruct (org-ilm-queue (:conc-name org-ilm-queue--))
+(cl-defstruct (org-ilm-queue 
+               (:conc-name org-ilm-queue--)
+               (:include org-ilm-ost))
   "Queue of elements."
-  name collection query type
-  (ost (make-ost-tree))
-  (elements (make-hash-table :test #'equal))
+  query type
+  (elements (make-hash-table :test #'equal)
+            :documentation "Map id to org-ilm-element.")
   key reversed randomness)
 
 (defun org-ilm-queue--element-value (queue element &optional no-key)
@@ -6032,13 +6010,11 @@ If available, the last alias in the ROAM_ALIASES property will be used."
     ;; First check the node key in the ost: A custom value might have been set
     ;; for an element even though the queue sort is based on a key.
     ([_ (not no-key)]
-     [node (ost-tree-node-by-id
-            (org-ilm-queue--ost queue)
-            (org-ilm-element-id element))]
+     [node (ost-tree-node-by-id queue (org-ilm-element--id element))]
      [key (ost-node-key node)]
      key)
     ([key (org-ilm-queue--key queue)]
-     [getter (intern (concat "org-ilm-element-" key))]
+     [getter (intern (concat "org-ilm-element--" key))]
      (cl-assert (functionp getter))
      (when-let ((value (funcall getter element)))
        (cl-typecase value
@@ -6056,12 +6032,10 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 (defun org-ilm-queue--insert (queue element &optional value)
   "Insert ELEMENT in QUEUE.
 A custom VALUE may be passed on which to sort the element in the queue."
-  (let ((id (org-ilm-element-id element)))
+  (let ((id (org-ilm-element--id element))
+        (value (or value (org-ilm-queue--element-value queue element 'no-key))))
     (puthash id element (org-ilm-queue--elements queue))
-    (ost-tree-insert (org-ilm-queue--ost queue)
-                     (or value
-                         (org-ilm-queue--element-value queue element 'no-key))
-                     id)))
+    (ost-tree-insert queue value id)))
 
 ;; TODO Some type of caching so that repeated selects doesnt search tree again
 ;; Should be implemented in `ost-tree-select'.
@@ -6069,7 +6043,7 @@ A custom VALUE may be passed on which to sort the element in the queue."
   "Return the element with the INDEX-th smallest key in QUEUE (0-based)."
   (when (org-ilm-queue--reversed queue)
     (setq index (- (org-ilm-queue--count queue) 1 index)))
-  (let ((node (ost-select (org-ilm-queue--ost queue) index)))
+  (let ((node (ost-select queue index)))
     (gethash (ost-node-id node) (org-ilm-queue--elements queue))))
 
 (defun org-ilm-queue--top (queue &optional n)
@@ -6088,7 +6062,7 @@ A custom VALUE may be passed on which to sort the element in the queue."
   "Return ELEMENT if it is in QUEUE.
 ELEMENT may be an `org-ilm-element' or its id."
   (let ((id (if (org-ilm-element-p element)
-                (org-ilm-element-id element)
+                (org-ilm-element--id element)
               element)))
     (gethash id (org-ilm-queue--elements queue))))
 
@@ -6101,9 +6075,9 @@ ELEMENT may be an `org-ilm-element' or its id."
   "Remove ELEMENT from QUEUE.
 ELEMENT may be an `org-ilm-element' or its id."
   (let ((id (if (org-ilm-element-p element)
-                (org-ilm-element-id element)
+                (org-ilm-element--id element)
               element)))
-    (ost-tree-remove (org-ilm-queue--ost org-ilm-queue) id)
+    (ost-tree-remove org-ilm-queue id)
     (remhash id (org-ilm-queue--elements org-ilm-queue))))
 
 (defun org-ilm-queue--pop (queue)
@@ -6111,19 +6085,19 @@ ELEMENT may be an `org-ilm-element' or its id."
   (when (org-ilm-queue--empty-p queue)
     (error "Tried popping an empty queue \"%s\"" (org-ilm-queue--name queue)))
   (let ((head (org-ilm--queue-head)))
-    (org-ilm--queue-remove (org-ilm-element-id head))))
+    (org-ilm--queue-remove (org-ilm-element--id head))))
 
 (defun org-ilm-queue--move (queue element new-rank)
   "Move ELEMENT in QUEUE to NEW-RANK."
   (setq element (org-ilm-queue--element queue element))
   (cl-assert (org-ilm-element-p element))
-  (ost-tree-move (org-ilm-queue--ost queue) (org-ilm-element-id id) new-rank))
+  (ost-tree-move queue (org-ilm-element--id id) new-rank))
 
 (defun org-ilm-queue--move-many (queue new-ranks-alist)
   "Move many elements in QUEUE to a new rank.
 
 NEW-RANKS-ALIST is an alist of (ID . NEW-RANK) pairs."
-  (ost-tree-move-many (org-ilm-queue--ost queue) new-ranks-alist))
+  (ost-tree-move-many queue new-ranks-alist))
 
 (defun org-ilm-queue--shuffle (queue randomness)
   "Shuffle the queue with a RANDOMNESS between 0 (no change) and 1 (complete randomness).
@@ -6133,14 +6107,14 @@ the queue and shuffling it afterwards. To achieve the latter, call
 `org-ilm--queue-sort' first, or pass it the RANDOMNESS parameter directly."
   (cl-assert (<= 0 randomness 1) nil "Queue shuffle RANDOMNESS must be between 0 and 1.")
   (unless (= randomness 0)
-    (let ((ost (org-ilm-queue--ost queue)))
-      (setf (org-ilm-queue--ost queue) (make-ost-tree)
-            (org-ilm-queue--randomness queue) randomness)
+    (let ((ost (org-ilm-ost--as-tree queue)))
+      (org-ilm-ost--tree-clear queue)
+      (setf (org-ilm-queue--randomness queue) randomness)
       (ost-map-in-order
        (lambda (node rank)
          (let* ((element (gethash (ost-node-id node)
                                   (org-ilm-queue--elements queue)))
-                (quantile (org-ilm--ost-rank-to-quantile ost rank))
+                (quantile (ost-tree-quantile ost rank))
                 ;; New score mixing current rank and noise
                 (new-score (+ (* (- 1.0 randomness) quantile)
                               (* randomness (org-ilm--random-uniform)))))
@@ -6194,7 +6168,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
          (choice (org-ilm--select-alist queues "Queue: ")))
     (pcase (car choice)
       ("Priority queue"
-       (org-ilm-pqueue-queue collection))
+       (org-ilm--pqueue-queue collection))
       ("Outstanding queue"
        (org-ilm--queue-build-outstanding collection))
       (_
@@ -6207,7 +6181,7 @@ If the queue has a query, run it again. Else re-parse elements."
     (setq org-ilm-queue
           (cond-let*
             ((eq (org-ilm-queue--type org-ilm-queue) 'pqueue)
-             (org-ilm-pqueue-queue (org-ilm-queue--collection org-ilm-queue)))
+             (org-ilm--pqueue-queue (org-ilm-queue--collection org-ilm-queue)))
             ((eq (org-ilm-queue--type org-ilm-queue) 'outstanding)
              (org-ilm--queue-build-outstanding (org-ilm-queue--collection org-ilm-queue)))
             ([query (org-ilm-queue--query org-ilm-queue)]
@@ -6217,7 +6191,7 @@ If the queue has a query, run it again. Else re-parse elements."
              (let ((queue (copy-org-ilm-queue org-ilm-queue))
                    (elements (make-hash-table :test #'equal)))
                (dolist (id (hash-table-keys (org-ilm-queue--elements org-ilm-queue)))
-                 (puthash id (or (org-ilm-element-from-id id) id) elements))
+                 (puthash id (or (org-ilm--element-by-id id) id) elements))
                (setf (org-ilm-queue--elements queue) elements)
                queue))))
     (current-buffer)))
@@ -6232,8 +6206,8 @@ If the queue has a query, run it again. Else re-parse elements."
   (org-ilm-with-queue-buffer buffer
     (unless (and (string= (org-ilm-queue--key org-ilm-queue) key)
                  (= (org-ilm-queue--randomness org-ilm-queue) randomness))
-      (setf (org-ilm-queue--ost org-ilm-queue) (make-ost-tree)
-            (org-ilm-queue--key org-ilm-queue) key)
+      (org-ilm-ost--tree-clear org-ilm-queue)
+      (setf (org-ilm-queue--key org-ilm-queue) key)
       (dolist (element (hash-table-values (org-ilm-queue--elements org-ilm-queue)))
         (org-ilm-queue--insert org-ilm-queue element)))
     (setf (org-ilm-queue--reversed org-ilm-queue) reversed)
@@ -6388,7 +6362,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
   (org-ilm-with-queue-buffer buffer
     (if (org-ilm-queue--contains-p org-ilm-queue element)
         (unless exists-ok
-          (error "Element already in queue (%s)" (org-ilm-element-id element)))
+          (error "Element already in queue (%s)" (org-ilm-element--id element)))
       (org-ilm-queue--insert org-ilm-queue element)
       t)))
 
@@ -6464,8 +6438,8 @@ If point on concept, add all headlines of concept."
       ('concept
        ;; TODO This can prob be replaced with org-ql regex on CONCEPTS property
        (dolist (entry (org-ilm--collection-entries collection))
-         (when-let* ((element (org-ilm-element-from-id (org-mem-entry-id entry)))
-                     (concepts (car (org-ilm-element-concepts element)))
+         (when-let* ((element (org-ilm--element-by-id (org-mem-entry-id entry)))
+                     (concepts (car (org-ilm-element--concepts element)))
                      (ancestor-ids (mapcar #'car concepts)))
            (when (member (org-element-property :ID headline) ancestor-ids)
              (when (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
@@ -6476,7 +6450,7 @@ If point on concept, add all headlines of concept."
          (let ((end (save-excursion (org-end-of-subtree t)))
                el)
            (while (< (point) end)
-             (when (setq el (org-ilm-element-at-point))
+             (when (setq el (org-ilm--element-at-point))
                (when (org-ilm--queue-insert el :buffer queue-buffer :exists-ok t)
                  (cl-incf n-added)))
              (outline-next-heading))))))
@@ -6542,7 +6516,7 @@ If point on concept, add all headlines of concept."
 
 (defun org-ilm--queue-object-id (object)
   (if (org-ilm-element-p object)
-      (org-ilm-element-id object)
+      (org-ilm-element--id object)
     object))
 
 (defun org-ilm--queue-mark-objects (objects)
@@ -6580,12 +6554,12 @@ If point on concept, add all headlines of concept."
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
   (interactive (list (cdr (org-ilm--vtable-get-object))))
-  (org-ilm--attachment-open-by-id (org-ilm-element-id object)))
+  (org-ilm--attachment-open-by-id (org-ilm-element--id object)))
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
   (interactive (list (cdr (org-ilm--vtable-get-object))))
-  (org-ilm--org-goto-id (org-ilm-element-id object)))
+  (org-ilm--org-goto-id (org-ilm-element--id object)))
 
 (defun org-ilm-queue-object-mark (object)
   "Mark the object at point."
@@ -6613,7 +6587,7 @@ If point on concept, add all headlines of concept."
   ;; `seq-some' per object, instead of just an `assoc'.
   (dolist (object (org-ilm--queue-elements))
     (when (org-ilm-element-p object)
-      (let ((ancestor-ids (car (org-ilm-element-concepts object))))
+      (let ((ancestor-ids (car (org-ilm-element--concepts object))))
         (when (member concept-id ancestor-ids)
           (org-ilm--queue-mark-objects object)))))
   (org-ilm-queue-revert))
@@ -6627,7 +6601,7 @@ If point on concept, add all headlines of concept."
      (org-ilm--collection-tags (org-ilm-queue--collection org-ilm-queue)))))
   (dolist (object (org-ilm--queue-elements))
     (when (and (org-ilm-element-p object)
-               (member tag (org-ilm-element-tags object)))
+               (member tag (org-ilm-element--tags object)))
       (org-ilm--queue-mark-objects object)))
   (org-ilm-queue-revert))
 
@@ -6637,7 +6611,7 @@ DAYS can be specified as numeric prefix arg."
   (interactive "NNumber of days: ")
   (dolist (object (org-ilm--queue-elements))
     (when (org-ilm-element-p object)
-      (when-let ((due (* -1 (org-ilm-element-schedrel object))))
+      (when-let ((due (* -1 (org-ilm-element--schedrel object))))
         (when (<= (round due) days) 
           (org-ilm--queue-mark-objects object)))))
   (org-ilm-queue-revert))
@@ -6656,7 +6630,7 @@ DAYS can be specified as numeric prefix arg."
   (let* ((marked org-ilm--queue-marked-objects)
          (unmarked (seq-keep
                     (lambda (element)
-                      (let ((id (org-ilm-element-id element)))
+                      (let ((id (org-ilm-element--id element)))
                         (when (not (member id marked)) id)))
                     (org-ilm--queue-elements))))
     (setq-local org-ilm--queue-marked-objects unmarked)
@@ -6830,23 +6804,23 @@ A lot of formatting code from org-ql."
    :getter
    (lambda (row column vtable)
      (let* ((object (cdr (org-ilm--vtable-get-object row)))
-            ;; See `org-ilm-pqueue-queue'. Missing elements are mapped back to id.
+            ;; See `org-ilm--pqueue-queue'. Missing elements are mapped back to id.
             (id (if (org-ilm-element-p object)
-                    (org-ilm-element-id object)
+                    (org-ilm-element--id object)
                   object))
             (marked (member id org-ilm--queue-marked-objects)))
        (cond
         ((org-ilm-element-p object)
-         (let ((concepts (org-ilm-element-concepts object))
-               (priority (org-ilm-element-priority object)))
+         (let ((concepts (org-ilm-element--concepts object))
+               (priority (org-ilm-element--priority object)))
            (pcase (vtable-column vtable column)
              ("Index" (list marked row))
-             ("Type" (list marked (org-ilm-element-type object)))
+             ("Type" (list marked (org-ilm-element--type object)))
              ("Priority" (list marked priority))
-             ;; ("Cookie" (list marked (org-ilm-element-pcookie object)))
-             ("Title" (list marked (org-ilm-element-title object)))
-             ("Due" (list marked (org-ilm-element-schedrel object)))
-             ;; ("Tags" (list marked (org-ilm-element-tags object)))
+             ;; ("Cookie" (list marked (org-ilm-element--pcookie object)))
+             ("Title" (list marked (org-ilm-element--title object)))
+             ("Due" (list marked (org-ilm-element--schedrel object)))
+             ;; ("Tags" (list marked (org-ilm-element--tags object)))
              ("Concepts"
               (list marked
                     (mapcar #'org-mem-entry-by-id
@@ -6897,21 +6871,24 @@ A lot of formatting code from org-ql."
   "Set the priority of the element at point, or bulk spread of marked elements."
   (interactive)
   (if org-ilm--queue-marked-objects
-      (org-ilm-queue-spread-priority)
-    (org-ilm-element-set-priority (org-ilm-element-from-context)))
-  (org-ilm-queue-revert))
+      (org-ilm--queue-spread-priority)
+    (org-ilm-element-set-priority (org-ilm--element-from-context))
+    (org-ilm-queue-revert)))
 
 (defun org-ilm-queue-set-position ()
+  "Set the position of the element at point, or bulk spread of marked elements."
   (interactive)
   (if org-ilm--queue-marked-objects
-      (org-ilm-queue-spread-position)
+      (org-ilm--queue-spread-position)
     (org-ilm--ost-move
      org-ilm-queue
-     (org-ilm-element-id (org-ilm-element-from-context))
-     (car (org-ilm--queue-select-read org-ilm-queue))))
-  (org-ilm-queue-revert))
+     (org-ilm-element--id (org-ilm--element-from-context))
+     ;; TODO Pass current position as initial position
+     (car (org-ilm--queue-select-read org-ilm-queue)))
+    (org-ilm-queue-revert)))
 
 (defun org-ilm-queue-set-schedule ()
+  "Set the schedule of the element at point, or bulk set of marked elements."
   (interactive)
   (let ((elements (org-ilm-queue--elements org-ilm-queue)))
     (if org-ilm--queue-marked-objects
@@ -6932,13 +6909,13 @@ A lot of formatting code from org-ql."
                      (rand-interval (random (1+ diff-days)))
                      (ts (ts-adjust 'day rand-interval start-ts))
                      (date (ts-format "%Y-%m-%d" ts)))
-                (org-ilm-schedule (org-ilm-element-at-point) date)
-                (puthash id (org-ilm-element-at-point) elements)))))
+                (org-ilm-schedule (org-ilm--element-at-point) date)
+                (puthash id (org-ilm--element-at-point) elements)))))
 
       ;; No marked elements, set schedule of element at point
-      (org-ilm-element-set-schedule (org-ilm-element-from-context))
-      (let ((element (org-ilm-element-from-context)))
-        (puthash (org-ilm-element-id element) element elements)))
+      (org-ilm-element-set-schedule (org-ilm--element-from-context))
+      (let ((element (org-ilm--element-from-context)))
+        (puthash (org-ilm-element--id element) element elements)))
     (org-ilm-queue-revert)))
 
 (defun org-ilm-queue-remove ()
@@ -6975,14 +6952,14 @@ A lot of formatting code from org-ql."
                               t)))))
          (delete-id (lambda (id)
                       (org-ilm--queue-remove id :buffer queue-buffer)
-                      (org-ilm-pqueue-remove id collection))))
+                      (org-ilm--pqueue-remove id collection))))
     (catch 'abort
       (dolist (id ids)
         (cond
          ((ignore-errors (progn (org-id-goto id) t))
           (org-mark-subtree)
           (when (funcall confirm-p "Delete element?")
-            (org-ilm-element-delete (org-ilm-element-at-point) 'warn-attach)
+            (org-ilm-element-delete (org-ilm--element-at-point) 'warn-attach)
             (funcall delete-id id)))
          (t
           (switch-to-buffer queue-buffer)
@@ -7042,14 +7019,22 @@ A lot of formatting code from org-ql."
   (setq org-ilm--queue-transient-buffer (current-buffer))
   (org-ilm--queue-sort-transient))
 
-;;;;;; Priority and position spread transient
+;;;;; Priority and position spread transient
+
+;; This transient lets the user set the "position" of an element in an OST,
+;; which, when the OST belongs to the collection's priority queue, is the
+;; priority of the element. If instead the OST belongs to a regular
+;; `org-ilm-queue', this sets the position of the element in that queue. Note
+;; that these operations (=setting the position in the OST) is in practice the
+;; same, but in the case of the priority queue, has an obviously more permanent
+;; and serious effect.
 
 (defun org-ilm--queue-pspread-transient-format (extremum)
-  (when-let* ((queue (or (transient-scope) (org-ilm-pqueue)))
+  (when-let* ((queue (or (transient-scope) (org-ilm--pqueue)))
               (args (transient-get-value))
               (rank (transient-arg-value (concat "--" extremum "=") args)))
     (propertize
-     (org-ilm--ost-format-position
+     (org-ilm-ost--position-format
       queue (1- (string-to-number rank)))
      'face 'italic)))
 
@@ -7081,7 +7066,7 @@ A lot of formatting code from org-ql."
 
 (transient-define-prefix org-ilm--queue-pspread-transient (&optional queue)
   "This transient will set prioritiy if QUEUE is nil. Otherwise an
- org-ilm-queue can be passed so that the priority/order within that
+ `org-ilm-queue' struct can be passed so that the priority/order within that
  queue is changed."
   :refresh-suffixes t
 
@@ -7122,7 +7107,7 @@ A lot of formatting code from org-ql."
    ("RET" "Spread"
     (lambda ()
       (interactive)
-      (let* ((queue (or (transient-scope) (org-ilm-pqueue)))
+      (let* ((queue (or (transient-scope) (org-ilm--pqueue)))
              (args (transient-args transient-current-command))
              (min-rank (1- (string-to-number (transient-arg-value "--min=" args))))
              (max-rank (1- (string-to-number (transient-arg-value "--max=" args))))
@@ -7132,7 +7117,7 @@ A lot of formatting code from org-ql."
              (order (number-sequence (1- size) 0 -1)))
         (when random-p
           (setq order (mochar-utils--list-shuffle order)))
-        (org-ilm--ost-move-many
+        (org-ilm-queue--move-many
          queue
          (mapcar 
           (lambda (i)
@@ -7161,12 +7146,7 @@ A lot of formatting code from org-ql."
   (org-ilm--queue-pspread-transient
    (unless priority-queue-p org-ilm-queue)))
 
-(defun org-ilm-queue-spread-position ()
-  (interactive)
-  (org-ilm--queue-spread-position))
-
-(defun org-ilm-queue-spread-priority ()
-  (interactive)
+(defun org-ilm--queue-spread-priority ()
   (org-ilm--queue-spread-position 'priority-queue-p))
 
 
@@ -7192,15 +7172,16 @@ A lot of formatting code from org-ql."
           (interactive)
           (org-ilm--queue-select-accept-minibuffer)))
 
-(defun org-ilm--queue-select-update (rank)
+(defun org-ilm--queue-select-update (pos)
   "Update preview buffer based on minibuffer INPUT."
-  (when (and rank (buffer-live-p org-ilm--queue-select-buffer))
+  (when (and pos (buffer-live-p org-ilm--queue-select-buffer))
     (with-current-buffer org-ilm--queue-select-buffer
+      (setq pos (ost-tree-position org-ilm-queue pos))
       (setq header-line-format
             (concat "Select position: "
-                    (org-ilm--ost-format-position org-ilm-queue rank)))
+                    (org-ilm-ost--position-format org-ilm-queue (car pos))))
       (with-selected-window (get-buffer-window)
-        (goto-line (1+ rank))
+        (goto-line (1+ (car pos)))
         (hl-line-highlight)
         (recenter-top-bottom)))))
 
@@ -7209,7 +7190,7 @@ A lot of formatting code from org-ql."
     (when (and org-ilm--queue-select-minibuffer-window
                (window-live-p org-ilm--queue-select-minibuffer-window))
       (when-let* ((element (cdr (org-ilm--vtable-get-object)))
-                  (rank (org-ilm-queue--element-value org-ilm-queue element)))
+                  (rank (ost-rank org-ilm-queue (org-ilm-element--id element))))
         (with-selected-window org-ilm--queue-select-minibuffer-window
           (delete-minibuffer-contents)
           (insert (number-to-string (1+ rank))))))))
@@ -7244,7 +7225,7 @@ A lot of formatting code from org-ql."
           (delete-other-windows)
           (switch-to-buffer preview-buf)
           (org-ilm--queue-select-update
-           (car (org-ilm--ost-parse-position queue (or init-position 0))))
+           (car (ost-tree-position queue (or init-position 0.0))))
 
           ;; now set up minibuffer hook
           (minibuffer-with-setup-hook
@@ -7260,15 +7241,13 @@ A lot of formatting code from org-ql."
                                   (run-with-idle-timer
                                    0.3 nil
                                    (lambda ()
-                                     (when-let* ((input (string-to-number
-                                                         (minibuffer-contents-no-properties)))
-                                                 (input (if (= input 0) nil (1- input)))
-                                                 (pos (org-ilm--ost-parse-position
-                                                       queue input)))
+                                     (when-let ((pos (org-ilm-ost--parse-position-str
+                                                      queue 
+                                                      (minibuffer-contents-no-properties))))
                                        (setq position pos)
                                        (org-ilm--queue-select-update (car pos)))))))
                           nil t))
-            (setq position (org-ilm--ost-read-position queue))))
+            (setq position (org-ilm-ost--position-read queue init-position))))
       ;; restore old window setup
       (set-window-configuration saved-config)
       (kill-buffer preview-buf)
@@ -7297,7 +7276,7 @@ A lot of formatting code from org-ql."
     (lambda ()
       (let ((element (transient-scope))
             (as-child (transient-arg-value "--child" (transient-get-value))))
-        (propertize (org-ilm-element-title element)
+        (propertize (org-ilm-element--title element)
                     'face (if as-child 'transient-value 'Info-quoted))))
     ;; :if (lambda () (transient-scope)))
     :if (lambda () (and (transient-scope)
@@ -7330,7 +7309,7 @@ A lot of formatting code from org-ql."
 (defun org-ilm-import ()
   "Import an item into your Ilm collection."
   (interactive)
-  (org-ilm--import-transient (ignore-errors (org-ilm-element-from-context))))
+  (org-ilm--import-transient (ignore-errors (org-ilm--element-from-context))))
 
 ;;;;; Buffer
 
@@ -7370,7 +7349,7 @@ A lot of formatting code from org-ql."
       (org-ilm--capture-capture
        'material
        :id id
-       :parent (when (and as-child parent-el) (org-ilm-element-id parent-el))
+       :parent (when (and as-child parent-el) (org-ilm-element--id parent-el))
        :collection (org-ilm--active-collection)
        :content (unless file (buffer-string))
        :title title
@@ -7444,7 +7423,7 @@ A lot of formatting code from org-ql."
         (org-ilm--capture-capture
          'material
          :parent (when-let ((el (transient-scope)))
-                   (org-ilm-element-id el))
+                   (org-ilm-element--id el))
          :collection (org-ilm--active-collection)
          :file (plist-get args :file)
          :method (intern (plist-get args :method))
@@ -7805,7 +7784,7 @@ A lot of formatting code from org-ql."
            'material
            :parent (when as-child
                      (when-let ((el (transient-scope)))
-                       (org-ilm-element-id el)))
+                       (org-ilm-element--id el)))
            :collection (org-ilm--active-collection)
            :title title
            :id id
@@ -8282,7 +8261,7 @@ For now, map through logistic k from 10 to 1000 based on number of reviews."
 (defun org-ilm--priority-calculate-child-priority (parent-priority type)
   "Calculate child capture's priority based on PARENT-PRIORITY and capture TYPE.
 Uses a multiplicative factor to ensure children are prioritized ahead of parents."
-  (if-let* ((parent-priority (org-ilm-pqueue-parse-position parent-priority))
+  (if-let* ((parent-priority (org-ilm--pqueue-position parent-priority))
             (parent-rank (car parent-priority))
             (factor (pcase type
                       ('card org-ilm-priority-factor-card)
@@ -8294,7 +8273,7 @@ Uses a multiplicative factor to ensure children are prioritized ahead of parents
              ;; out slightly (e.g., +/- 2 spots).
              (jitter (random 5))
              (new-rank (max 0 (+ new-rank jitter))))
-        (org-ilm-pqueue-parse-new-position new-rank))
+        (org-ilm--pqueue-position-new new-rank))
     ;; If parent not in queue, fallback to top of queue (0) or end?
     ;; Defaulting to 0 (highest priority) for captured items without 
     ;; queued parents is usually safe for active learners.
@@ -8357,8 +8336,8 @@ rounded and clamped to at least 1."
   "Set the schedule based on the priority."
   (when-let* ((id (org-id-get))
               (collection (org-ilm--collection-file))
-              (priority (org-ilm-pqueue-priority
-                         id :collection collection))
+              (priority (org-ilm--pqueue-priority
+                         id nil nil collection))
               (interval-days (org-ilm--initial-schedule-interval-from-priority
                               (cdr priority))))
     (org-ilm--schedule :interval-days interval-days)))
@@ -8376,8 +8355,8 @@ rounded and clamped to at least 1."
 
 (defun org-ilm--element-schedule-interval-calculate (element)
   (let ((last-interval (org-ilm-element-last-interval element))
-        (priority (cdr (org-ilm-element-priority element)))
-        (scheduled (org-ilm-element-sched element)))
+        (priority (cdr (org-ilm-element--priority element)))
+        (scheduled (org-ilm-element--sched element)))
     (org-ilm--schedule-interval-calculate priority scheduled last-interval)))
 
 ;; TODO Turn this to function
@@ -8387,7 +8366,7 @@ rounded and clamped to at least 1."
 (defun org-ilm-schedule (element timestamp)
   "Set or update the schedule of the element at point."
   (interactive
-   (list (org-ilm-element-at-point)
+   (list (org-ilm--element-at-point)
          (org-read-date 'with-time nil nil "Schedule: ")))
   (unless element (user-error "No ilm element at point"))
   (org-ilm--schedule :timestamp timestamp))
@@ -8563,8 +8542,8 @@ rounded and clamped to at least 1."
 
 (defun org-ilm-concepts ()
   (interactive)
-  (if-let* ((element (org-ilm-element-from-context))
-            (id (org-ilm-element-id element)))
+  (if-let* ((element (org-ilm--element-from-context))
+            (id (org-ilm-element--id element)))
       (let ((transient-data (org-ilm--concept-transient-data id)))
         (org-ilm--concept-transient transient-data))
     (user-error "No element at point")))
@@ -9034,7 +9013,7 @@ during review."
 Return t if already ready."
   (let ((was-ready t)
         (element (plist-get org-ilm--review-data :element)))
-    (when (org-ilm-element-card-p element)
+    (when (org-ilm-element--card-p element)
       (unless (plist-get org-ilm--review-data :card-revealed)
         (setq was-ready nil)
         (org-ilm-review-reveal)))
@@ -9057,7 +9036,7 @@ Return t if already ready."
   ;; If card, make sure revealed and there is a rating
   (cl-assert (or (null rating) (member rating '(:good :easy :hard :again))))
   (let ((element (plist-get org-ilm--review-data :element)))
-    (when (and (org-ilm-element-card-p element)
+    (when (and (org-ilm-element--card-p element)
                (not (plist-get org-ilm--review-data :rating)))
       (setf (plist-get org-ilm--review-data :rating)
             (or rating
@@ -9103,7 +9082,7 @@ Return t if already ready."
                    (minutes (/ diff 60.0)))
               (setq duration minutes)))
           
-          (if (org-ilm-element-card-p element)
+          (if (org-ilm-element--card-p element)
               ;; TODO Pass duration??
               (org-ilm--card-review rating id)
             (org-ilm--material-review id duration)))))
@@ -9146,7 +9125,7 @@ needs the attachment buffer."
   (cl-assert (not (org-ilm--queue-empty-p)))
 
   (let* ((element (org-ilm--queue-head))
-         (id (org-ilm-element-id element))
+         (id (org-ilm-element--id element))
          attachment-buffer)
 
     (org-ilm--org-with-point-at id
@@ -9175,7 +9154,7 @@ needs the attachment buffer."
         ;; preparation without doing it all here.
 
         ;; If card, hide clozes
-        (when (org-ilm-element-card-p element)
+        (when (org-ilm-element--card-p element)
           (org-ilm--card-hide-clozes)
 
           ;; PDF clozes
@@ -9190,7 +9169,7 @@ needs the attachment buffer."
 
     (setq org-ilm--review-data
           (list :element element
-                :id (org-ilm-element-id element)
+                :id (org-ilm-element--id element)
                 :buffer attachment-buffer
                 :start (current-time)))))
 
@@ -9217,7 +9196,7 @@ needs the attachment buffer."
   (when-let ((buffer (plist-get org-ilm--review-data :buffer))
              (element (plist-get org-ilm--review-data :element)))
     (with-current-buffer buffer
-      (when (org-ilm-element-card-p element)
+      (when (org-ilm-element--card-p element)
         ;; TODO Clean up card overlays
         ;; (org-srs-item-cloze-remove-overlays (point-min) (point-max))
         )
@@ -9245,7 +9224,7 @@ needs the attachment buffer."
 (defun org-ilm--review-header-build ()
   "Build the header string of the attachment currently being reviewed."
   (let* ((element (plist-get org-ilm--review-data :element))
-         (card-p (org-ilm-element-card-p element))
+         (card-p (org-ilm-element--card-p element))
          (card-revealed (plist-get org-ilm--review-data :card-revealed)))
     (concat
      (propertize "Ilm Review" 'face '(:weight bold :height 1.0))
@@ -9293,7 +9272,7 @@ needs the attachment buffer."
       (message "Minimum postpone date should be tomorrow")
       (sleep-for 1.))
     (org-ilm--org-with-point-at (plist-get org-ilm--review-data :id)
-      (org-ilm-schedule (org-ilm-element-at-point) date)
+      (org-ilm-schedule (org-ilm--element-at-point) date)
       (let ((org-ilm--review-update-schedule nil))
         (org-ilm--review-next)))))
 
@@ -9326,7 +9305,7 @@ needs the attachment buffer."
    (:info*
    (lambda ()
      (propertize
-      (org-ilm-element-title (plist-get org-ilm--review-data :element))
+      (org-ilm-element--title (plist-get org-ilm--review-data :element))
       'face '(:slant italic))))]
 
   [

@@ -7,6 +7,7 @@
  (depends-on "org-srs")
  (depends-on "org-transclusion")
  (depends-on "org-node")
+ (depends-on "embark")
  (depends-on "zotra")
  (depends-on "parsebib")
  (depends-on "transient"))
