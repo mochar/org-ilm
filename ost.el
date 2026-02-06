@@ -197,7 +197,7 @@ will return (N . 1.0)."
      ;; POSITION is rank
      ((and (numberp position) (<= 0 position (1- size)))
       (let ((quantile (ost-tree--rank-to-quantile tree position offset)))
-        (cons position quantile))))))
+        (cons position (float quantile)))))))
 
 (defun ost-tree-rank (tree position &optional offset)
   (car (ost-tree-position tree position offset)))
@@ -706,11 +706,13 @@ nodes cannot have red children."
     (puthash id node (ost-tree-nodes tree))
     node))
 
+(define-error 'ost-node-exists "Node with ID %s already exists.")
+
 (defun ost-insert (tree key-or-pos &optional id)
   "Insert new node into the tree.
 Dynamic trees require a position, else a key."
   (when (and id (ost-tree-node-by-id tree id))
-    (error "Node with ID already exists."))
+    (signal 'ost-node-exists `(,id)))
   (cond
    ((ost-tree-dynamic tree)
     (cl-assert id nil "ID must be specified when inserting a node in a dynamic tree.")
