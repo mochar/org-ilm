@@ -158,9 +158,9 @@ here."
   "g" #'org-ilm-registry
   "b" #'org-ilm-bibliography)
 
-;; TODO This autoload doesnt work. Problem because i need this var in dir-locals.
-;;;###autoload
 (defconst org-ilm-log-drawer-name "ILM")
+(defconst org-ilm-property-collection "ILM_COLLECTION")
+(defconst org-ilm-property-desired-retention "ILM_RETENTION")
 
 ;;;; Minor mode
 
@@ -370,7 +370,7 @@ here."
     ([attachment (org-ilm--attachment-data)]
      (cons 'attachment attachment))
     ([collections (org-ilm--collection-file (org-ilm--buffer-file-name))]
-     [collection (org-entry-get nil "ILM_COLLECTION" 'inherit)]
+     [collection (org-entry-get nil org-ilm-property-collection 'inherit)]
      (setq collection (intern collection))
      (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
          (cons 'registry collection)
@@ -384,12 +384,6 @@ here."
                   ((org-ilm-element-p object)
                    (org-ilm-element--id object)))))
        (list 'queue (org-ilm-queue--collection org-ilm-queue) id)))))
-
-(defun org-ilm--thing-id (thing)
-  (cl-etypecase thing
-    (string thing)
-    (org-ilm-element (org-ilm-element--id thing))
-    (org-mem-entry (org-mem-entry-id thing))))
 
 (defun org-ilm-midnight-shift-minutes ()
   "Midnight shift as number of minutes past (or before) midnight."
@@ -1473,7 +1467,12 @@ With POSITION, set the new position in the queue, or insert there if not exists.
 
 ;;;; Logging
 
-;; Logging stuff to the ilm drawer table.
+;; Logging reviews and events to the ilm drawer table.
+;;
+;; Each element contains an ILM drawer with in the review log as org tables. The
+;; tables have a name property which corresponds to the collection name. When an
+;; element is moved to another collection, a new table is created.
+;;
 ;; Fields of the log table in all elements:
 ;; - timestamp: when it was reviewed (or created)
 ;; - delay: num days between timestamp and scheduled date
@@ -1503,21 +1502,29 @@ Difficulty is between 1 and 10. Want a bit more precision here."
   :type 'number
   :group 'org-ilm-card)
 
-(cl-defstruct org-ilm-log-review
+(cl-defstruct (org-ilm-log-review
+               (:conc-name org-ilm-log-review--))
   "A review entry in an ilm element log drawer table."
-  type timestamp delay priority due duration state rating stability difficulty)
+  type collection timestamp delay priority due duration state rating stability difficulty)
+
+(defun org-ilm--log-fields (&optional type)
+  "Return the log table fields of the element at point."
+  (pcase (or type (org-ilm--element-type))
+    ('material org-ilm-log-material-fields)
+    ('card     org-ilm-log-card-fields)
+    (_ (error "Not an ilm element"))))
 
 (defun org-ilm-log-review-format-field (field)
   "Format FIELD column for use in the log."
   (pcase field
-    ('stability "S")
+    ('stability  "S")
     ('difficulty "D")
-    ('priority "prior")
-    (_ (format "%s" field))))
+    ('priority   "prior")
+    (_           (format "%s" field))))
 
 (defun org-ilm-log-review-format-value (review field)
   "Format the value of FIELD in `org-ilm-log-review' object REVIEW for use in the log."
-  (let* ((getter (intern (concat "org-ilm-log-review-" (symbol-name field))))
+  (let* ((getter (intern (concat "org-ilm-log-review--" (symbol-name field))))
          (value (funcall getter review)))
     (cond
      ((null value) "")
@@ -1549,7 +1556,8 @@ If element TYPE is omitted, infer from headline at point."
   (dolist (pair alist)
     (when (and (stringp (cdr pair)) (string= (cdr pair) ""))
       (setcdr pair nil)))
-  (let ((timestamp (alist-get 'timestamp alist))
+  (let ((collection (alist-get 'collection alist))
+        (timestamp (alist-get 'timestamp alist))
         (delay (alist-get 'delay alist))
         (priority (or (alist-get 'priority alist)
                       (alist-get 'prior alist)))
@@ -1561,15 +1569,17 @@ If element TYPE is omitted, infer from headline at point."
                        (alist-get 'S alist)))
         (difficulty (or (alist-get 'difficulty alist)
                         (alist-get 'D alist))))
+    (cl-assert (symbolp collection))
     (cl-assert (org-ilm--timestamp-is-utc-iso8601-p timestamp))
     (unless (string= state ":done")
       (cl-assert (org-ilm--timestamp-is-iso8601-date-p due)))
-    (let* ((parts (string-split priority "-"))
-           (rank (string-to-number (car parts)))
-           (size (string-to-number (cadr parts))))
-      (cl-assert (or (string= (car parts) "0") (> rank 0)))
-      (cl-assert (or (string= (cadr parts) "0") (> size 0)))
-      (setq priority (cons rank size)))
+    (when priority
+      (let* ((parts (string-split priority "-"))
+             (rank (string-to-number (car parts)))
+             (size (string-to-number (cadr parts))))
+        (cl-assert (or (string= (car parts) "0") (> rank 0)))
+        (cl-assert (or (string= (cadr parts) "0") (> size 0)))
+        (setq priority (cons rank size))))
     (when delay
       (setq delay (string-to-number delay))
       (cl-assert (numberp delay)))
@@ -1597,10 +1607,9 @@ If element TYPE is omitted, infer from headline at point."
        (when duration
          (setq duration (org-duration-to-minutes duration)))))
     
-    (make-org-ilm-log-review
-     :type type :timestamp timestamp :delay delay :priority priority
-     :due due :duration duration :state state :rating rating
-     :stability stability :difficulty difficulty)))
+    (make-org-ilm-log-review :type type :collection collection :timestamp
+     timestamp :delay delay :priority priority :due due :duration duration
+     :state state :rating rating :stability stability :difficulty difficulty)))
 
 (defun org-ilm-log-review-ensure (data)
   "Make an `org-ilm-log-review' object from alist DATA, or return if already is one."
@@ -1646,108 +1655,109 @@ If found, return start and end positions as cons."
           (insert ":END:"))
         (org-ilm--log-beginning-of-drawer)))))
 
-(defun org-ilm--log-fields ()
-  "Return the log table fields of the element at point."
-  (pcase (org-ilm--element-type)
-    ('material org-ilm-log-material-fields)
-    ('card org-ilm-log-card-fields)
-    (_ (error "Not an ilm element"))))
-
-(defun org-ilm--log-append (data)
-  "Insert DATA at the end of an org table.
+(defun org-ilm--log-table-append (data)
+  "Insert DATA at the end of the org table at point.
 
 DATA can be an alist for one row, or a list of alists for multiple
-rows. The alist maps column name to entry value."
-  (cl-assert (org-table-p))
-  (setq data (org-ilm--log-data-ensure data))
-  (atomic-change-group
-    (goto-char (org-table-end))
-    (forward-line -1)
-    (end-of-line)
-    (dolist (review data 2)
-      (newline)
-      (insert "|")
-      (dolist (field (org-ilm--log-fields))
-        (insert (org-ilm-log-review-format-value review field) "|")))
-    (org-table-align)))
-
-(defun org-ilm--log-beginning-of-table (&optional init-data)
-  "Go to the beginning of the log drawer table. Return pos.
-
-With optional INIT-DATA, create a new table with this data. See
-`org-ilm--log-append'."
-  (when-let ((bounds (org-ilm--log-beginning-of-drawer init-data)))
-    (let ((table-pos (save-excursion
-                       (re-search-forward org-table-line-regexp (cdr bounds) t))))
-      (cond
-       (table-pos
-        (goto-char table-pos)
-        (beginning-of-line)
-        (point))
-       (init-data
-        (atomic-change-group
-          (forward-line 1)
+rows. The alist maps column name to entry value.
+Ensures only reviews are appended that correspond with the table's collection."
+  (let* ((table      (org-element-lineage (org-element-at-point) 'table t))
+         (collection (intern (org-element-property :name table))))
+    (setq data (org-ilm--log-data-ensure data))
+    (atomic-change-group
+      (goto-char (org-table-end))
+      (forward-line -1)
+      (end-of-line)
+      (dolist (review data 2)
+        (when (eq collection (org-ilm-log-review--collection review))
           (newline)
-          (forward-line -1)
+          (insert "|")
+          (dolist (field (org-ilm--log-fields))
+            (insert (org-ilm-log-review-format-value review field) "|"))))
+      (org-table-align))))
+
+(defun org-ilm--log-beginning-of-next-table ()
+  "Go to the next table within the ilm drawer, return table element."
+  (when-let* ((drawer      (org-element-lineage (org-element-at-point) 'drawer t))
+              (drawer-name (org-element-property :drawer-name drawer))
+              (drawer-end  (org-element-property :contents-end drawer)))
+    (when (string= drawer-name org-ilm-log-drawer-name)
+      (let ((point (point)))
+        (goto-char (org-table-end))
+        (if (re-search-forward org-table-line-regexp drawer-end t)
+            (progn
+              (beginning-of-line)
+              (org-element-at-point))
+          (goto-char point)
+          nil)))))
+
+(defun org-ilm--log-beginning-of-collection-table (collection &optional create-if-missing)
+  "Go to the beginning of the log drawer table of COLLECTION, and return table element.
+
+With CREATE-IF-MISSING non-nil.... you know. Then returns the table element."
+  (let (drawer-bounds table)
+    ;; First search for the collection's table
+    (save-excursion
+      (setq drawer-bounds (org-ilm--log-beginning-of-drawer create-if-missing))
+      (while-let ((table-x          (org-ilm--log-beginning-of-next-table))
+                  (table-collection (org-element-property :name table-x)))
+        (when (string= table-collection (format "%s" collection))
+          (setq table table-x))))
+    (cond
+     (table
+      (goto-char (org-element-property :post-affiliated table))
+      table)
+     (create-if-missing
+      (atomic-change-group 
+        (goto-char (cdr drawer-bounds))
+        (forward-line -1)
+        (end-of-line)
+        (insert "\n")
+        (insert (format "#+NAME: %s\n" collection))
+        (save-excursion 
           (insert "|")
           (dolist (field (org-ilm--log-fields))
             (insert (org-ilm-log-review-format-field field) "|"))
-          (org-table-insert-hline)
-          (org-ilm--log-append init-data)
-          (org-ilm--log-beginning-of-table)))))))
+          (org-table-insert-hline))
+        (org-table-align)
+        (org-element-at-point))))))
 
-(defun org-ilm--log-insert (data)
-  "Insert DATA into the log table, creating one if missing."
-  (if (org-ilm--log-beginning-of-table)
-      (org-ilm--log-append data)
-    (org-ilm--log-beginning-of-table data)))
+(defun org-ilm--log-insert (review)
+  "Insert REVIEW into the log table, creating one if missing."
+  (cl-assert (org-ilm-log-review-p review))
+  (let ((collection (org-ilm-log-review--collection review)))
+    (cl-assert collection)
+    (org-ilm--log-beginning-of-collection-table collection 'create-if-missing)
+    (org-ilm--log-table-append review)))
 
-(defun org-ilm--log-read (&optional init-data)
-  "Return the data of the log drawer table as an alist.
+(defun org-ilm--log-log (type collection priority due scheduled &rest review-data)
+  "Log a new review for an element and return the review object.
 
-With optional INIT-DATA, create a new table with this data. See
-`org-ilm--log-append'."
-  (save-excursion
-    (when (org-ilm--log-beginning-of-table init-data)
-      (let ((table (org-table-to-lisp)))
-        (cl-assert (>= (length table) 3))
-        (cl-assert (eq (nth 1 table) 'hline))
-        (let* ((columns (mapcar #'intern (car table)))
-               (data (mapcar
-                      (lambda (row)
-                        (mapcar
-                         (lambda (i)
-                           (cons (nth i columns)
-                                 (substring-no-properties (nth i row))))
-                         (number-sequence 0 (1- (length columns)))) )
-                      (cl-subseq table 2))))
-          (org-ilm--log-data-ensure data))))))
-
-(defun org-ilm--log-log (type priority due scheduled &rest review-data)
-  "Log a new review for element with TYPE, return the review object.
-
-SCHEDULED is the timestamp when the element was scheduled for review.
+SCHEDULED is the timestamp when the element was scheduled for
+review. This is used to calculate a delay in days between scheduled date
+and TIMESTAMP (date of review).
 
 DUE is the new scheduled review timestamp."
   (cl-assert (member type '(material card)))
   (when (ts-p due)
     (setq due (pcase type
-                ('card (org-ilm--ts-format-utc-date-maybe-time due))
+                ('card     (org-ilm--ts-format-utc-date-maybe-time due))
                 ('material (org-ilm--ts-format-utc-date due)))))
-  (let* ((timestamp (or (plist-get review-data :timestamp) (ts-now)))
-         (priority (org-ilm--pqueue-position-new priority))
-         (rank (car priority))
-         (size (org-ilm--pqueue-size))
-         (review-log (org-ilm--log-read)))
+  (let* ((timestamp  (or (plist-get review-data :timestamp) (ts-now)))
+         (pqueue     (org-ilm--pqueue collection))
+         (priority   (ost-tree-position pqueue priority 1))
+         (rank       (car priority))
+         (size       (ost-size pqueue)))
 
     (cl-assert (ts-p timestamp))
     (setf (plist-get review-data :type) type
-          (plist-get review-data :priority) (cons rank size)
+          (plist-get review-data :collection) collection
+          (plist-get review-data :priority) (when rank (cons rank size))
           (plist-get review-data :due) due
           (plist-get review-data :timestamp) (org-ilm--ts-format-utc timestamp))
 
+    ;; Add delay to review-data based on timestamp and scheduled date
     (unless (null scheduled)
-      (cl-assert review-log)
       ;; TODO Is this midnight shift calculation right????
       (let ((delay (org-ilm--ts-diff-rounded-days
                     timestamp
@@ -1757,6 +1767,47 @@ DUE is the new scheduled review timestamp."
     (let ((review (apply #'make-org-ilm-log-review review-data)))
       (org-ilm--log-insert review)
       review)))
+
+(defun org-ilm--log-remove (timestamp)
+  "Remove table row corresponding to TIMESTAMP from element at point."
+  (save-excursion
+    (when-let ((drawer-bounds (org-ilm--log-beginning-of-drawer)))
+      (when (re-search-forward timestamp (cdr drawer-bounds) 'noerror)
+        (delete-line)
+        (forward-line -1)
+        (goto-char (org-table-end))
+        (forward-line -1)
+        (let ((row (org-element-lineage (org-element-at-point) 'table-row t)))
+          (when (eq (org-element-property :type row) 'rule)
+            (let ((table (org-element-lineage (org-element-at-point) 'table t))) 
+              (delete-region (org-element-begin table) (org-element-end table)))))))))
+
+(defun org-ilm--log-read (&optional collections dont-sort)
+  "Read the data of the log drawer table of COLLECTION."
+  (let ((collections (ensure-list collections))
+        (reviews '()))
+    (save-excursion
+      (when (org-ilm--log-beginning-of-drawer)
+        (while-let ((table-el (org-ilm--log-beginning-of-next-table))
+                    (collection (intern (org-element-property :name table-el))))
+          (when (or (null collections) (member collection collections))
+            (let ((table (org-table-to-lisp)))
+              (cl-assert (>= (length table) 3))
+              (cl-assert (eq (nth 1 table) 'hline))
+              (let* ((columns (mapcar #'intern (car table))))
+                (dolist (row (cl-subseq table 2))
+                  (let ((row-data 
+                         (mapcar
+                          (lambda (i)
+                            (cons (nth i columns)
+                                  (substring-no-properties (nth i row))))
+                          (number-sequence 0 (1- (length columns))))))
+                    (setf (alist-get 'collection row-data) collection)
+                    (add-to-list 'reviews (org-ilm-log-review-ensure row-data))))))))))
+    (if dont-sort
+        (nreverse reviews)
+      (sort reviews :key #'org-ilm-log-review--timestamp
+            :lessp (lambda (a b) (ts<= (ts-parse a) (ts-parse b)))))))
 
 
 ;;;; Types
@@ -1839,7 +1890,8 @@ See `org-ilm-card-states', `org-ilm-material-states', and `org-ilm-concept-state
   (cl-assert (org-mem-entry-p entry))
   (let* ((type (org-ilm--element-type entry))
          (id (org-mem-entry-id entry))
-         (collection (org-mem-entry-property-with-inheritance "ILM_COLLECTION" entry)))
+         (collection (org-mem-entry-property-with-inheritance
+                      org-ilm-property-collection entry)))
     (when (and type collection)
       (make-org-ilm-element
        ;; Headline element properties
@@ -1903,19 +1955,6 @@ If we are in...
   `(org-ilm--org-with-point-at (org-ilm-element--registry ,element)
      ,@body))
 
-(defun org-ilm--element-last-review (element-thing)
-  (org-ilm--org-with-point-at (org-ilm--thing-id element-thing)
-    (when-let* ((review-log (org-ilm--log-read))
-                (last-review (car (last review-log))))
-      (ts-parse (org-ilm-log-review-timestamp last-review)))))
-
-(defun org-ilm-element--interval (element)
-  "Interval in days."
-  (when-let ((last-review (org-ilm--element-last-review element))
-             (sched (org-ilm-element--sched element)))
-    ;; Seconds to days
-    (/ (ts-diff last-review sched) 86400)))
-
 ;;;;; Collection
 
 (defun org-ilm-element--collection-move (element new-collection &optional new-priority)
@@ -1928,7 +1967,7 @@ To safely include the children in the migration, call
            (current-collection  (org-ilm-element--collection element))
            (already-there-p     (eq new-collection current-collection))
            (current-priority    (org-ilm-element--priority element))
-           (property-collection (org-entry-get nil "ILM_COLLECTION")))
+           (property-collection (org-entry-get nil org-ilm-property-collection)))
 
       ;; TODO Remove property if already there, but recover on error
       
@@ -1941,7 +1980,7 @@ To safely include the children in the migration, call
         (org-ilm-pqueue--remove (org-ilm-element--pqueue element) id)
 
         ;; Remove the property to match the current state.
-        (org-entry-delete nil "ILM_COLLECTION")
+        (org-entry-delete nil org-ilm-property-collection)
 
         ;; Now attempt to move to new priority queue.
         (condition-case err
@@ -1966,9 +2005,9 @@ To safely include the children in the migration, call
               
               ;; If inherited collection property matches new, no need to set
               ;; the property.
-              (let ((inherited (org-entry-get nil "ILM_COLLECTION" 'inherit)))
+              (let ((inherited (org-entry-get nil org-ilm-property-collection 'inherit)))
                 (unless (and inherited (eq (intern inherited) new-collection))
-                  (org-entry-put nil "ILM_COLLECTION" (symbol-name new-collection))))
+                  (org-entry-put nil org-ilm-property-collection (symbol-name new-collection))))
               
               (save-buffer) ;; For org-mem to update
               
@@ -1984,7 +2023,7 @@ To safely include the children in the migration, call
               (org-ilm--pqueue current-collection) id current-priority))
            ;; Put back property if it was there when we found it.
            (when property-collection
-             (org-entry-put nil "ILM_COLLECTION" property-collection))
+             (org-entry-put nil org-ilm-property-collection property-collection))
            ;; Collection slot of element struct
            (setf (org-ilm-element--collection element) current-collection)
 
@@ -2051,6 +2090,11 @@ COLLECTION specifies in which queue to look at."
   (org-ilm-ost--position-format
    (org-ilm-element--pqueue element)
    (org-ilm-element--priority element)))
+
+;;;;; State changes
+
+(cl-defgeneric org-ilm--element-review (type element &rest args))
+
 
 ;;;;; Actions
 
@@ -2128,6 +2172,7 @@ COLLECTION specifies in which queue to look at."
         ;; Log done state in drawer
         (org-ilm--log-log
          (org-ilm-element--type element)
+         (org-ilm-element--collection element)
          (org-ilm-element--priority element)
          nil ;; due
          (org-ilm-element--sched element)
@@ -2160,27 +2205,25 @@ COLLECTION specifies in which queue to look at."
   "Undo done on ilm element at point."
   (interactive (list (org-ilm--element-from-context)))
   (cl-assert (org-ilm-element-p element) nil "Not an org-ilm element")
-
   (org-ilm--element-with-point-at element
     (when (yes-or-no-p "Undo done on element?")
-      (let* ((log (org-ilm--log-read))
-             (last-review (car (last log)))
-             (priority (org-ilm-log-review-priority last-review))
+      (let* ((review-log (org-ilm--log-read))
+             (last-review (car (last review-log)))
+             (priority (org-ilm-log-review--priority last-review))
              (collection (org-ilm-element--collection element))
              (pqueue (org-ilm--pqueue collection))
-             (priority (org-ilm--pqueue-select-read
-                        (when priority (/ (car priority) / (float (cdr priority))))
-                        collection))
-             (due (org-ilm--initial-schedule-from-priority (cdr priority))))
+             (priority (org-ilm--queue-select-read
+                        (org-ilm-pqueue--queue pqueue)
+                        (when priority (/ (car priority) (float (cdr priority))))
+                        nil 1))
+             ;; TODO Handle this being nil
+             (due (org-ilm-log-review--due (car (last review-log 2)))))
         (atomic-change-group
-          ;; Log undone state in drawer
-          ;; (org-ilm--log-log
-          ;;  (org-ilm-element--type element)
-          ;;  priority due nil :state :undone)
+          (when (eq (org-ilm-log-review--state last-review) :done)
+            (org-ilm--log-remove (org-ilm-log-review--timestamp last-review)))
           (org-ilm--schedule :timestamp due)
           (org-todo 'none)
-          (org-ilm-pqueue--insert pqueue (org-ilm-element--id element) priority)
-          (save-buffer))))))
+          (org-ilm-pqueue--insert pqueue (org-ilm-element--id element) priority))))))
 
 (defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
@@ -2550,14 +2593,9 @@ COLLECTION specifies in which queue to look at."
 
 (defconst org-ilm-property-multiplier "ILM_MULTIPLIER")
 
-(defun org-ilm--material-log-new (priority due &optional timestamp)
+(defun org-ilm--material-log-new (collection priority due &optional timestamp)
   "Log the creation of a new material element in the ilm drawer."
-  (org-ilm--log-log 'material priority due nil :timestamp timestamp))
-
-(defun org-ilm--material-log-review (priority due scheduled &optional timestamp duration)
-  "Log the review of a material element in the ilm drawer."
-  (org-ilm--log-log 'material priority due scheduled
-                    :duration duration :timestamp timestamp))
+  (org-ilm--log-log 'material collection priority due nil :timestamp timestamp))
 
 (defun org-ilm--material-schedule-multiplier (priority)
   "Return multiplier (A-factor) from PRIORITY.
@@ -2606,16 +2644,15 @@ as a new element and the initial interval based on PRIORITY is returned."
 
         (max 1 (round new-interval))))))
 
-(defun org-ilm--material-review (&optional org-id duration)
+(cl-defmethod org-ilm--element-review ((type (eql 'material)) element &rest args)
   "Apply a review on the material element.
 This will update the log table and the headline scheduled date."
-  (org-ilm--org-with-point-at org-id
-    (let* ((review-log (org-ilm--log-read))
+  (org-ilm--element-with-point-at element
+    (let* ((review-log  (org-ilm--log-read))
            (last-review (car (last review-log))))
       (cl-assert last-review nil "Element missing log")
-      (let* ((element (org-ilm--element-at-point))
-             (scheduled (org-ilm-element--sched element))
-             (priority (org-ilm-element--priority element))
+      (let* ((scheduled (org-ilm-element--sched element))
+             (priority  (org-ilm-element--priority element))
              ;; TODO Inherit from concepts like fsrs retention?
              (multiplier (when-let ((m (org-entry-get nil org-ilm-property-multiplier)))
                            (setq m (string-to-number m))
@@ -2625,13 +2662,15 @@ This will update the log table and the headline scheduled date."
                              nil)))
              (interval (org-ilm--material-calculate-interval
                         priority scheduled
-                        (ts-parse (org-ilm-log-review-timestamp last-review))
+                        (ts-parse (org-ilm-log-review--timestamp last-review))
                         multiplier))
              (due (ts-adjust 'day interval (ts-now))))
         (atomic-change-group
-          (org-ilm--material-log-review priority due scheduled nil duration)
+          (org-ilm--log-log 'material (org-ilm-element--collection element)
+                            priority due scheduled
+                            :duration (plist-get args :duration)
+                            :timestamp (plist-get args :timestamp))
           (org-ilm--org-schedule :timestamp due :ignore-time t))))))
-
 
 ;;;; Cards
 
@@ -2676,8 +2715,6 @@ FSRS default: t"
                  (string :tag "Custom interval as %H:%S format")
                  (number :tag "Custom interval in minutes"))
   :group 'org-ilm-card)
-
-(defconst org-ilm-property-desired-retention "ILM_RETENTION")
 
 ;;;;; Logic
 
@@ -2731,22 +2768,54 @@ concept properties."
      :maximum-interval org-ilm-card-fsrs-maximum-interval
      :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p)))
 
-(defun org-ilm--card-review (rating &optional org-id timestamp duration)
-  "Rate a card element with RATING, update log and scheduled date.
-If ORG-ID ommitted, assume point at card headline."
-  (org-ilm--org-with-point-at org-id
-    (let ((element (org-ilm--element-at-point)))
-      (cl-assert element nil "Not an ilm element")
-      (cl-assert (org-ilm-element--card-p element) nil "Element not a card")
+(cl-defmethod org-ilm--element-review ((type (eql 'card)) element &rest args)
+  "Rate a card element with RATING, update log and scheduled date."
+  (org-ilm--element-with-point-at element
+    (let* ((priority (org-ilm-element--priority element))
+           (scheduled (org-ilm-element--sched element))
+           (rating (plist-get args :rating))
+           (scheduler (org-ilm--card-element-scheduler element))
+           (timestamp (or (plist-get args :timestamp) (ts-now)))
+           (review-log  (org-ilm--log-read))
+           (last-review (seq-find
+                         (lambda (r)
+                           (not (eq (org-ilm-log-review--state r) :done)))
+                         (reverse review-log)))
+           card)
+      (cl-assert last-review nil "Card does not have a proper last review in log")
+      (cl-assert rating)
+      
+      (setq card
+            (car
+             (fsrs-scheduler-review-card
+              scheduler
+              (fsrs-make-card
+               :step        (org-ilm--card-step-from-log scheduler review-log)
+               :state       (org-ilm-log-review--state last-review)
+               :stability   (org-ilm-log-review--stability last-review)
+               :difficulty  (org-ilm-log-review--difficulty last-review)
+               :last-review (org-ilm-log-review--timestamp last-review)
+               ;; Due date should be "artificial" one (potentially manually
+               ;; edited), not the true date as scheduled in previous review, as
+               ;; the algorithm does the calculation based on expected next
+               ;; review. Having said that i cannot find this field being accessed
+               ;; in `fsrs-scheduler-review-card'.
+               :due (org-ilm--ts-format-utc scheduled))
+              rating
+              (org-ilm--ts-format-utc timestamp)
+              (plist-get args :duration))))
+
       (atomic-change-group
-        (let ((review (org-ilm--card-log-review
-                       (org-ilm-element--priority element)
-                       (org-ilm-element--sched element)
-                       rating
-                       (org-ilm--card-element-scheduler element)
-                       timestamp duration)))
-          (org-ilm--org-schedule
-           :timestamp (ts-parse (org-ilm-log-review-due review))))))))
+        (org-ilm--log-log
+         'card (org-ilm-element--collection element) priority
+         (fsrs-card-due card) scheduled
+         :timestamp timestamp
+         :rating rating
+         :state (fsrs-card-state card)
+         :stability (fsrs-card-stability card)
+         :difficulty (fsrs-card-difficulty card))
+        (org-ilm--org-schedule
+         :timestamp (ts-parse (fsrs-card-due card)))))))
 
 ;;;;; Logging
 
@@ -2763,8 +2832,8 @@ An empty log implies a new card, so step is 0."
         (relearn-steps (length (fsrs-scheduler-relearning-steps scheduler)))
         (current-step 0))
     (dolist (review review-log)
-      (let ((state (org-ilm-log-review-state review))
-            (rating (org-ilm-log-review-rating review)))
+      (let ((state  (org-ilm-log-review--state review))
+            (rating (org-ilm-log-review--rating review)))
         ;; Note, :hard rating does not increment step
         (cond
          ((eq state :review)
@@ -2779,49 +2848,13 @@ An empty log implies a new card, so step is 0."
             (cl-incf current-step))))))
     current-step))
 
-(defun org-ilm--card-log-new (priority due &optional timestamp)
+(defun org-ilm--card-log-new (collection priority due &optional timestamp)
   "Log the creation of a new card element in the ilm drawer."
   (org-ilm--log-log
-   'card priority due nil 
+   'card collection priority due nil 
    :timestamp timestamp
    ;; Default state of a new fsrs card
    :state :learning))
-
-(defun org-ilm--card-log-review (priority scheduled rating scheduler &optional timestamp duration)
-  "Log the review of a fsrs card in the ilm drawer table, return the review object."
-  (cl-assert (ts-p scheduled))
-  (setq timestamp (or timestamp (ts-now)))
-  (let* ((review-log (org-ilm--log-read))
-         (last-review (car (last review-log)))
-         card)
-    (cl-assert last-review nil "Card missing log")
-    
-    (setq card
-          (car
-           (fsrs-scheduler-review-card
-            scheduler
-            (fsrs-make-card
-             :state (org-ilm-log-review-state last-review)
-             :step (org-ilm--card-step-from-log scheduler review-log)
-             :stability (org-ilm-log-review-stability last-review)
-             :difficulty (org-ilm-log-review-difficulty last-review)
-             :last-review (org-ilm-log-review-timestamp last-review)
-             ;; Due date should be "artificial" one (potentially manually
-             ;; edited), not the true date as scheduled in previous review, as
-             ;; the algorithm does the calculation based on expected next
-             ;; review. Having said that i cannot find this field being accessed
-             ;; in `fsrs-scheduler-review-card'.
-             :due (org-ilm--ts-format-utc scheduled))
-            rating
-            (org-ilm--ts-format-utc timestamp)
-            duration)))
-
-    (org-ilm--log-log
-     'card priority (fsrs-card-due card) scheduled
-     :timestamp timestamp :rating rating
-     :state (fsrs-card-state card)
-     :stability (fsrs-card-stability card)
-     :difficulty (fsrs-card-difficulty card))))
 
 ;;;;; Cloze
 
@@ -3157,16 +3190,12 @@ An empty log implies a new card, so step is 0."
             (goto-char end))))
         ))))
 
-(defun org-ilm--card-reveal-clozes ()
-  )
-
 (defun org-ilm--card-remove-overlays (&optional begin end)
   (dolist (val '(hidden revealed))
     (remove-overlays (or begin (point-min)) (or end (point-max))
                      'org-ilm-cloze-state val))
   (org-latex-preview-clear-overlays)
   (call-interactively #'org-latex-preview))
-
 
 
 ;;;; Capture
@@ -3411,9 +3440,9 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              ;; Log to drawer
              (pcase type 
                ('card 
-                (org-ilm--card-log-new priority scheduled))
+                (org-ilm--card-log-new collection priority scheduled))
                ('material
-                (org-ilm--material-log-new priority scheduled)))
+                (org-ilm--material-log-new collection priority scheduled)))
 
              ;; Store bibtex
              (when-let ((bibtex (org-ilm-capture-bibtex capture)))
@@ -6184,12 +6213,12 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive concept
   :normalizers ((`(ilm-element ,collection ,types)
                  `(and
                    (property "ID")
-                   (property "ILM_COLLECTION" ,collection :inherit t)
+                   (property ,org-ilm-property-collection ,collection :inherit t)
                    (or ,@(cl-loop for type-sym in (or types org-ilm-element-types)
                                   collect `(property "ILM_TYPE" ,(symbol-name type-sym)))))))
   :body (and
          (property "ID")
-         (property "ILM_COLLECTION" collection :inherit t)
+         (property org-ilm-property-collection collection :inherit t)
          (or (cl-loop for type in (or types org-ilm-element-types)
                       collect `(property "ILM_TYPE" ,(symbol-name type))))))
   
@@ -6296,7 +6325,9 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 (defun org-ilm-queue--count (queue)
   "Return the number of elements in QUEUE."
-  (hash-table-count (org-ilm-queue--elements queue)))
+  ;; (hash-table-count (org-ilm-queue--elements queue))
+  (ost-size queue)
+  )
 
 (defun org-ilm-queue--empty-p (queue)
   "Return t if QUEUE is empty."
@@ -6520,7 +6551,9 @@ If the queue has a query, run it again. Else re-parse elements."
     org-ilm-queue))
 
 (cl-defun org-ilm--queue-buffer-create (queue &key active-p switch-p)
-  "Create a new queue buffer."
+  "Create a new queue buffer.
+This does not fill the buffer with the queue elements! For this run
+`org-ilm--queue-buffer-build' afterwards."
   (let ((buffer (generate-new-buffer
                  (format "*Ilm Queue (%s)*" (org-ilm-queue--name queue)))))
     (with-current-buffer buffer
@@ -7153,6 +7186,7 @@ A lot of formatting code from org-ql."
    (lambda (row column vtable)
      (let* ((object (cdr (org-ilm--vtable-get-object row)))
             ;; See `org-ilm--pqueue-queue'. Missing elements are mapped back to id.
+            ;; When nil, this is a placeholder element.
             (id (if (org-ilm-element-p object)
                     (org-ilm-element--id object)
                   object))
@@ -7179,7 +7213,12 @@ A lot of formatting code from org-ql."
            ("Index" (list marked row t))
            ("Title" (list marked id t))
            (_ (list marked nil t))))
-        (t (error "wrong object value in table row")))))
+        ((null object)
+         (pcase (vtable-column vtable column)
+           ("Index" (list marked row t))
+           ("Title" (list marked "<empty>" t))
+           (_ (list marked nil t))))
+        (t (error "wrong object value in table row: %s" object)))))
          
    :keymap (or keymap org-ilm-queue-map)
    :actions '("S" ignore)))
@@ -7556,30 +7595,46 @@ A lot of formatting code from org-ql."
       (with-selected-window org-ilm--queue-select-minibuffer-window
         (exit-minibuffer)))))
 
-(defun org-ilm--queue-select-read (queue &optional init-position prompt)
+(defun org-ilm--queue-select-read (queue &optional init-position prompt numnew)
   "Show only the preview buffer above the minibuffer during completion."
-  (if (<= (ost-tree-size queue) 1)
+  (cl-assert (org-ilm-queue-p queue))
+  (if (<= (ost-tree-size queue numnew) 1)
       (cons 0 0.0)
     (let* ((saved-config (current-window-configuration))
-           (preview-buf (setq org-ilm--queue-select-buffer
-                              (org-ilm--queue-buffer-create queue)))
+           newkeys
            position)
-
-      ;; Setup buffer
-      (org-ilm--queue-buffer-build :buffer preview-buf :keymap org-ilm-queue-select-map)
-      (with-current-buffer preview-buf
-        (add-hook 'post-command-hook
-                  (lambda ()
-                    (when (not (= (point) org-ilm--queue-select-point))
-                      (setq org-ilm--queue-select-point (point))
-                      (org-ilm--queue-select-update-minibuffer)))
-                  nil 'local))
       
       (unwind-protect
           (progn
+
+            (when (and numnew (>= numnew 0))
+              (let* ((largest-node (ost-select queue (1- (ost-size queue))))
+                     (largest-key (ost-node-key largest-node)))
+                (dotimes (i numnew)
+                  (let ((key (+ largest-key i 1)))
+                    (ost-tree-insert queue key key)
+                    (push key newkeys)))))
+            
+            (setq org-ilm--queue-select-buffer
+                  (org-ilm--queue-buffer-create queue))
+
+            ;; Build element table in buffer
+            (org-ilm--queue-buffer-build
+             :buffer org-ilm--queue-select-buffer
+             :keymap org-ilm-queue-select-map)
+
+            ;; Add a hook that detects movement to new row, update priority in minibuffer. 
+            (with-current-buffer org-ilm--queue-select-buffer
+              (add-hook 'post-command-hook
+                        (lambda ()
+                          (when (not (= (point) org-ilm--queue-select-point))
+                            (setq org-ilm--queue-select-point (point))
+                            (org-ilm--queue-select-update-minibuffer)))
+                        nil 'local))
+      
             ;; Replace all windows with our preview buffer
             (delete-other-windows)
-            (switch-to-buffer preview-buf)
+            (switch-to-buffer org-ilm--queue-select-buffer)
             (org-ilm--queue-select-update
              (car (ost-tree-position queue (or init-position 0.0)))
              prompt)
@@ -7587,7 +7642,7 @@ A lot of formatting code from org-ql."
             ;; now set up minibuffer hook
             (minibuffer-with-setup-hook
                 (lambda ()
-                  (with-current-buffer preview-buf
+                  (with-current-buffer org-ilm--queue-select-buffer
                     (setq org-ilm--queue-select-minibuffer-window
                           (active-minibuffer-window)))
                   (add-hook 'post-command-hook
@@ -7604,12 +7659,19 @@ A lot of formatting code from org-ql."
                                          (setq position pos)
                                          (org-ilm--queue-select-update (car pos) prompt))))))
                             nil t))
-              (setq position (org-ilm-ost--position-read queue init-position nil prompt))))
+              (setq position (org-ilm-ost--position-read queue init-position nil prompt)))
+            ) ; Unwind-protect body
+
+        ;;; Unwind forms
         ;; restore old window setup
         (set-window-configuration saved-config)
-        (kill-buffer preview-buf)
+        (dolist (key newkeys)
+          (ost-tree-remove queue key))
+        (when (buffer-live-p org-ilm--queue-select-buffer)
+          (kill-buffer org-ilm--queue-select-buffer))
         (setq org-ilm--queue-select-buffer nil)
-        )
+        ) ; Unwind-protect unwind
+      
       position)))
 
 
@@ -9459,7 +9521,11 @@ Return t if already ready."
           (if (org-ilm-element--card-p element)
               ;; TODO Pass duration??
               (org-ilm--card-review rating id)
-            (org-ilm--material-review id duration)))))
+            (org-ilm--material-review id duration))
+          (org-ilm--element-review
+           (org-ilm-element--type element)
+           element duration :rating rating)
+          )))
     
     (let ((element (org-ilm--queue-pop)))
       
@@ -9707,3 +9773,4 @@ needs the attachment buffer."
 (provide 'org-ilm)
 
 ;;; org-ilm.el ends here
+
