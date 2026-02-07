@@ -3402,9 +3402,9 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
       (let ((title (org-ilm-capture--title capture))
             (state (org-ilm-capture--state capture)))
         (setq template
-              (format "* %s%s %s"
-                      (or state "")
-                      (if title (concat " " title) "")
+              (format "* %s%s%s"
+                      (if state (concat state " ") "")
+                      (or title "")
                       "%?"))))
 
     (setq capture-kwargs
@@ -3456,6 +3456,15 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              (when-let ((bibtex (org-ilm-capture--bibtex capture)))
                (write-region (mochar-utils--format-bibtex-entry bibtex) nil
                              (org-ilm--collection-bib collection) 'append))
+
+             ;; Mark headline title so it can be edited faster
+             (goto-char (point-min))
+             (if (re-search-forward org-complex-heading-regexp nil t)
+                 (when-let ((beg (match-beginning 4))
+                            (end (match-end 4)))
+                   (set-mark beg)
+                   (goto-char end))
+               (end-of-line))
              
              ) ; end :hook lambda
 
@@ -3674,15 +3683,26 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
 (defun org-ilm--org-new (type &optional parent)
   "Create a new Org element of TYPE by letting user type in attachment
-content in a capture buffer."
+content in a capture buffer.
+
+This functions creates a capture for the org attachments, while
+`org-ilm--capture-capture' creates a capture for the collection
+element. The way it works is by writing the capture in a tmp file, which
+is then passed as a file move capture."
+  ;; Use `org-capture's after-finalize hook to immediately capture the content
+  ;; into an element.
   (let* ((tmp-file (make-temp-file "" nil ".org"))
          (after-finalize (lambda ()
                            (unless org-note-abort
-                             (org-ilm--capture-capture
-                              type
-                              :parent (-some-> parent org-ilm-element--id)
-                              :collection (org-ilm--active-collection)
-                              :file tmp-file :method 'mv)))))
+                             ;; (let ((org-ilm-capture-show-menu t))
+                             (let ((org-ilm-capture-show-menu nil))
+                               (org-ilm--capture-capture
+                                type
+                                :capture-kwargs '(:immediate-finish nil)
+                                :parent (-some-> parent org-ilm-element--id)
+                                :collection (org-ilm--active-collection)
+                                :file tmp-file
+                                :method 'mv))))))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list (list "n" "New" 'plain (list 'file tmp-file) ""
                            :after-finalize after-finalize))))
@@ -7826,6 +7846,7 @@ A lot of formatting code from org-ql."
        :content (unless file (buffer-string))
        :title title
        :props props
+       :capture-kwargs '(:immediate-finish nil)
        :on-success
        (lambda (id attach-dir collection)
          (when file
