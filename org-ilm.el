@@ -3680,7 +3680,7 @@ content in a capture buffer."
                            (unless org-note-abort
                              (org-ilm--capture-capture
                               type
-                              :parent parent
+                              :parent (-some-> parent org-ilm-element--id)
                               :collection (org-ilm--active-collection)
                               :file tmp-file :method 'mv)))))
     (cl-letf (((symbol-value 'org-capture-templates)
@@ -3688,13 +3688,13 @@ content in a capture buffer."
                            :after-finalize after-finalize))))
       (org-capture nil "n"))))
 
-(defun org-ilm-org-new-material ()
+(defun org-ilm-org-new-material (&optional parent)
   (interactive)
-  (org-ilm--org-new 'material))
+  (org-ilm--org-new 'material parent))
 
-(defun org-ilm-org-new-card ()
+(defun org-ilm-org-new-card (parent)
   (interactive)
-  (org-ilm--org-new 'card))
+  (org-ilm--org-new 'card parent))
 
 ;;;;; Functions
 
@@ -7739,9 +7739,15 @@ A lot of formatting code from org-ql."
     ("g" "Registry" org-ilm--import-registry-transient)
     ]
    ["New"
-    ("o" "Org" org-ilm-org-new-material)
+    ("o" "Org"
+     (lambda ()
+       (interactive)
+       (org-ilm-org-new-material (org-ilm--import-transient-parent-el))))
     ("b" "Buffer" org-ilm-import-buffer)
-    ("c" "Card" org-ilm-org-new-card)
+    ("c" "Card"
+     (lambda ()
+       (interactive)
+       (org-ilm-org-new-card (org-ilm--import-transient-parent-el))))
     ]
    ]
 
@@ -7757,7 +7763,7 @@ A lot of formatting code from org-ql."
     parent-el))
 
 (defun org-ilm-import ()
-  "Import an item into your Ilm collection."
+  "Import an element into your ilm collection."
   (interactive)
   (org-ilm--import-transient (ignore-errors (org-ilm--element-from-context))))
 
@@ -7815,7 +7821,7 @@ A lot of formatting code from org-ql."
       (org-ilm--capture-capture
        'material
        :id id
-       :parent (when parent-el (org-ilm-element--id parent-el))
+       :parent (-some-> parent-el org-ilm-element--id)
        :collection (org-ilm--active-collection)
        :content (unless file (buffer-string))
        :title title
