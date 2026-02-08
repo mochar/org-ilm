@@ -374,8 +374,7 @@ here."
     ([attachment (org-ilm--attachment-data)]
      (cons 'attachment attachment))
     ([collections (org-ilm--collection-file (org-ilm--buffer-file-name))]
-     [collection (org-entry-get nil org-ilm-property-collection 'inherit)]
-     (setq collection (intern collection))
+     [collection (org-ilm--collection-first-valid collections)]
      (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
          (cons 'registry collection)
        (cons 'collection collection)))
@@ -826,6 +825,38 @@ If `HEADLINE' is passed, read it as org-property."
       (add-text-properties 0 (length state) (list 'face face) state))
     state))
 
+(defun org-ilm--org-capture-target-buffer (target)
+  (require 'org-capture)
+  (let ((org-capture-plist nil))
+    (org-capture-set-target-location target)
+    (org-capture-get :buffer)))
+
+(defun org-ilm--org-capture-programmatic (target text type &optional properties)
+  "Programmatically insert TEXT into TARGET without a capture buffer.
+
+TARGET is a valid org-capture target specification.
+TEXT is the string content to insert.
+TYPE is the capture type: 'entry (default), 'item, 'plain, or 'table-line.
+PROPERTIES is an optional plist of extra behavior (e.g., '(:prepend t))."
+  (require 'org-capture)
+  (let ((org-capture-plist (append (list :template text) properties)))
+    ;; Adds location and buffer to org-capture-plist
+    (org-capture-set-target-location target)
+
+    (with-current-buffer (org-capture-get :buffer)
+      (org-with-wide-buffer
+       (goto-char (org-capture-get :pos))
+
+       (condition-case err
+           (cond
+            ((eq type 'entry) (org-capture-place-entry))
+            ((eq type 'item) (org-capture-place-item))
+            ((eq type 'plain) (org-capture-place-plain-text))
+            ((eq type 'table-line) (org-capture-place-table-line)))
+         (error (error "Org-ilm failed to place capture: %s" err)))
+       
+       (save-buffer)))))
+
 ;;;;; Org-node / org-mem
 
 (defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
@@ -1008,25 +1039,117 @@ See `parsebib-read-entry'."
 
 ;;;; Collection
 
-(defcustom org-ilm-collections '((ilm . ((path . "~/ilm/")
-                                         (bib . "refs.bib")
-                                         (concepts . "concepts.org")
-                                         (registry . "registry.org")
-                                         (default . "inbox.org"))))
-  "Alist mapping collection name symbol to its configuration alist.
+(defcustom org-ilm-collection-default-targets
+  '((concept  . (file "concepts.org"))
+    (registry . (file "registry.org"))
+    (import   . (file "ilm.org"))
+    (bib      . (file "refs.bib")))
+  "Alist mapping ilm things to default targets.")
 
-Properties:
+(defcustom org-ilm-collections
+  (let ((targets org-ilm-collection-default-targets))
+    `((ilm :path     "~/ilm/"
+           :bib      ,(alist-get 'bib targets)
+           :concept  ,(alist-get 'concept targets)
+           :registry ,(alist-get 'registry targets)
+           :import   ,(alist-get 'import targets)
+           ))) 
+  "Alist mapping collection name symbol to its configuration plist.
+
+Configuration properties:
 
 `path' (required)
 
   The path to the collection (file or folder). Note that multiple collections
   can share a folder, in which case the concepts and registry are shared.
 
+The following specify default targets, for which see
+`org-ilm-collection-default-targets'.
+
+`import'
+
+  The default target for imports.
+
+`concept'
+
+  The deafult target for concepts.
+
+`registry'
+
+  The default target for registry items.
+
 `bib'
 
-  The path to the bibtex file. If missing will be named refs.bib."
+  The default target for bibtex entries."
   :type '(alist :key-type symbol :value-type alist)
-  :group 'org-ilm)
+  :group 'org-ilm-collection)
+
+(defcustom org-ilm-custom-collections nil
+  "Collections saved by org-ilm automatically."
+  :type '(alist :key-type symbol :value-type alist)
+  :group 'org-ilm-collection)
+
+(defun org-ilm-collections (&optional kind)
+  "Return alist of collection symbol -> data alist."
+  (pcase kind
+    ('set org-ilm-collections)
+    ('custom org-ilm-custom-collections)
+    (_ (append org-ilm-collections org-ilm-custom-collections))))
+
+(defun org-ilm--collection-property (collection property &optional kind)
+  "Return PROPERTY of COLLECTION."
+  (when-let ((config (alist-get collection (org-ilm-collections kind))))
+    (cond-let*
+      ;; When the property points to a target, we need to convert it to absolute path.
+      ([key (intern (substring (symbol-name property) 1))]
+       [default-target (alist-get key org-ilm-collection-default-targets)]
+       (let ((target (or (plist-get config property) default-target))
+             (col-path (plist-get config :path)))
+         (when (and (eq (car target) 'file) (not (f-absolute-p (nth 1 target))))
+           (if (f-file-p col-path)
+               (error "Collection \"%s\" is a single file, so target \"%s\" must be an absolute path" collection target)
+             (setf (nth 1 target) (expand-file-name (nth 1 target) col-path))))
+         target))
+      ;; When property is path, convert to absolute path
+      ((eq property :path)
+       (expand-file-name (plist-get config :path)))
+      (t 
+       (plist-get config property)))))
+
+(defun org-ilm--collection-path (collection)
+  "Return path of COLLECTION."
+  (org-ilm--collection-property collection :path))
+
+(defun org-ilm-new-collection (name path)
+  "Create a new collection."
+  (interactive
+   (list
+    (intern (read-string "Name: "))
+    (read-directory-name "Path: " (org-ilm--collection-property (org-ilm--active-collection) :path))))
+  (cond
+     ((alist-get name org-ilm-collections)
+      (user-error "Collection already exists with this name in org-ilm-collections, which cannot be overwritten automatically."))
+     ((alist-get name org-ilm-custom-collections)
+      ;; TODO Option to overwrite. Need to delete old pqueue, maybe more?
+      (user-error "Collection with name %s already exists." name))
+     (t
+      (setf (alist-get name org-ilm-custom-collections) `(:path ,path))
+      (customize-save-variable 'org-ilm-custom-collections org-ilm-custom-collections))))
+
+(defun org-ilm-delete-collection (collection)
+  "Delete a custom collection."
+  (interactive
+   (list
+    (intern (completing-read "Delete collection: " org-ilm-custom-collections))))
+  (let ((data-dir (org-ilm--collection-data-dir collection)))
+    (if data-dir
+      (let ((delete-by-moving-to-trash t))
+        (delete-directory data-dir 'recursive 'trash))
+      (warn "Data directory not found for collection %s" collection))
+    (setf (alist-get collection org-ilm-custom-collections nil 'remove) nil)
+    (customize-save-variable 'org-ilm-custom-collections org-ilm-custom-collections)
+    (setf (alist-get collection org-ilm--pqueues nil 'remove) nil)
+    (message "Delete collection %s" collection)))
 
 (defvar org-ilm--active-collection nil
   "The current collection that is active.")
@@ -1041,6 +1164,17 @@ Properties:
     ([collection (org-ilm--select-collection)]
      (setq org-ilm--active-collection collection))))
 
+(defun org-ilm--collection-first-valid (&optional collections)
+  "Goes up the ilm element hierarchy until it finds the first valid collection property."
+  (let ((collections (or collections (mapcar #'car (org-ilm-collections)))))
+    (org-element-lineage-map (org-element-at-point)
+        (lambda (el)
+          (-some--> (org-entry-get el org-ilm-property-collection)
+            intern
+            (and (member it collections) it)))
+      '(headline org-data)
+      'with-self 'first-match)))
+
 (defun org-ilm--collection-from-context ()
   "Infer collection based on the current buffer."
   (let ((location (org-ilm--where-am-i)))
@@ -1049,28 +1183,15 @@ Properties:
       ('attachment (nth 2 location))
       ('queue (cadr location)))))
 
-(defun org-ilm--collection-path (collection)
-  "Return path of COLLECTION."
-  (alist-get 'path (alist-get collection org-ilm-collections)))
-
 (defun org-ilm--collection-data-dir (collection)
   "Return the directory path where the data of COLLECTION is stored."
-  (when-let ((file-or-dir (org-ilm--collection-path collection)))
-    (if (f-file-p file-or-dir)
-        org-ilm-data-dir
-      (let ((dir (expand-file-name (format ".ilm/%s/" collection) file-or-dir)))
-        (make-directory dir 'parents)
-        dir))))
-
-(defun org-ilm--collection-default-file (collection)
-  "Return path of the default file in COLLECTION to place imports."
-  (or (alist-get 'default (alist-get collection org-ilm-collections))
-      (expand-file-name "inbox.org" (org-ilm--collection-path collection))))
-
-(defun org-ilm--collection-concepts-file (collection)
-  "Return path of file in COLLECTION where concepts are to be stored. May be nil."
-  (when-let ((file (alist-get 'concepts (alist-get collection org-ilm-collections))))
-    (expand-file-name file (org-ilm--collection-path collection))))
+  (when-let* ((file-or-dir (org-ilm--collection-path collection))
+              (parent-dir (if (f-file-p file-or-dir)
+                              org-ilm-data-dir
+                            (expand-file-name ".ilm/" file-or-dir))))
+    (let ((dir (expand-file-name (format "%s/" collection) parent-dir)))
+      (make-directory dir 'parents)
+      dir)))
 
 (defun org-ilm--collection-single-file-p (collection)
   "Return t if COLLECTION is a single file collection.
@@ -1080,22 +1201,12 @@ Raise error if neither file nor folder."
         (f-file-p path)
       (error "No path found for collection %s" collection))))
 
-(defun org-ilm--collection-bib (&optional collection)
-  "Return path to bibtex file of COLLECTION."
-  (let* ((collection (or collection (org-ilm--active-collection)))
-         (conf (alist-get collection org-ilm-collections))
-         (bib (alist-get 'bib conf)))
-    (if (org-ilm--collection-single-file-p collection)
-        (cl-assert (f-absolute-p bib) nil "Path to bibtex file must be absolute")
-      (setq bib (expand-file-name (or bib "refs.bib") (alist-get 'path conf))))
-    (unless (file-exists-p bib) (make-empty-file bib))
-    bib))
-
 (defun org-ilm-bibliography ()
   (interactive)
-  (if-let ((path (org-ilm--collection-bib)))
-      (let ((key (ignore-errors
-                   (car (mochar-utils--org-mem-cite-refs)))))
+  (if-let* ((target (org-ilm--collection-property (org-ilm--active-collection) :bib))
+            (buf (org-ilm--org-capture-target-buffer target))
+            (path (buffer-file-name buf)))
+      (let ((key (ignore-errors (car (mochar-utils--org-mem-cite-refs)))))
         (with-current-buffer (find-file path)
           (when key 
             (goto-char (point-min))
@@ -1103,7 +1214,7 @@ Raise error if neither file nor folder."
               (beginning-of-line)))))
     (user-error "Path to bibliography not found")))
 
-(defun org-ilm--collection-file (&optional file collection)
+(defun org-ilm--collection-file (&optional file collection kind)
   "Return list of collections of which FILE belongs to.
 
 A collection symbol COLLECTION can be passed to test if file belongs to that
@@ -1121,21 +1232,21 @@ When FILE is nil, file of current buffer."
         (funcall test path (org-ilm--collection-path collection))
       (seq-keep
        (lambda (c)
-         (when (funcall test path (alist-get 'path (cdr c))) (car c)))
-       org-ilm-collections))))
+         (when (funcall test path (plist-get (cdr c) :path)) (car c)))
+       (org-ilm-collections kind)))))
 
-(defun org-ilm--select-collection (&optional file)
+(defun org-ilm--select-collection (&optional file kind)
   "Prompt user for collection to select from.
 With FILE, limit collections to those valid in file (see 'path key in
 `org-ilm-collections')."
   (let ((collections (if file
-                         (org-ilm--collection-file file)
-                       (mapcar #'car org-ilm-collections))))
+                         (org-ilm--collection-file file nil kind)
+                       (mapcar #'car (org-ilm-collections kind)))))
     (car 
      (org-ilm--select-alist
       (mapcar
        (lambda (collection)
-         (cons collection (alist-get 'path (alist-get collection org-ilm-collections))))
+         (cons collection (alist-get 'path (alist-get collection (org-ilm-collections)))))
        collections)
       "Collection: "))))
 
@@ -1153,7 +1264,7 @@ With FILE, limit collections to those valid in file (see 'path key in
 (defun org-ilm--select-collection-file (collection &optional relative-p prompt)
   "Prompt user to select a file from COLLECTION.
 With RELATIVE-P non-nil, return path truncated relative to collection directory."
-  (cl-assert (assoc collection org-ilm-collections))
+  (cl-assert (assoc collection (org-ilm-collections)))
   (let ((col-path (org-ilm--collection-path collection))
         (files (org-ilm--collection-files collection))
         file)
@@ -1419,10 +1530,22 @@ This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
     ([pqueue (org-ilm--pqueue-read collection)]
      (setf (alist-get collection org-ilm--pqueues) pqueue))
     (t
-     (when (yes-or-no-p (format "No priority queue found for collection \"%s\". Create a new one?" collection))
-       (let* ((pqueue (org-ilm--pqueue-new collection)))
-         (org-ilm-ost--write pqueue)
-         (setf (alist-get collection org-ilm--pqueues) pqueue))))))
+     (let ((collection-data (alist-get collection (org-ilm-collections)))
+           create-pqueue)
+
+       (if collection-data
+           (setq create-pqueue (yes-or-no-p (format "No priority queue found for collection \"%s\". Create a new one?" collection)))
+         (when (yes-or-no-p (format "Collection \"%s\" does not exist. Create it?" collection))
+           (funcall-interactively
+            #'org-ilm-new-collection
+            collection
+            (org-ilm--collection-property (org-ilm--active-collection) :path))
+           (setq create-pqueue t)))
+
+       (when create-pqueue
+         (let* ((pqueue (org-ilm--pqueue-new collection)))
+           (org-ilm-ost--write pqueue)
+           (setf (alist-get collection org-ilm--pqueues) pqueue)))))))
 
 (defun org-ilm--pqueue-write-all ()
   "Force-save all pqueues that have pending changes."
@@ -3282,9 +3405,10 @@ The callback ON-ABORT is called when capture is cancelled."
      ((stringp parent)
       ;; Determine collection. Note that TARGET is ignored as PARENT specifies
       ;; this.
-      (if-let* ((col (org-ilm-element--collection (org-ilm--element-by-id parent))))
-          (setq collection col)
-        (error "Collection not found for PARENT %s" parent))
+      (unless collection
+        (if-let* ((col (org-ilm-element--collection (org-ilm--element-by-id parent))))
+            (setq collection col)
+          (error "Collection not found for PARENT %s" parent)))
 
       ;; If no priority given, decide based on parent
       (unless priority
@@ -3295,26 +3419,21 @@ The callback ON-ABORT is called when capture is cancelled."
      (parent
       (error "PARENT must be org-id string"))
      (target
-      (if (f-absolute-p target)
-          (progn
-            (cl-assert (file-exists-p target) nil "TARGET not a file")
-            (if collection
-                (cl-assert (org-ilm--collection-file target collection)
-                           nil "TARGET not in COLLECTION")
-              (let ((collections (org-ilm--collection-file target)))
-                (pcase (length collections)
-                  (0 (error "No collcetion specified or found for target %s" target))
-                  (1 (setq collection (car collections)))
-                  (t (error "Target %s may belong to one of multiple collections: %s" collections))))))
-        (cl-assert (assoc collection org-ilm-collections) nil
-                   "COLLECTION must be valid if TARGET is relative path")
-        (setq target (expand-file-name target
-                                       (org-ilm--collection-path collection)))))
+      (let* ((target-buf (org-ilm--org-capture-target-buffer target))
+             (target-path (buffer-file-name target-buf)))
+        (if collection
+            (cl-assert (org-ilm--collection-file target-path collection)
+                       nil "TARGET not in COLLECTION")
+          (let ((collections (org-ilm--collection-file target-file)))
+            (pcase (length collections)
+              (0 (error "No collcetion specified or found for target %s" target))
+              (1 (setq collection (car collections)))
+              (t (error "Target %s may belong to one of multiple collections: %s" collections)))))))
      (t
-      (cl-assert (assoc collection org-ilm-collections) nil
+      (cl-assert (assoc collection (org-ilm-collections)) nil
                  "COLLECTION must be a valid if no PARENT or TARGET given, got %s"
                  collection)
-      (setq target (org-ilm--collection-default-file collection))))
+      (setq target (org-ilm--collection-property collection :import))))
 
     ;; Make sure there is a collection
     (setq collection (or collection (org-ilm--active-collection)))
@@ -3376,8 +3495,8 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
     (cl-assert (org-ilm-capture-p capture))
 
-    ;; Capture target. If given should be string to parent org id. Else
-    ;; collection file import.
+    ;; Capture target. If parent is specified, target is replaced with parent
+    ;; org id.
     (if parent
         ;; Originally used the built-in 'id target, however for
         ;; some reason it sometimes finds the wrong location which
@@ -3391,7 +3510,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                              (lambda ()
                                (org-node-goto-id parent-id)
                                (org-back-to-heading)))))
-      (setq target (list 'file (org-ilm-capture--target capture))))
+      (setq target (org-ilm-capture--target capture)))
     
     ;; Save content in a file if provided.
     (when-let ((content (org-ilm-capture--content capture)))
@@ -3452,11 +3571,6 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              ;; Log to drawer
              (org-ilm--element-log-new type collection priority scheduled)
 
-             ;; Store bibtex
-             (when-let ((bibtex (org-ilm-capture--bibtex capture)))
-               (write-region (mochar-utils--format-bibtex-entry bibtex) nil
-                             (org-ilm--collection-bib collection) 'append))
-
              ;; Mark headline title so it can be edited faster
              (goto-char (point-min))
              (if (re-search-forward org-complex-heading-regexp nil t)
@@ -3515,6 +3629,12 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                    (org-ilm--pqueue-remove id collection)
                    (when-let ((on-abort (org-ilm-capture--on-abort capture)))
                      (funcall on-abort)))
+
+               ;; Store bibtex
+               (when-let ((bibtex (org-ilm-capture--bibtex capture))
+                          (bib-target (org-ilm--collection-property collection :bib)))
+                 (org-ilm--org-capture-programmatic bib-target (mochar-utils--format-bibtex-entry bibtex) 'plain))
+               
                (when org-ilm-update-org-mem-after-capture
                  (mochar-utils--org-mem-update-cache-after-capture 'entry))
                (run-hook-with-args 'org-ilm-capture-hook
@@ -3655,8 +3775,8 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                    :value (append
                            (let* ((collection (org-ilm-capture--collection scope))
                                   (target (or (org-ilm-capture--target scope)
-                                              (org-ilm--collection-default-file
-                                               collection))))
+                                              (org-ilm--collection-property
+                                               collection :import))))
                              (list (concat "--collection="
                                            (file-relative-name
                                             target
@@ -3681,7 +3801,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
 ;;;;; New
 
-(defun org-ilm--org-new (type &optional parent)
+(defun org-ilm--org-new (type collection &optional parent)
   "Create a new Org element of TYPE by letting user type in attachment
 content in a capture buffer.
 
@@ -3700,7 +3820,7 @@ is then passed as a file move capture."
                                 type
                                 :capture-kwargs '(:immediate-finish nil)
                                 :parent (-some-> parent org-ilm-element--id)
-                                :collection (org-ilm--active-collection)
+                                :collection collection
                                 :file tmp-file
                                 :method 'mv))))))
     (cl-letf (((symbol-value 'org-capture-templates)
@@ -3708,13 +3828,13 @@ is then passed as a file move capture."
                            :after-finalize after-finalize))))
       (org-capture nil "n"))))
 
-(defun org-ilm-org-new-material (&optional parent)
+(defun org-ilm-org-new-material (collection &optional parent)
   (interactive)
-  (org-ilm--org-new 'material parent))
+  (org-ilm--org-new 'material collection parent))
 
-(defun org-ilm-org-new-card (parent)
+(defun org-ilm-org-new-card (collection &optional parent)
   (interactive)
-  (org-ilm--org-new 'card parent))
+  (org-ilm--org-new 'card collection parent))
 
 ;;;;; Functions
 
@@ -6669,7 +6789,7 @@ This does not fill the buffer with the queue elements! For this run
                      :state #'consult--buffer-preview
                      :items (mapcar #'buffer-name (org-ilm--queue-buffers collection))
                      ))
-                  (mapcar #'car org-ilm-collections)))))
+                  (mapcar #'car (org-ilm-collections))))))
     (car choice)))
 
 (defun org-ilm-queue-buffers ()
@@ -7719,19 +7839,42 @@ A lot of formatting code from org-ql."
 
 ;;;; Import
 
+(transient-define-infix org-ilm--import-transient-collection ()
+  :class 'transient-option
+  :transient 'transient--do-call
+  :allow-empty nil
+  :always-read t
+  :argument "--collection="
+  :reader
+  (lambda (&rest _)
+    (let* ((choices (map-apply
+                     (lambda (collection data)
+                       (cons
+                        (format
+                         "%s %s"
+                         (propertize (symbol-name collection) 'face 'bold)
+                         (alist-get 'path data))
+                        collection))
+                     (org-ilm-collections)))
+           (choice (completing-read "Collection: " choices))
+           (collection (map-elt choices choice)))
+      (cond
+       (collection (symbol-name collection))
+       ((not (string-empty-p choice))
+        (setq collection choice)
+        (org-ilm-new-collection
+         (intern collection)
+         (org-ilm--collection-property (org-ilm--active-collection) :path))
+        collection)))))
+
 (transient-define-prefix org-ilm--import-transient (scope)
   :refresh-suffixes t
+  :value
+  (lambda ()
+    (list (format "--collection=%s" (org-ilm--active-collection))))
+  
   ["Ilm"
-   ("C" "Collection"
-    (lambda ()
-      (interactive)
-      ;; TODO Better not to change active collection, instead just parse transient args
-      (setq org-ilm--active-collection (org-ilm--select-collection)))
-    :description
-    (lambda ()
-      (concat "Collection " (propertize (format "%s" (org-ilm--active-collection))
-                                        'face 'transient-value)))
-    :transient transient--do-call)
+   ("C" "Collection" org-ilm--import-transient-collection)
    ("." "As child" "--child"
     :inapt-if-not (lambda () (transient-scope)))
    (:info
@@ -7740,7 +7883,6 @@ A lot of formatting code from org-ql."
             (as-child (transient-arg-value "--child" (transient-get-value))))
         (propertize (org-ilm-element--title element)
                     'face (if as-child 'transient-value 'Info-quoted))))
-    ;; :if (lambda () (transient-scope)))
     :if (lambda () (and (transient-scope)
                         (transient-arg-value "--child" (transient-get-value)))))
    ]
@@ -7750,36 +7892,54 @@ A lot of formatting code from org-ql."
     ("r" "Resource"
      (lambda ()
        (interactive)
-       (org-ilm--import-resource-transient (transient-scope))))
+       (let ((args (org-ilm--import-transient-args)))
+         (org-ilm--import-resource-transient (plist-get args :collection))))
+     :inapt-if org-ilm--import-transient-parent-el
+     )
     ("f" "File"
      (lambda ()
        (interactive)
-       (org-ilm--import-file-transient (transient-scope))))
-    ("m" "Media" org-ilm--import-media-transient)
-    ("g" "Registry" org-ilm--import-registry-transient)
+       (org-ilm--import-file-transient (transient-scope)))
+     :inapt-if org-ilm--import-transient-parent-el)
+    ("m" "Media" org-ilm--import-media-transient
+     :inapt-if org-ilm--import-transient-parent-el)
+    ("g" "Registry" org-ilm--import-registry-transient
+     :inapt-if org-ilm--import-transient-parent-el)
     ]
    ["New"
     ("o" "Org"
      (lambda ()
        (interactive)
-       (org-ilm-org-new-material (org-ilm--import-transient-parent-el))))
+       (let ((args (org-ilm--import-transient-args)))
+         (org-ilm-org-new-material (plist-get args :collection) (plist-get args :parent)))))
     ("b" "Buffer" org-ilm-import-buffer)
     ("c" "Card"
      (lambda ()
        (interactive)
-       (org-ilm-org-new-card (org-ilm--import-transient-parent-el))))
+       (let ((args (org-ilm--import-transient-args)))
+         (org-ilm-org-new-card (plist-get args :collection) (plist-get args :parent)))))
     ]
    ]
 
   (interactive "P")
   (transient-setup 'org-ilm--import-transient nil nil :scope scope))
 
+(defun org-ilm--import-transient-args ()
+  (let* ((args (if transient-current-command
+                   (transient-args transient-current-command)
+                 (transient-get-value)))
+         (as-child (transient-arg-value "--child" args))
+         (collection (intern (transient-arg-value "--collection=" args))))
+    (list :parent (when as-child (transient-scope))
+          :collection collection)))
+
 (defun org-ilm--import-transient-parent-el ()
   "Return parent ilm element if chosen to save element as its child."
   (when-let ((parent-el (transient-scope))
              (as-child (transient-arg-value
                         "--child"
-                        (transient-args 'org-ilm--import-transient))))
+                        (transient-get-value))))
+                        ;; (transient-args 'org-ilm--import-transient))))
     parent-el))
 
 (defun org-ilm-import ()
@@ -7812,13 +7972,15 @@ A lot of formatting code from org-ql."
   (let* ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
          (id (org-id-new))
          (title (buffer-name (get-buffer buf)))
-         (parent-el (org-ilm--import-transient-parent-el))
+         (args (org-ilm--import-transient-args))
+         (parent-el (plist-get args :parent))
+         (collection (plist-get args :collection))
          props file)
 
     (with-current-buffer buf
       ;; Process buffer
       (pcase major-mode
-        ('gptel-mode
+        (gptel-mode
          (gptel-org--save-state))
         (_
          ;; Link roam ref
@@ -7842,7 +8004,7 @@ A lot of formatting code from org-ql."
        'material
        :id id
        :parent (-some-> parent-el org-ilm-element--id)
-       :collection (org-ilm--active-collection)
+       :collection collection
        :content (unless file (buffer-string))
        :title title
        :props props
@@ -7879,12 +8041,14 @@ A lot of formatting code from org-ql."
 ;;;;; File
 
 (defun org-ilm--import-file-transient-args ()
-  (when transient-current-command
-    (let* ((args (transient-args transient-current-command))
-           (file (transient-arg-value "--file=" args))
-           (method (transient-arg-value "--method=" args))
-           (collection org-ilm--active-collection))
-      (list :file file :method method :collection collection))))
+  (let* ((args (if transient-current-command
+                   (transient-args transient-current-command)
+                 (transient-get-value)))
+         (file (transient-arg-value "--file=" args))
+         (method (transient-arg-value "--method=" args)))
+    (append
+     (org-ilm--import-transient-args)
+     (list :file file :method method))))
 
 (transient-define-infix org-ilm--import-file-transient-file ()
   :class 'transient-option
@@ -7897,13 +8061,14 @@ A lot of formatting code from org-ql."
     (read-file-name prompt nil initial-input t)))
 
 (transient-define-prefix org-ilm--import-file-transient (scope)
+  :refresh-suffixes t
   :value
   (lambda ()
     (append
      '("--method=cp")
      (when buffer-file-name
        (list (concat "--file=" buffer-file-name)))))
-  :refresh-suffixes t
+  
   ["File import"
    ("f" "File" org-ilm--import-file-transient-file)
    ("m" "Method of attachment" "--method="
@@ -8059,7 +8224,10 @@ A lot of formatting code from org-ql."
             :title title :type type :data data))))
 
 (defun org-ilm--import-resource-transient-args (&optional args)
-  (setq args (or args (transient-args 'org-ilm--import-resource-transient)))
+  ;; (setq args (or args (transient-args 'org-ilm--import-resource-transient)))
+  (setq args (if transient-current-command
+                 (transient-args transient-current-command)
+               (transient-get-value)))
   (cl-destructuring-bind (&key source-type bibtex id key title &allow-other-keys)
       org-ilm--import-resource-data
     
@@ -8275,10 +8443,7 @@ A lot of formatting code from org-ql."
           
           (org-ilm--capture-capture
            'material
-           :parent (when as-child
-                     (when-let ((el (transient-scope)))
-                       (org-ilm-element--id el)))
-           :collection (org-ilm--active-collection)
+           :collection (transient-scope)
            :title title
            :id id
            :bibtex bibtex
@@ -8922,7 +9087,7 @@ rounded and clamped to at least 1."
          (collection (if (or select-collection-p (null collection))
                          (org-ilm--select-collection)
                        collection))
-         (file (or (org-ilm--collection-concepts-file collection)
+         (file (or (org-ilm--collection-property collection :concept)
                    (org-ilm--select-collection-file collection nil "Concept location: "))))
     (setq id (or id (org-id-new)))
     (cl-letf (((symbol-value 'org-capture-templates)
@@ -9567,10 +9732,6 @@ Return t if already ready."
                    (minutes (/ diff 60.0)))
               (setq duration minutes)))
           
-          (if (org-ilm-element--card-p element)
-              ;; TODO Pass duration??
-              (org-ilm--card-review rating id)
-            (org-ilm--material-review id duration))
           (org-ilm--element-review
            (org-ilm-element--type element)
            element duration :rating rating)
