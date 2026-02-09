@@ -24,6 +24,7 @@
 (require 'fsrs)
 (require 'org-transclusion)
 (require 'cl-lib)
+(require 'map)
 (require 'dash)
 (require 'rx)
 (require 'peg)
@@ -895,6 +896,20 @@ to parse the headline."
           (org-mem-updater-ensure-id-node-at-point-known))
         (org-mem-entry-by-id id))))
 
+;;;;; Consult
+
+(defun org-ilm--consult-buffer-select ()
+  "Select a buffer as if using `consult-buffer'."
+  (let* ((captured-buffer nil)
+         ;; Override the display function to capture the buffer/file
+         (consult--buffer-display (lambda (buf &optional norecord)
+                                    (setq captured-buffer 
+                                          (if (stringp buf)
+                                              (get-buffer-create buf)
+                                            buf)))))
+    (consult-buffer)
+    captured-buffer))
+
 ;;;; Citation
 
 (defcustom org-ilm-bibtex-fields nil
@@ -1099,7 +1114,7 @@ The following specify default targets, for which see
       ;; When the property points to a target, we need to convert it to absolute path.
       ([key (intern (substring (symbol-name property) 1))]
        [default-target (alist-get key org-ilm-collection-default-targets)]
-       (let ((target (or (plist-get config property) default-target))
+       (let ((target (copy-sequence (or (plist-get config property) default-target)))
              (col-path (plist-get config :path)))
          (when (and (eq (car target) 'file) (not (f-absolute-p (nth 1 target))))
            (if (f-file-p col-path)
@@ -3619,6 +3634,11 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                    (set-mark beg)
                    (goto-char end))
                (end-of-line))
+
+             ;; Save buffer to let org-mem detect node. This allows us org-ilm
+             ;; actions like setting concepts. When aborted, org-capture undoes
+             ;; the changes in the target file.
+             (save-buffer)
              
              ) ; end :hook lambda
 
@@ -4428,20 +4448,22 @@ When DIRECTORY-P, return directory of the file."
 
 (defun org-ilm--pdf-data ()
   "Return list with some data about the current PDF attachment."
-  (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
-                  (org-ilm--pdf-mode-p)))
-  (pcase-let* ((`(,_ ,org-id ,collection) (org-ilm--where-am-i))
-               (pdf-path (org-ilm--pdf-path))
-               (attach-dir (file-name-directory pdf-path))
-               (headline (org-ilm--org-headline-element-from-id org-id)))
-    (cl-assert headline nil "Collection element not found")
-    (list org-id attach-dir pdf-path collection headline)))
+  (pcase (org-ilm--where-am-i)
+    (`(attachment ,id ,collection ,colfile)
+     (cl-assert (org-ilm--pdf-mode-p))
+     (let* ((pdf-path (org-ilm--pdf-path))
+            (attach-dir (file-name-directory pdf-path))
+            (headline (org-ilm--org-headline-element-from-id id)))
+       (cl-assert headline nil "Collection element not found")
+       (list :id id :attach-dir attach-dir :pdf-path pdf-path
+             :collection collection :headline headline)))
+    (_ (error "Not in element attachment"))))
 
 (defmacro org-ilm--pdf-with-point-on-collection-headline (of-document &rest body)
   "Place point on the headline belonging to this PDF attachment.
 When OF-DOCUMENT non-nil, jump to headline which has the orginal document as attachment."
   (declare (indent 1))
-  `(when-let ((headline (nth 4 (org-ilm--pdf-data))))
+  `(when-let ((headline (plist-get (org-ilm--pdf-data) :headline)))
      (org-with-point-at headline
        ,@body)))
 
@@ -4631,29 +4653,29 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
 
 ;;;;; Capture highlights
 
+;; Highlights of child captures shown in PDF file.
+
 (defvar-local org-ilm-pdf-highlight-captures-p t)
 (defvar-local org-ilm--pdf-captures nil)
 
 (defun org-ilm--pdf-gather-captures ()
   "Return list of elements (id type spec) for all child elements of PDF element."
-  (let* ((data (org-ilm--pdf-data))
-         (id (nth 0 data))
-         (headline (nth 4 data))
-         (element (org-ilm--element-by-id id))
-         (include-self (eq (org-ilm-element--type element) 'card))
-         (captures (org-ilm--element-query-children
-                    element :return-type 'headline
-                    :include-self include-self
-                    :more-query '((property "ILM_PDF")))))
-    (seq-keep
-     (lambda (headline)
-       (when-let* ((id (org-element-property :ID headline))
-                   (type (org-ilm--element-type headline))
-                   (range (org-element-property :ILM_PDF headline))
-                   (range (org-ilm--pdf-range-from-string range))
-                   (spec (org-ilm--pdf-parse-spec range)))
-         (list id type spec)))
-     captures)))
+  (map-let (:id :headline) (org-ilm--pdf-data) 
+    (let* ((element (org-ilm--element-by-id id))
+           (include-self (eq (org-ilm-element--type element) 'card))
+           (captures (org-ilm--element-query-children
+                      element :return-type 'headline
+                      :include-self include-self
+                      :more-query '((property "ILM_PDF")))))
+      (seq-keep
+       (lambda (headline)
+         (when-let* ((id (org-element-property :ID headline))
+                     (type (org-ilm--element-type headline))
+                     (range (org-element-property :ILM_PDF headline))
+                     (range (org-ilm--pdf-range-from-string range))
+                     (spec (org-ilm--pdf-parse-spec range)))
+           (list id type spec)))
+       captures))))
 
 (defun org-ilm--pdf-captures (&optional reparse-p)
   (org-ilm--pdf-mode-assert)
@@ -5235,48 +5257,47 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'page)))
-  (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-data))
-               (current-page (pdf-view-current-page))
-               (current-page-real (org-ilm--pdf-page-normalized))
-               (extract-org-id (org-id-new)))
+  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
+    (let ((current-page (pdf-view-current-page))
+          (current-page-real (org-ilm--pdf-page-normalized))
+          (extract-id (org-id-new)))
 
-    (pcase output-type
-      ('virtual
-       (let ((excerpt (org-ilm--generate-text-snippet
-                       (pdf-info-gettext current-page '(0 0 1 1)))))
+      (pcase output-type
+        ('virtual
+         (let ((excerpt (org-ilm--generate-text-snippet
+                         (pdf-info-gettext current-page '(0 0 1 1)))))
+           (org-ilm--capture-capture
+            'material
+            :parent id
+            :title (format "Page %s%s" current-page-real
+                           (if excerpt (concat ": " excerpt) ""))
+            :props (list :ILM_PDF current-page-real))))
+        ('text
+         (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
+           (org-ilm--capture-capture
+            'material :parent id :content text :ext "org")))
+        ('image
+         (let* ((img-path (org-ilm--pdf-image-export extract-id)))
+           (org-ilm--capture-capture
+            'material
+            :parent id :file img-path
+            :title (format "Page %s" current-page-real)
+            :id extract-id :method 'mv :ext t)))
+        ('org
          (org-ilm--capture-capture
           'material
-          :parent org-id
-          :title (format "Page %s%s" current-page-real
-                         (if excerpt (concat ": " excerpt) ""))
-          :props (list :ILM_PDF current-page-real))))
-      ('text
-       (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
-         (org-ilm--capture-capture
-          'material :parent org-id :content text :ext "org")))
-      ('image
-       (let* ((img-path (org-ilm--pdf-image-export extract-org-id)))
-         (org-ilm--capture-capture
-          'material
-          :parent org-id :file img-path
+          :parent id
           :title (format "Page %s" current-page-real)
-          :id extract-org-id :method 'mv :ext t)))
-      ('org
-       (org-ilm--capture-capture
-        'material
-        :parent org-id
-        :title (format "Page %s" current-page-real)
-        :id extract-org-id
-        :ext "org"
-        :on-success
-        (lambda (&rest _)
-          (org-ilm--pdf-convert-attachment-to-org
-           pdf-path
-           (1- current-page-real)
-           extract-org-id
-           :on-success
-           (lambda (proc buf id) (message "Conversion finished.")))))))))
+          :id extract-id
+          :ext "org"
+          :on-success
+          (lambda (&rest _)
+            (org-ilm--pdf-convert-attachment-to-org
+             pdf-path
+             (1- current-page-real)
+             extract-id
+             :on-success
+             (lambda (proc buf id) (message "Conversion finished."))))))))))
 
 ;; TODO When extracting text, use add-variable-watcher to watch for changes in
 ;; pdf-view-active-region as it has no hooks. it allow buffer local and set only
@@ -5288,194 +5309,191 @@ See also `org-ilm-pdf-convert-org-respect-area'."
   (when (and card-p (not (eq output-type 'virtual)))
     (error "Can only create virtual PDF card extracts"))
   
-  (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-data))
-               (extract-org-id (org-id-new))
-               (current-page (pdf-view-current-page))
-               (current-page-real (org-ilm--pdf-page-normalized))
-               (region (org-ilm--pdf-active-region))
-               (region-normalized (org-ilm--pdf-region-normalized region))
-               (region-text (car (pdf-view-active-region-text)))
-               (pdf-buffer (current-buffer))
-               (title
-                (format "Page %s region%s"
-                        current-page-real
-                        (if region-text
-                            (concat ": " (org-ilm--generate-text-snippet region-text))
-                          "")))
-               (capture-data
-                (list
-                 :title title
-                 :parent org-id
-                 :id extract-org-id
-                 ;; Add PDF region so that it can be rendered in pdf page even
-                 ;; when extracting as eg image
-                 :props (list :ILM_PDF (cons current-page-real region-normalized))))
-               (capture-on-success))
+  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
+    (let* (((extract-id (org-id-new))
+            (current-page (pdf-view-current-page))
+            (current-page-real (org-ilm--pdf-page-normalized))
+            (region (org-ilm--pdf-active-region))
+            (region-normalized (org-ilm--pdf-region-normalized region))
+            (region-text (car (pdf-view-active-region-text)))
+            (pdf-buffer (current-buffer))
+            (title
+             (format "Page %s region%s"
+                     current-page-real
+                     (if region-text
+                         (concat ": " (org-ilm--generate-text-snippet region-text))
+                       "")))
+            (capture-data
+             (list
+              :title title
+              :parent id
+              :id extract-id
+              ;; Add PDF region so that it can be rendered in pdf page even
+              ;; when extracting as eg image
+              :props (list :ILM_PDF (cons current-page-real region-normalized))))
+            capture-on-success)
 
-    (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
-      (user-error "Region smaller than minimum size. Try extracting as text or image."))
+           (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
+             (user-error "Region smaller than minimum size. Try extracting as text or image."))
 
-    (pcase output-type
-      ('virtual)
-      ('text
-       (setf (plist-get capture-data :content) region-text
-             (plist-get capture-data :ext) "org"))
-      ('image
-       (let ((file (org-ilm--pdf-image-export extract-org-id :region region)))
-         (setf (plist-get capture-data :file) file
-               (plist-get capture-data :method) 'mv
-               (plist-get capture-data :ext) t)))
-      ('org
-       (setf (plist-get capture-data :ext) "org")
-       (setq capture-on-success
-             (lambda ()
-               (org-ilm--image-convert-attachment-to-org
-                ;; TODO this shouldnt be the normalized region i think
-                (org-ilm--pdf-image-export
-                 extract-org-id :region region-normalized :dir attach-dir)
-                extract-org-id))))
-      (_ (error "Unrecognized output type")))
+           (pcase output-type
+             ('virtual)
+             ('text
+              (setf (plist-get capture-data :content) region-text
+                    (plist-get capture-data :ext) "org"))
+             ('image
+              (let ((file (org-ilm--pdf-image-export extract-id :region region)))
+                (setf (plist-get capture-data :file) file
+                      (plist-get capture-data :method) 'mv
+                      (plist-get capture-data :ext) t)))
+             ('org
+              (setf (plist-get capture-data :ext) "org")
+              (setq capture-on-success
+                    (lambda ()
+                      (org-ilm--image-convert-attachment-to-org
+                       ;; TODO this shouldnt be the normalized region i think
+                       (org-ilm--pdf-image-export
+                        extract-id :region region-normalized :dir attach-dir)
+                       extract-id))))
+             (_ (error "Unrecognized output type")))
 
-    ;; Temporary disable `org-link-parameters' which is an overkill way to
-    ;; deal with the following problem. When org-pdftools is used,
-    ;; `org-pdftools-setup-link' is called, which adds a custom link in
-    ;; `org-link-parameters' that detects an org capture in a pdf buffer, and
-    ;; then creates a text underline highlight automatically. This is
-    ;; undesired, so this turns it off. The backtrace is:
-    ;;   org-pdftools-store-link()
-    ;;   org-link--try-link-store-functions(nil)
-    ;;   org-store-link(nil)
-    (let ((org-link-parameters nil))
-      (apply #'org-ilm--capture-capture
-             (if card-p 'card 'material)
-             :on-success
-             (lambda (&rest _)
-               (when capture-on-success
-                 (funcall capture-on-success))
-               (org-ilm--pdf-captures 'reparse)
-               (pdf-view-deactivate-region)
-               (pdf-view-redisplay)
-               (when (eq major-mode 'pdf-virtual-view-mode)
-                 (org-ilm-pdf-virtual-refresh)))
-             capture-data))))
+           ;; Temporary disable `org-link-parameters' which is an overkill way to
+           ;; deal with the following problem. When org-pdftools is used,
+           ;; `org-pdftools-setup-link' is called, which adds a custom link in
+           ;; `org-link-parameters' that detects an org capture in a pdf buffer, and
+           ;; then creates a text underline highlight automatically. This is
+           ;; undesired, so this turns it off. The backtrace is:
+           ;;   org-pdftools-store-link()
+           ;;   org-link--try-link-store-functions(nil)
+           ;;   org-store-link(nil)
+           (let ((org-link-parameters nil))
+             (apply #'org-ilm--capture-capture
+                    (if card-p 'card 'material)
+                    :on-success
+                    (lambda (&rest _)
+                      (when capture-on-success
+                        (funcall capture-on-success))
+                      (org-ilm--pdf-captures 'reparse)
+                      (pdf-view-deactivate-region)
+                      (pdf-view-redisplay)
+                      (when (eq major-mode 'pdf-virtual-view-mode)
+                        (org-ilm-pdf-virtual-refresh)))
+                    capture-data))))))
 
 (defun org-ilm-pdf-section-extract (output-type)
   "Extract current section of outline."
   (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'section)))
 
-  (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-data))
-               (extract-org-id (org-id-new))
-               (pdf-buffer (current-buffer))
-               ;; TODO pass orginial file if in virtual
-               (outline (org-ilm--pdf-outline-get))
-               (num-pages (pdf-info-number-of-pages))
-               (current-page (org-ilm--pdf-page-normalized))
-               (section))
+  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
+    (let* ((extract-id (org-id-new))
+           (pdf-buffer (current-buffer))
+           ;; TODO pass orginial file if in virtual
+           (outline (org-ilm--pdf-outline-get))
+           (num-pages (pdf-info-number-of-pages))
+           (current-page (org-ilm--pdf-page-normalized))
+           (section))
 
-    (unless outline (error "No outline found"))
+      (unless outline (error "No outline found"))
 
-    ;; Find the outline section of the current page. If page overlaps
-    ;; multiple sections, prompt user to select.
-    (let ((within-indices
-           (seq-filter (lambda (i)
-                         (let ((page-start (alist-get 'page (nth i outline)))
-                               (page-end (if (= i (1- (length outline)))
-                                             num-pages
-                                           (alist-get 'page (nth (1+ i) outline)))))
-                           (and (>= current-page page-start)
-                                (<= current-page page-end))))
-                       (number-sequence 0 (1- (length outline))))))
-      (cond
-       ((= 1 (length within-indices))
-        (setq section (nth (car within-indices) outline)))
-       ((> (length within-indices) 1)
-        (let* ((choices (mapcar (lambda (i)
-                                  (cons (alist-get 'title (nth i outline)) i))
-                                within-indices))
-               (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
-          (setq section (nth choice outline))))
-       (t (error "Current page not within (known) section"))))
+      ;; Find the outline section of the current page. If page overlaps
+      ;; multiple sections, prompt user to select.
+      (let ((within-indices
+             (seq-filter (lambda (i)
+                           (let ((page-start (alist-get 'page (nth i outline)))
+                                 (page-end (if (= i (1- (length outline)))
+                                               num-pages
+                                             (alist-get 'page (nth (1+ i) outline)))))
+                             (and (>= current-page page-start)
+                                  (<= current-page page-end))))
+                         (number-sequence 0 (1- (length outline))))))
+        (cond
+         ((= 1 (length within-indices))
+          (setq section (nth (car within-indices) outline)))
+         ((> (length within-indices) 1)
+          (let* ((choices (mapcar (lambda (i)
+                                    (cons (alist-get 'title (nth i outline)) i))
+                                  within-indices))
+                 (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
+            (setq section (nth choice outline))))
+         (t (error "Current page not within (known) section"))))
 
-    ;; TODO When no title use page range
-    (let ((title (concat "Section: " (alist-get 'title section)))
-          (range (alist-get 'range section)))
-      (pcase output-type
-        ('virtual
-         (org-ilm--capture-capture
-          'material
-          :parent org-id
-          :title title
-          :props (list :ILM_PDF range)))
-        ('text
-         ;; TODO This currently extracts the actual PDF data lol
-         (with-temp-buffer
-           (if (= (length range) 2)
-               (insert (pdf-info-gettext (car range) (cdr range) nil pdf-buffer) "\n")
-             (let* ((range-begin (car range))
-                    (range-end (cdr range))
-                    (page-begin (car range-begin))
-                    (page-end (car range-end)))
-               (dolist (page (number-sequence page-begin page-end))
-                 (insert (pdf-info-gettext
-                          page
-                          (cond
-                           ((= page page-begin) (cdr range-begin))
-                           ((= page page-end) (cdr range-end))
-                           (t '(0 0 1 1)))
-                          'word pdf-buffer)
-                         "\n"))))
-
+      ;; TODO When no title use page range
+      (let ((title (concat "Section: " (alist-get 'title section)))
+            (range (alist-get 'range section)))
+        (pcase output-type
+          ('virtual
            (org-ilm--capture-capture
             'material
-            :parent org-id :content (buffer-string) :ext "org"
-            :title title)))
-        ('org
-         (org-ilm--capture-capture
-          'material
-          :parent org-id :id extract-org-id :ext "org"
-          :title title
-          :on-success
-          (lambda (&rest _)
-            (org-ilm--pdf-convert-attachment-to-org
-             pdf-path
-             (cons (1- (alist-get 'page section))
-                   (1- (alist-get 'next-page section)))
-             extract-org-id
-             :on-success
-             (lambda (proc buf id) (message "Conversion finished."))))))))))
+            :parent id
+            :title title
+            :props (list :ILM_PDF range)))
+          ('text
+           ;; TODO This currently extracts the actual PDF data lol
+           (with-temp-buffer
+             (if (= (length range) 2)
+                 (insert (pdf-info-gettext (car range) (cdr range) nil pdf-buffer) "\n")
+               (let* ((range-begin (car range))
+                      (range-end (cdr range))
+                      (page-begin (car range-begin))
+                      (page-end (car range-end)))
+                 (dolist (page (number-sequence page-begin page-end))
+                   (insert (pdf-info-gettext
+                            page
+                            (cond
+                             ((= page page-begin) (cdr range-begin))
+                             ((= page page-end) (cdr range-end))
+                             (t '(0 0 1 1)))
+                            'word pdf-buffer)
+                           "\n"))))
+
+             (org-ilm--capture-capture
+              'material
+              :parent id :content (buffer-string) :ext "org"
+              :title title)))
+          ('org
+           (org-ilm--capture-capture
+            'material
+            :parent id :id extract-id :ext "org"
+            :title title
+            :on-success
+            (lambda (&rest _)
+              (org-ilm--pdf-convert-attachment-to-org
+               pdf-path
+               (cons (1- (alist-get 'page section))
+                     (1- (alist-get 'next-page section)))
+               extract-id
+               :on-success
+               (lambda (proc buf id) (message "Conversion finished.")))))))))))
 
 ;;;;; Split
 
 (defun org-ilm-pdf-split ()
   "Split PDF outline items into a extracts."
   (interactive)
-  (pcase-let* ((`(,org-id ,attach-dir ,pdf-path ,collection ,headline)
-                (org-ilm--pdf-data))
-               (outline (org-ilm--pdf-outline-get)))
-    (unless outline (error "No outline found"))
-    (setq x outline)
-    (let ((depth (cdr
-                  (org-ilm--select-alist
-                   (seq-map
-                    (lambda (section)
-                      (cons
-                       (format "%s%s"
-                               (make-string (1- (alist-get 'depth section)) ?\s)
-                               (alist-get 'title section))
-                       (alist-get 'depth section)))
-                    outline)
-                   "Level on which to split: "
-                   nil 'ordered)))
-          (org-ilm-capture-show-menu nil))
-      (dolist (section outline)
-        (when (= depth (alist-get 'depth section))
-          (org-ilm--capture-capture
-           'material
-           :parent org-id
-           :title (concat "Section: " (alist-get 'title section))
-           :props (list :ILM_PDF (alist-get 'range section))))))))
+  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
+    (let ((outline (org-ilm--pdf-outline-get)))
+      (unless outline (error "No outline found"))
+      (setq x outline)
+      (let ((depth (cdr
+                    (org-ilm--select-alist
+                     (seq-map
+                      (lambda (section)
+                        (cons
+                         (format "%s%s"
+                                 (make-string (1- (alist-get 'depth section)) ?\s)
+                                 (alist-get 'title section))
+                         (alist-get 'depth section)))
+                      outline)
+                     "Level on which to split: "
+                     nil 'ordered)))
+            (org-ilm-capture-show-menu nil))
+        (dolist (section outline)
+          (when (= depth (alist-get 'depth section))
+            (org-ilm--capture-capture
+             'material
+             :parent id
+             :title (concat "Section: " (alist-get 'title section))
+             :props (list :ILM_PDF (alist-get 'range section)))))))))
 
 ;;;;; Cloze
 
@@ -7941,7 +7959,7 @@ A lot of formatting code from org-ql."
                         (format
                          "%s %s"
                          (propertize (symbol-name collection) 'face 'bold)
-                         (alist-get 'path data))
+                         (plist-get data :path))
                         collection))
                      (org-ilm-collections)))
            (choice (completing-read "Collection: " choices))
@@ -8057,13 +8075,13 @@ A lot of formatting code from org-ql."
 
 (defun org-ilm-import-buffer ()
   (interactive)
-  (let* ((buf (read-buffer "Buffer: " (current-buffer) 'require-match))
-         (id (org-id-new))
-         (title (buffer-name (get-buffer buf)))
-         (args (org-ilm--import-transient-args))
-         (parent-el (plist-get args :parent))
-         (collection (plist-get args :collection))
-         props file)
+  (pcase-let* (((map :parent parent-el :collection collection) (org-ilm--import-transient-args))
+               ;;(buf (read-buffer "Buffer: " (current-buffer) 'require-match))
+               (buf (org-ilm--consult-buffer-select))
+               (title (buffer-name buf))
+               (id (org-id-new))
+               (props)
+               (file))
 
     (with-current-buffer buf
       ;; Process buffer
@@ -10041,7 +10059,7 @@ needs the attachment buffer."
   [
    ["Actions"
     ("n" "Next" org-ilm-review-next)
-    ("p" "Postpone" org-ilm-review-postpone)
+    ("s" "Reschedule" org-ilm-review-postpone)
     ("d" "Done" org-ilm-review-done)
     ("q" "Quit" org-ilm-review-quit)]
    ["Element"
