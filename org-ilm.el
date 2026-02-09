@@ -2672,7 +2672,12 @@ COLLECTION specifies in which queue to look at."
      (lambda ()
        (interactive)
        (funcall-interactively #'org-ilm-element-done org-ilm--element-transient-element))
-     :inapt-if (lambda () (org-ilm-element--done org-ilm--element-transient-element)))
+     :if-not (lambda () (org-ilm-element--done org-ilm--element-transient-element)))
+    ("d" "Undone"
+     (lambda ()
+       (interactive)
+       (funcall-interactively #'org-ilm-element-undone org-ilm--element-transient-element))
+     :if (lambda () (org-ilm-element--done org-ilm--element-transient-element)))
     ("k" "Delete"
      (lambda ()
        (interactive)
