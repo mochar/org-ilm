@@ -1025,8 +1025,8 @@ See `parsebib-read-entry'."
         (setq position (org-ilm-ost--parse-position-str ost number-str))))
     position))
 
-(defun org-ilm-ost--position-format (ost position)
-  (when-let ((position (ost-tree-position ost position)))
+(defun org-ilm-ost--position-format (ost position &optional offset)
+  (when-let ((position (ost-tree-position ost position offset)))
     (let ((rank (car position))
           (quantile (cdr position)))
       (format "#%s/%s (%.2f%s)"
@@ -2241,7 +2241,8 @@ COLLECTION specifies in which queue to look at."
                         (org-ilm-element--priority element)
                         (ts-parse timestamp)
                         :reschedule)
-      (org-ilm--schedule :timestamp timestamp))))
+      (org-ilm--schedule :timestamp timestamp))
+    (save-buffer)))
 
 (defun org-ilm-element-set-priority (element)
   "Set the priority of an ilm element."
@@ -6469,7 +6470,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
             :documentation "Map id to org-ilm-element.")
   key ;; Used to call `org-ilm-element--KEY'
   reversed
-  randomness)
+  (randomness 0))
 
 (cl-defmethod ost-serialize ((queue org-ilm-queue))
   ;; Don't serialize elements, instead get IDs from ost and parse them again
@@ -6603,10 +6604,10 @@ Calling this function repeatedly will stack the shuffling, rather than sorting
 the queue and shuffling it afterwards. To achieve the latter, call
 `org-ilm--queue-sort' first, or pass it the RANDOMNESS parameter directly."
   (cl-assert (<= 0 randomness 1) nil "Queue shuffle RANDOMNESS must be between 0 and 1.")
+  (setf (org-ilm-queue--randomness queue) randomness)
   (unless (= randomness 0)
     (let ((ost (org-ilm-ost--as-tree queue)))
       (org-ilm-ost--tree-clear queue)
-      (setf (org-ilm-queue--randomness queue) randomness)
       (ost-map-in-order
        (lambda (node rank)
          (let* ((element (gethash (ost-node-id node)
@@ -6737,6 +6738,8 @@ If the queue has a query, run it again. Else re-parse elements."
                  (= (org-ilm-queue--randomness org-ilm-queue) randomness))
       (org-ilm-ost--tree-clear org-ilm-queue)
       (setf (org-ilm-queue--key org-ilm-queue) key)
+      ;; TODO Take note of elements where key=nil, and add it them in the end
+      ;; with value max+i so that they show up in bottom of queue view.
       (dolist (element (hash-table-values (org-ilm-queue--elements org-ilm-queue)))
         (org-ilm-queue--insert org-ilm-queue element)))
     (setf (org-ilm-queue--reversed org-ilm-queue) reversed)
@@ -7034,11 +7037,8 @@ If point on concept, add all headlines of concept."
 
 (defvar-keymap org-ilm-queue-base-map
   :doc "Base map of ilm queue, regardless if empty or not."
-  "n" (lambda ()
-        (interactive)
-        (next-line)
-        (when (eobp) (previous-line)))
-  "p" #'previous-line
+  "n" #'org-ilm-queue-next-element
+  "p" #'org-ilm-queue-previous-element
   "b" #'backward-char
   "f" #'forward-char
   "q" #'quit-window
@@ -7051,6 +7051,8 @@ If point on concept, add all headlines of concept."
 (defvar-keymap org-ilm-queue-map
   :doc "Keymap for the queue buffer."
   :parent org-ilm-queue-base-map
+  "M-n" #'org-ilm-queue-next-marked
+  "M-p" #'org-ilm-queue-previous-marked
   "r" #'org-ilm-queue-review
   "e" #'org-ilm-element-actions
   "v" #'org-ilm-queue-sort
@@ -7102,13 +7104,12 @@ If point on concept, add all headlines of concept."
                 (delete id org-ilm--queue-marked-objects))
         (push id org-ilm--queue-marked-objects)))))
 
-;; TODO This is ineffcient. Instead we should give vtable the selected-ed
-;; objects directly.
-(defun org-ilm--vtable-get-object (&optional index)
-  "Return (index . queue object) at point or by index."
+(defun org-ilm--vtable-get-object ()
+  "Return (index . queue object) at point."
   ;; when-let because index can be nil when out of table bounds
-  (when-let ((index (or index (vtable-current-object))))
-    (cons index (org-ilm--queue-select index))))
+  ;; (pcase-let ((`(,rank ,id) (vtable-current-object)))
+  ;;   (cons rank (gethash id (org-ilm-queue--elements org-ilm-queue)))))
+  (vtable-current-object))
 
 (defun org-ilm--vtable-get-object-id ()
   (org-ilm--queue-object-id
@@ -7215,6 +7216,52 @@ DAYS can be specified as numeric prefix arg."
   (interactive)
   (setq-local org-ilm--queue-marked-objects nil)
   (org-ilm-queue-revert))
+
+(defun org-ilm-queue-next-element ()
+  (interactive)
+  (next-line)
+  (unless (vtable-current-object) (previous-line)))
+
+(defun org-ilm-queue-previous-element ()
+  (interactive)
+  (previous-line)
+  (unless (vtable-current-object) (next-line)))
+
+(defun org-ilm-queue-next-marked ()
+  "Go to next marked element."
+  (interactive)
+  (let (done point)
+    (when org-ilm--queue-marked-objects
+      (save-excursion
+        (while (not done)
+          (next-line)
+          (if-let* ((id (org-ilm--vtable-get-object-id)))
+              (when (member id org-ilm--queue-marked-objects)
+                (setq done t
+                      point (point)))
+            (setq done t)))))
+    (if point
+        (goto-char point)
+      (message "No marked element after this point"))))
+
+(defun org-ilm-queue-previous-marked ()
+  "Go to previous marked element."
+  (interactive)
+  (let (done point)
+    (when org-ilm--queue-marked-objects
+      (save-excursion
+        (while (not done)
+          (if (= 0 (current-line))
+              (setq done t)
+            (previous-line)
+            (if-let* ((id (org-ilm--vtable-get-object-id)))
+                (when (member id org-ilm--queue-marked-objects)
+                  (setq done t
+                        point (point)))
+              (setq done t))))))
+    (if point
+        (goto-char point)
+      (message "No marked element before this point"))))
 
 (defun org-ilm-queue--set-header ()
   (setq header-line-format
@@ -7374,10 +7421,18 @@ A lot of formatting code from org-ql."
    :objects-function
    (lambda ()
      (unless (org-ilm--queue-empty-p)
-       (number-sequence 0 (1- (org-ilm--queue-count)))))
+       (let (objects)
+         (ost-map-in-order
+          (lambda (node rank)
+            (push 
+             (cons rank (gethash (ost-node-id node) (org-ilm-queue--elements org-ilm-queue)))
+             objects))
+          org-ilm-queue (not (org-ilm-queue--reversed org-ilm-queue)))
+         objects)))
    :getter
    (lambda (row column vtable)
-     (let* ((object (cdr (org-ilm--vtable-get-object row)))
+     (let* ((rank (car row))
+            (object (cdr row))
             ;; See `org-ilm--pqueue-queue'. Missing elements are mapped back to id.
             ;; When nil, this is a placeholder element.
             (id (if (org-ilm-element-p object)
@@ -7386,16 +7441,17 @@ A lot of formatting code from org-ql."
             (marked (member id org-ilm--queue-marked-objects)))
        (cond
         ((org-ilm-element-p object)
-         (let ((concepts (org-ilm-element--concepts object))
-               (priority (org-ilm-element--priority object)))
+         (let* ((element object)
+                (concepts (org-ilm-element--concepts element))
+                (priority (org-ilm-element--priority element)))
            (pcase (vtable-column vtable column)
-             ("Index" (list marked row))
-             ("Type" (list marked (org-ilm-element--type object)))
+             ("Index" (list marked rank))
+             ("Type" (list marked (org-ilm-element--type element)))
              ("Priority" (list marked priority))
-             ;; ("Cookie" (list marked (org-ilm-element--pcookie object)))
-             ("Title" (list marked (org-ilm-element--title object)))
-             ("Due" (list marked (org-ilm-element--schedrel object)))
-             ;; ("Tags" (list marked (org-ilm-element--tags object)))
+             ;; ("Cookie" (list marked (org-ilm-element--pcookie element)))
+             ("Title" (list marked (org-ilm-element--title element)))
+             ("Due" (list marked (org-ilm-element--schedrel element)))
+             ;; ("Tags" (list marked (org-ilm-element--tags element)))
              ("Concepts"
               (list marked
                     (mapcar #'org-mem-entry-by-id
@@ -7403,12 +7459,12 @@ A lot of formatting code from org-ql."
                             (last (car concepts) (cdr concepts))))))))
         ((stringp object)
          (pcase (vtable-column vtable column)
-           ("Index" (list marked row t))
+           ("Index" (list marked rank t))
            ("Title" (list marked id t))
            (_ (list marked nil t))))
         ((null object)
          (pcase (vtable-column vtable column)
-           ("Index" (list marked row t))
+           ("Index" (list marked rank t))
            ("Title" (list marked "<empty>" t))
            (_ (list marked nil t))))
         (t (error "wrong object value in table row: %s" object)))))
@@ -7581,8 +7637,8 @@ A lot of formatting code from org-ql."
            ("sched" '("--key=schedule"))))
        (when (org-ilm-queue--reversed org-ilm-queue)
          '("--reversed"))
-       (list (format "--randomness=%s"
-                     (org-ilm--round-float (org-ilm-queue--randomness org-ilm-queue) 3)))
+       (when-let ((randomness (org-ilm-queue--randomness org-ilm-queue)))
+         (list (format "--randomness=%s" (org-ilm--round-float randomness 3))))
        )))
 
   ["queue sort"
@@ -7758,11 +7814,11 @@ A lot of formatting code from org-ql."
           (interactive)
           (org-ilm--queue-select-accept-minibuffer)))
 
-(defun org-ilm--queue-select-update (pos &optional prompt)
+(defun org-ilm--queue-select-update (pos &optional prompt numnew)
   "Update preview buffer based on minibuffer INPUT."
   (when (and pos (buffer-live-p org-ilm--queue-select-buffer))
     (with-current-buffer org-ilm--queue-select-buffer
-      (setq pos (ost-tree-position org-ilm-queue pos))
+      (setq pos (ost-tree-position org-ilm-queue pos numnew))
       (setq header-line-format
             (concat (or prompt "Select position: ")
                     (org-ilm-ost--position-format org-ilm-queue (car pos))))
@@ -7799,6 +7855,7 @@ A lot of formatting code from org-ql."
       
       (unwind-protect
           (progn
+            (setq init-position (ost-tree-position queue init-position))
 
             (when (and numnew (>= numnew 0))
               (let* ((largest-node (ost-select queue (1- (ost-size queue))))

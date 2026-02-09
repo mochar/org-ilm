@@ -195,7 +195,7 @@ will return (N . 1.0)."
       (let ((rank (ost-tree--quantile-to-rank tree position offset)))
         (cons rank position)))
      ;; POSITION is rank
-     ((and (numberp position) (<= 0 position (1- size)))
+     ((and (numberp position) (not (floatp position)) (<= 0 position (1- size)))
       (let ((quantile (ost-tree--rank-to-quantile tree position offset)))
         (cons position (float quantile)))))))
 
@@ -560,22 +560,29 @@ starting from 0. Requires NODE to be a node within TREE."
   (let ((rank (ost-rank tree node-or-id)))
     (cdr (ost-tree-position tree rank))))
 
-(defun ost-map-in-order (func tree)
+(defun ost-map-in-order (func tree &optional reverse)
   "Apply FUNC to each node in TREE in rank order.
 FUNC is called with two arguments: (NODE RANK).
 This is O(N), whereas calling `ost-select' in a loop is O(N log N)."
-  (let ((rank 0))
+  (let ((rank (if reverse 
+                  (1- (ost-size tree)) ;; Start at max rank (N-1)
+                0)))                    ;; Start at min rank (0)
     (cl-labels ((traverse (node)
                   (when node
-                    ;; 1. Traverse Left (lower ranks)
-                    (traverse (ost-node-left node))
+                    ;; 1. First Subtree (Left for normal, Right for reverse)
+                    (traverse (if reverse 
+                                  (ost-node-right node)
+                                (ost-node-left node)))
                     
                     ;; 2. Visit Node
                     (funcall func node rank)
-                    (setq rank (1+ rank))
+                    ;; Update rank: decrement if reverse, increment otherwise
+                    (setq rank (if reverse (1- rank) (1+ rank)))
                     
-                    ;; 3. Traverse Right (higher ranks)
-                    (traverse (ost-node-right node)))))
+                    ;; 3. Second Subtree (Right for normal, Left for reverse)
+                    (traverse (if reverse 
+                                  (ost-node-left node)
+                                (ost-node-right node))))))
       (traverse (ost-tree-root tree)))))
 
 ;;;; Insert
