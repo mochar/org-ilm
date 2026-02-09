@@ -47,11 +47,6 @@
   :prefix "org-ilm-"
   :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
 
-(defcustom org-ilm-id-from-attachment-path-func 'org-ilm-infer-id-from-attachment-path
-  "Function that accepts a path to an attachment file and returns the Org id of the header."
-  :type 'function
-  :group 'org-ilm)
-
 (defcustom org-ilm-import-default-method 'cp
   "Default import method, or `nil' to always ask."
   :type '(choice (const :tag "Nil" nil)
@@ -225,14 +220,14 @@ here."
 ;;;; Commands
 
 (defun org-ilm-open-attachment ()
-  "Open attachment of item at point."
+  "Open attachment of ilm element at point."
   (interactive)
   (unless (org-ilm--attachment-open :no-error t)
+    ;; Since we are opening an attachment, the element is already made, meaning
+    ;; it or a parent should have the DIR property set.
     (pcase (read-char-choice "No attachments. (n)ew, (r)egistry, (s)elect: " '("n" "r" "s"))
       (?n 
-       (let* ((attach-dir (org-attach-dir-get-create))
-              (file-path (expand-file-name (concat (org-id-get) ".org") attach-dir)))
-         (find-file file-path)))
+       (find-file (expand-file-name (concat id ".org") (org-attach-dir-get-create))))
       (?s
        (if-let* ((attach-dir (org-attach-dir))
                  (attachments (org-attach-file-list attach-dir))
@@ -1189,10 +1184,23 @@ The following specify default targets, for which see
   (when-let* ((file-or-dir (org-ilm--collection-path collection))
               (parent-dir (if (f-file-p file-or-dir)
                               org-ilm-data-dir
-                            (expand-file-name ".ilm/" file-or-dir))))
+                            (expand-file-name ".ilm/collections/" file-or-dir))))
     (let ((dir (expand-file-name (format "%s/" collection) parent-dir)))
       (make-directory dir 'parents)
       dir)))
+
+(defun org-ilm--collection-attachment-dir (collection &optional id create-p)
+  "Directory of where the attachments of COLLECTION are stored.
+With ID return the path of element with the ID."
+  (when-let* ((file-or-dir (org-ilm--collection-path collection))
+              (dir (if (f-file-p file-or-dir)
+                       (expand-file-name (format "%s/" collection) org-ilm-data-dir)
+                     (expand-file-name ".ilm/attach/" file-or-dir))))
+    (make-directory dir 'parents) ;; always make parent dir
+    (when id
+      (setq dir (expand-file-name id dir))
+      (when create-p (make-directory dir 'parents)))
+    dir))
 
 (defun org-ilm--collection-single-file-p (collection)
   "Return t if COLLECTION is a single file collection.
@@ -3551,10 +3559,24 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              ;; callback. Has to be done in the hook so that point is on
              ;; the headline, and respects file-local or .dir-locals
              ;; `org-attach-id-dir'.
+             ;; TODO Should do a check that the top parent dir has DIR property,
+             ;; otherwise this fails.
              (setq attach-dir (if parent
                                   (expand-file-name (org-attach-dir))
-                                (org-attach-dir-from-id id)))
+                                (org-ilm--collection-attachment-dir collection id)))
              
+             ;; If this is an import header where the attachments will live, we
+             ;; need to set the DIR property, otherwise for some reason
+             ;; org-attach on children doesn't detect that there is a parent
+             ;; attachment header, even with a non-nil
+             ;; `org-attach-use-inheritance'.
+             (unless parent
+               (org-entry-put
+                nil "DIR"
+                (file-relative-name
+                 attach-dir
+                 (file-name-directory (org-ilm--collection-path collection)))))
+
              ;; Every element requires id and type properties.
              (org-entry-put nil "ID" id)
              (org-entry-put nil org-ilm-property-type (symbol-name type))
@@ -3604,21 +3626,6 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
            ;; widened to the entire buffer.
            :before-finalize
            (lambda ()
-             ;; If this is an import header where the attachments will live, we
-             ;; need to set the DIR property, otherwise for some reason
-             ;; org-attach on children doesn't detect that there is a parent
-             ;; attachment header, even with a non-nil
-             ;; `org-attach-use-inheritance'.
-             (unless parent
-               (org-entry-put
-                nil "DIR"
-                (file-relative-name
-                 (org-attach-dir-get-create)
-                 (file-name-directory (org-ilm--collection-path collection)))))
-
-             ;; TODO Should do a check that the top parent dir has DIR property,
-             ;; otherwise this fails.
-             
              ;; Attach the file in the org heading attach dir
              (when-let ((file   (org-ilm-capture--file capture))
                         (method (org-ilm-capture--method capture)))
@@ -5528,22 +5535,24 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 
 ;;;; Attachments
 
+;; TODO I dont actually use this
+(defun org-ilm--attachment-dir ()
+  "Attachment directory of element at point.
+This just returns the inherited DIR property, but only if the property
+holding headline is an ilm element."
+  (org-element-lineage-map
+      (org-element-at-point nil)
+      (lambda (el)
+        (and (org-ilm--element-by-id (org-element-property :ID el))
+             (org-element-property :DIR el)))
+    '(headline org-data) ;; TODO exlcude org-data?
+    'with-self 'first-match))
+
 (defvar-local org-ilm--data nil
   "Buffer-local ilm data stored in element attachment buffers.
 This is used to keep track of changes in priority and scheduling.")
 
 ;; TODO org-attach-delete-all
-
-(defun org-ilm-infer-id-from-attachment-path (path)
-  "Attempt parsing the org-id from the attachment path, return (id . location)."
-  (when path
-    (let* ((parts (split-string (file-name-directory path) "/" t))
-           (potential-id (pcase (file-name-nondirectory (org-attach-dir-from-id "abc"))
-                           ("abc" (car (last parts)))
-                           ("ab/c" (mapconcat #'identity (last parts 2) ""))
-                           (_ nil)))
-           (location (org-id-find potential-id)))
-      (when location (cons potential-id location)))))
 
 (defun org-ilm--attachment-data ()
   "Returns (org-id collection file) if current buffer is collection attachment file."
