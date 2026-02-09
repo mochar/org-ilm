@@ -1613,13 +1613,11 @@ With POSITION, set the new position in the queue, or insert there if not exists.
 ;; - The delay+timestamp fields can be compared with the previous log's due
 ;;   field to calculate how much it was postponed.
 
-(defconst org-ilm-log-element-fields '(timestamp delay priority due state))
-(defconst org-ilm-log-material-fields (append
-                                       org-ilm-log-element-fields
-                                       '(duration)))
+(defconst org-ilm-log-element-fields '(timestamp priority due duration action))
+(defconst org-ilm-log-material-fields org-ilm-log-element-fields)
 (defconst org-ilm-log-card-fields (append
                                    org-ilm-log-element-fields
-                                   '(rating stability difficulty)))
+                                   '(state stability difficulty)))
 
 (defcustom org-ilm-log-card-parameter-precision 3
   "The number of decimals to store for the stability and difficulty card parameters.
@@ -1632,7 +1630,8 @@ Difficulty is between 1 and 10. Want a bit more precision here."
 (cl-defstruct (org-ilm-log-review
                (:conc-name org-ilm-log-review--))
   "A review entry in an ilm element log drawer table."
-  type collection timestamp delay priority due duration state rating stability difficulty)
+  type collection timestamp priority due duration
+  action state stability difficulty)
 
 (defun org-ilm--log-fields (&optional type)
   "Return the log table fields of the element at point."
@@ -1655,12 +1654,14 @@ Difficulty is between 1 and 10. Want a bit more precision here."
          (value (funcall getter review)))
     (cond
      ((null value) "")
-     ((eq field 'delay)
-      (if (= 0 value) "" (format "%s" value)))
-     ((eq field 'rating)
+     ((eq field 'action)
       (format "%s" value))
      ((eq field 'duration)
       (org-duration-from-minutes value 'h:mm:ss))
+     ((and (eq field 'action) (eq value :reschedule))
+      (format "%s" (pcase value
+                     (:reschedule :sched)
+                     (_ value))))
      ((eq field 'state)
       (format "%s" (pcase value
                      (:learning :learn)
@@ -1679,27 +1680,27 @@ Difficulty is between 1 and 10. Want a bit more precision here."
 If element TYPE is omitted, infer from headline at point."
   (unless type (setq type (org-ilm--element-type)))
   (cl-assert (member type '(material card)))
+  
   ;; Empty values are parsed as "" so turn them to nil
   (dolist (pair alist)
     (when (and (stringp (cdr pair)) (string= (cdr pair) ""))
       (setcdr pair nil)))
+  
   (let ((collection (alist-get 'collection alist))
         (timestamp (alist-get 'timestamp alist))
-        (delay (alist-get 'delay alist))
         (priority (or (alist-get 'priority alist)
                       (alist-get 'prior alist)))
         (due (alist-get 'due alist))
         (duration (alist-get 'duration alist))
+        (action (alist-get 'action alist))
         (state (alist-get 'state alist))
-        (rating (alist-get 'rating alist))
         (stability (or (alist-get 'stability alist)
                        (alist-get 'S alist)))
         (difficulty (or (alist-get 'difficulty alist)
                         (alist-get 'D alist))))
     (cl-assert (symbolp collection))
     (cl-assert (org-ilm--timestamp-is-utc-iso8601-p timestamp))
-    (unless (string= state ":done")
-      (cl-assert (org-ilm--timestamp-is-iso8601-date-p due)))
+    
     (when priority
       (let* ((parts (string-split priority "-"))
              (rank (string-to-number (car parts)))
@@ -1707,20 +1708,24 @@ If element TYPE is omitted, infer from headline at point."
         (cl-assert (or (string= (car parts) "0") (> rank 0)))
         (cl-assert (or (string= (cadr parts) "0") (> size 0)))
         (setq priority (cons rank size))))
-    (when delay
-      (setq delay (string-to-number delay))
-      (cl-assert (numberp delay)))
-    (when state (setq state (intern state)))
+    
+    (when duration
+      (setq duration (org-duration-to-minutes duration)))
+
+    (setq action (pcase (-some-> action intern)
+                   (:sched :reschedule)
+                   (rest rest)))
+    (unless (eq action :done)
+      (cl-assert (org-ilm--timestamp-is-iso8601-date-p due)))
+
     (pcase type
       ('card
-       (setq state (pcase state
+       (setq state (pcase (-some-> state intern)
                      (:learn :learning)
                      (:relearn :relearning)
-                     (_ state)))
-       (cl-assert (member state '(:done :learning :review :relearning)))
-       (when rating
-         (setq rating (intern rating))
-         (cl-assert (member rating '(:again :hard :good :easy))))
+                     (rest rest)))
+       (cl-assert (or (null state) (member state '(:learning :review :relearning))))
+       (cl-assert (member action '(:new :done :undone :reschedule :again :hard :good :easy)))
        ;; Both are absent (new card) or both are present
        (cl-assert (eq (not stability) (not difficulty)))
        (when (and stability difficulty)
@@ -1729,14 +1734,12 @@ If element TYPE is omitted, infer from headline at point."
          (cl-assert (floatp stability))
          (cl-assert (floatp difficulty))))
       ('material
-       (cl-assert (or (not state) (member state '(:done))))
-       (cl-assert (null rating))
-       (when duration
-         (setq duration (org-duration-to-minutes duration)))))
+       (cl-assert (member action '(:new :done :review :reschedule)))))
     
-    (make-org-ilm-log-review :type type :collection collection :timestamp
-     timestamp :delay delay :priority priority :due due :duration duration
-     :state state :rating rating :stability stability :difficulty difficulty)))
+    (make-org-ilm-log-review
+     :type type :collection collection :timestamp timestamp :priority priority
+     :due due :duration duration :action action
+     :state state :stability stability :difficulty difficulty)))
 
 (defun org-ilm-log-review-ensure (data)
   "Make an `org-ilm-log-review' object from alist DATA, or return if already is one."
@@ -1857,12 +1860,8 @@ With CREATE-IF-MISSING non-nil.... you know. Then returns the table element."
     (org-ilm--log-beginning-of-collection-table collection 'create-if-missing)
     (org-ilm--log-table-append review)))
 
-(defun org-ilm--log-log (type collection priority due scheduled &rest review-data)
+(defun org-ilm--log-log (type collection priority due action &rest review-data)
   "Log a new review for an element and return the review object.
-
-SCHEDULED is the timestamp when the element was scheduled for
-review. This is used to calculate a delay in days between scheduled date
-and TIMESTAMP (date of review).
 
 DUE is the new scheduled review timestamp."
   (cl-assert (member type '(material card)))
@@ -1881,15 +1880,8 @@ DUE is the new scheduled review timestamp."
           (plist-get review-data :collection) collection
           (plist-get review-data :priority) (when rank (cons rank size))
           (plist-get review-data :due) due
+          (plist-get review-data :action) action
           (plist-get review-data :timestamp) (org-ilm--ts-format-utc timestamp))
-
-    ;; Add delay to review-data based on timestamp and scheduled date
-    (unless (null scheduled)
-      ;; TODO Is this midnight shift calculation right????
-      (let ((delay (org-ilm--ts-diff-rounded-days
-                    timestamp
-                    (ts-adjust 'minute (org-ilm-midnight-shift-minutes) scheduled))))
-        (setf (plist-get review-data :delay) delay)))
 
     (let ((review (apply #'make-org-ilm-log-review review-data)))
       (org-ilm--log-insert review)
@@ -2225,10 +2217,10 @@ COLLECTION specifies in which queue to look at."
 (cl-defgeneric org-ilm--element-format-scheduled (type scheduled)
   (org-ilm--ts-format-utc-date scheduled))
 
-(cl-defgeneric org-ilm--element-log-new (type collection priority due &rest args)
-  (org-ilm--log-log type collection priority due nil))
+(cl-defgeneric org-ilm--element-prepare-new (type collection priority due &rest args)
+  (org-ilm--log-log type collection priority due :new))
 
-(cl-defgeneric org-ilm--element-review (type element &rest args))
+(cl-defgeneric org-ilm--element-review (type element duration &rest args))
 
 (defun org-ilm-element-set-schedule (element)
   "Set the schedule of an ilm element."
@@ -2301,15 +2293,15 @@ COLLECTION specifies in which queue to look at."
     (when (or (not (called-interactively-p))
               (yes-or-no-p "Apply done on element?"))
       (atomic-change-group
-        ;; Log done state in drawer
+        ;; Log done action in drawer
         (org-ilm--log-log
          (org-ilm-element--type element)
          (org-ilm-element--collection element)
          (org-ilm-element--priority element)
          nil ;; due
-         (org-ilm-element--sched element)
-         :state :done
-         :duration duration :timestamp timestamp)
+         :done ;; action
+         :duration duration
+         :timestamp timestamp)
 
         ;; Remove scheduling
         (org-schedule '(4))
@@ -2349,10 +2341,12 @@ COLLECTION specifies in which queue to look at."
                         (when priority (/ (car priority) (float (cdr priority))))
                         nil 1))
              ;; TODO Handle this being nil
-             (due (org-ilm-log-review--due (car (last review-log 2)))))
+             (due (org-ilm-log-review--due (seq-find
+                                            #'org-ilm-log-review--due
+                                            (reverse review-log)))))
         (atomic-change-group
-          (when (eq (org-ilm-log-review--state last-review) :done)
-            (org-ilm--log-remove (org-ilm-log-review--timestamp last-review)))
+          ;; TODO For card make sure it has the fsrs properties
+          (org-ilm--log-log (org-ilm-element--type element) collection priority due :undone)
           (org-ilm--schedule :timestamp due)
           (org-todo 'none)
           (org-ilm-pqueue--insert pqueue (org-ilm-element--id element) priority))))))
@@ -2772,7 +2766,7 @@ as a new element and the initial interval based on PRIORITY is returned."
 
         (max 1 (round new-interval))))))
 
-(cl-defmethod org-ilm--element-review ((type (eql 'material)) element &rest args)
+(cl-defmethod org-ilm--element-review ((type (eql 'material)) element duration &rest args)
   "Apply a review on the material element.
 This will update the log table and the headline scheduled date."
   (org-ilm--element-with-point-at element
@@ -2795,8 +2789,8 @@ This will update the log table and the headline scheduled date."
              (due (ts-adjust 'day interval (ts-now))))
         (atomic-change-group
           (org-ilm--log-log 'material (org-ilm-element--collection element)
-                            priority due scheduled
-                            :duration (plist-get args :duration)
+                            priority due :review
+                            :duration duration
                             :timestamp (plist-get args :timestamp))
           (org-ilm--org-schedule :timestamp due :ignore-time t))))))
 
@@ -2843,6 +2837,10 @@ FSRS default: t"
                  (string :tag "Custom interval as %H:%S format")
                  (number :tag "Custom interval in minutes"))
   :group 'org-ilm-card)
+
+(defconst org-ilm-property-card-state "ILM_CARD_STATE")
+(defconst org-ilm-property-card-stability "ILM_CARD_STABILITY")
+(defconst org-ilm-property-card-difficulty "ILM_CARD_DIFFICULTY")
 
 ;;;;; Logic
 
@@ -2896,7 +2894,7 @@ concept properties."
      :maximum-interval org-ilm-card-fsrs-maximum-interval
      :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p)))
 
-(cl-defmethod org-ilm--element-review ((type (eql 'card)) element &rest args)
+(cl-defmethod org-ilm--element-review ((type (eql 'card)) element duration &rest args)
   "Rate a card element with RATING, update log and scheduled date."
   (org-ilm--element-with-point-at element
     (let* ((priority (org-ilm-element--priority element))
@@ -2907,7 +2905,7 @@ concept properties."
            (review-log  (org-ilm--log-read))
            (last-review (seq-find
                          (lambda (r)
-                           (not (eq (org-ilm-log-review--state r) :done)))
+                           (not (eq (org-ilm-log-review--action r) :done)))
                          (reverse review-log)))
            card)
       (cl-assert last-review nil "Card does not have a proper last review in log")
@@ -2919,9 +2917,9 @@ concept properties."
               scheduler
               (fsrs-make-card
                :step        (org-ilm--card-step-from-log scheduler review-log)
-               :state       (org-ilm-log-review--state last-review)
-               :stability   (org-ilm-log-review--stability last-review)
-               :difficulty  (org-ilm-log-review--difficulty last-review)
+               :state       (intern (org-entry-get nil org-ilm-property-card-state))
+               :stability   (string-to-number (org-entry-get nil org-ilm-property-card-stability))
+               :difficulty  (string-to-number (org-entry-get nil org-ilm-property-card-difficulty))
                :last-review (org-ilm-log-review--timestamp last-review)
                ;; Due date should be "artificial" one (potentially manually
                ;; edited), not the true date as scheduled in previous review, as
@@ -2931,17 +2929,25 @@ concept properties."
                :due (org-ilm--ts-format-utc scheduled))
               rating
               (org-ilm--ts-format-utc timestamp)
-              (plist-get args :duration))))
+              nil
+              ;; duration ;; TODO Pass this?
+              )))
 
       (atomic-change-group
         (org-ilm--log-log
          'card (org-ilm-element--collection element) priority
-         (fsrs-card-due card) scheduled
+         (fsrs-card-due card) rating
          :timestamp timestamp
-         :rating rating
+         :duration duration
          :state (fsrs-card-state card)
          :stability (fsrs-card-stability card)
          :difficulty (fsrs-card-difficulty card))
+        (org-entry-put nil org-ilm-property-card-state
+                       (symbol-name (fsrs-card-state card)))
+        (org-entry-put nil org-ilm-property-card-stability
+                       (number-to-string (fsrs-card-stability card)))
+        (org-entry-put nil org-ilm-property-card-difficulty
+                       (number-to-string (fsrs-card-difficulty card)))
         (org-ilm--org-schedule
          :timestamp (ts-parse (fsrs-card-due card)))))))
 
@@ -2957,12 +2963,12 @@ concept properties."
 (cl-defmethod org-ilm--element-format-scheduled ((type (eql 'card)) scheduled)
   (org-ilm--ts-format-utc-date-maybe-time scheduled))
 
-(cl-defmethod org-ilm--element-log-new ((type (eql 'card)) collection priority due &rest args)
+(cl-defmethod org-ilm--element-prepare-new ((type (eql 'card)) collection priority due &rest args)
   (org-ilm--log-log
-   'card collection priority due nil 
+   'card collection priority due :new 
    ;; Default state of a new fsrs card
-   :state :learning))
-
+   :state :learning)
+  (org-entry-put nil org-ilm-property-card-state ":learning"))
 
 ;;;;; Logging
 
@@ -2980,7 +2986,7 @@ An empty log implies a new card, so step is 0."
         (current-step 0))
     (dolist (review review-log)
       (let ((state  (org-ilm-log-review--state review))
-            (rating (org-ilm-log-review--rating review)))
+            (rating (org-ilm-log-review--action review)))
         ;; Note, :hard rating does not increment step
         (cond
          ((eq state :review)
@@ -3568,8 +3574,8 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              ;; Schedule in the org heading
              (org-schedule nil (org-ilm--element-format-scheduled type scheduled))
 
-             ;; Log to drawer
-             (org-ilm--element-log-new type collection priority scheduled)
+             ;; Log to drawer and other preparations
+             (org-ilm--element-prepare-new type collection priority scheduled)
 
              ;; Mark headline title so it can be edited faster
              (goto-char (point-min))
@@ -7980,7 +7986,7 @@ A lot of formatting code from org-ql."
     (with-current-buffer buf
       ;; Process buffer
       (pcase major-mode
-        (gptel-mode
+        ('gptel-mode
          (gptel-org--save-state))
         (_
          ;; Link roam ref
