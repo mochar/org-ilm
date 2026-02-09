@@ -1471,7 +1471,7 @@ in `org-ilm-queue--elements', rather than `org-ilm-element' object."
                  :name (format "Priority queue (%s)" collection)
                  :collection collection
                  :type 'pqueue))
-         (query (or query #'org-ilm--queries-query-all))
+         (query (or query #'org-ilm--queries-query-active))
          (element-map (org-ilm-query-collection query collection 'hash-table-p)))
 
     ;; Map over OST
@@ -1515,7 +1515,7 @@ This does not add the priority queue to `org-ilm--pqueues' or save it to disk."
   (let* ((pqueue (make-org-ilm-pqueue :collection collection))
          ;; TODO Use org-mem instead?
          (elements (org-ilm-query-collection
-                    #'org-ilm--queries-query-all
+                    #'org-ilm--queries-query-active
                     collection)))
     (dolist (element elements)
       (org-ilm-pqueue--insert pqueue (org-ilm-element--id element) 0))
@@ -6400,13 +6400,18 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive concept
 
 (defun org-ilm--queries-query-all (collection)
   "Query for org-ql to retrieve all elements."
-  `(ilm-element ,collection))
+  `(ilm-element ,collection (material card)))
+
+(defun org-ilm--queries-query-active (collection)
+  "Query for org-ql to retrieve not-done elements."
+  `(and (not (done)) (ilm-element ,collection (material card))))
 
 (defun org-ilm--queries-query-outstanding (collection)
   "Query for org-ql to retrieve the outstanding elements."
   (let ((today (ts-adjust 'minute (org-ilm-midnight-shift-minutes) (ts-now))))
     `(and
-      (ilm-element ,collection)
+      (ilm-element ,collection (material card))
+      (not (done))
       (scheduled :to ,today))))
 
 (defun org-ilm--query-select ()
