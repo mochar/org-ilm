@@ -1237,8 +1237,8 @@ When FILE is nil, file of current buffer."
 
 (defun org-ilm--select-collection (&optional file kind)
   "Prompt user for collection to select from.
-With FILE, limit collections to those valid in file (see 'path key in
-`org-ilm-collections')."
+With FILE, limit collections to those valid in file (see :path property
+in `org-ilm-collections')."
   (let ((collections (if file
                          (org-ilm--collection-file file nil kind)
                        (mapcar #'car (org-ilm-collections kind)))))
@@ -1246,7 +1246,7 @@ With FILE, limit collections to those valid in file (see 'path key in
      (org-ilm--select-alist
       (mapcar
        (lambda (collection)
-         (cons collection (alist-get 'path (alist-get collection (org-ilm-collections)))))
+         (cons collection (org-ilm--collection-property collection :path kind)))
        collections)
       "Collection: "))))
 
