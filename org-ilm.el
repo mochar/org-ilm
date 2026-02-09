@@ -142,7 +142,7 @@ here."
   "e" #'org-ilm-element-actions
   "a" #'org-ilm-attachment-actions
   "p" #'org-ilm-element-set-priority
-  "s" #'org-ilm-schedule
+  "s" #'org-ilm-element-set-schedule
   "o" #'org-ilm-open-dwim
   "x" #'org-ilm-extract
   "z" #'org-ilm-cloze
@@ -196,6 +196,7 @@ here."
                   #'org-ilm--org-mem-hook)
         (add-hook 'kill-emacs-hook
                   #'org-ilm--pqueue-write-all)
+        
         (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
         (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-actions)
         (define-key image-mode-map (kbd "A") org-ilm-image-map)
@@ -1654,11 +1655,9 @@ Difficulty is between 1 and 10. Want a bit more precision here."
          (value (funcall getter review)))
     (cond
      ((null value) "")
-     ((eq field 'action)
-      (format "%s" value))
      ((eq field 'duration)
       (org-duration-from-minutes value 'h:mm:ss))
-     ((and (eq field 'action) (eq value :reschedule))
+     ((eq field 'action)
       (format "%s" (pcase value
                      (:reschedule :sched)
                      (_ value))))
@@ -2222,12 +2221,19 @@ COLLECTION specifies in which queue to look at."
 
 (cl-defgeneric org-ilm--element-review (type element duration &rest args))
 
-(defun org-ilm-element-set-schedule (element)
+(defun org-ilm-element-set-schedule (element timestamp)
   "Set the schedule of an ilm element."
   (interactive
-   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
+   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))
+         (org-read-date 'with-time nil nil "Schedule: ")))
   (org-ilm--element-with-point-at element
-    (call-interactively #'org-ilm-schedule)))
+    (atomic-change-group
+      (org-ilm--log-log (org-ilm-element--type element)
+                        (org-ilm-element--collection element)
+                        (org-ilm-element--priority element)
+                        (ts-parse timestamp)
+                        :reschedule)
+      (org-ilm--schedule :timestamp timestamp))))
 
 (defun org-ilm-element-set-priority (element)
   "Set the priority of an ilm element."
@@ -7488,11 +7494,11 @@ A lot of formatting code from org-ql."
                      (rand-interval (random (1+ diff-days)))
                      (ts (ts-adjust 'day rand-interval start-ts))
                      (date (ts-format "%Y-%m-%d" ts)))
-                (org-ilm-schedule (org-ilm--element-at-point) date)
+                (org-ilm-element-set-schedule (org-ilm--element-from-context) date)
                 (puthash id (org-ilm--element-at-point) elements)))))
 
       ;; No marked elements, set schedule of element at point
-      (org-ilm-element-set-schedule (org-ilm--element-from-context))
+      (call-interactively #'org-ilm-element-set-schedule)
       (let ((element (org-ilm--element-from-context)))
         (puthash (org-ilm-element--id element) element elements)))
     (org-ilm-queue-revert)))
@@ -9029,15 +9035,6 @@ rounded and clamped to at least 1."
 ;; TODO Turn this to function
 ;; (due (<= (/ (ts-diff scheduled (org-ilm--ts-today)) 86400) 0)))
 
-;; TODO remove rely on element - just parse id
-(defun org-ilm-schedule (element timestamp)
-  "Set or update the schedule of the element at point."
-  (interactive
-   (list (org-ilm--element-at-point)
-         (org-read-date 'with-time nil nil "Schedule: ")))
-  (unless element (user-error "No ilm element at point"))
-  (org-ilm--schedule :timestamp timestamp))
-
 ;;;; Concepts
 
 ;;;;; Functions
@@ -9937,10 +9934,11 @@ needs the attachment buffer."
                  (org-ilm--ts-today))
       (message "Minimum postpone date should be tomorrow")
       (sleep-for 1.))
-    (org-ilm--org-with-point-at (plist-get org-ilm--review-data :id)
-      (org-ilm-schedule (org-ilm--element-at-point) date)
-      (let ((org-ilm--review-update-schedule nil))
-        (org-ilm--review-next)))))
+    (org-ilm-element-set-schedule
+     (org-ilm--element-by-id (plist-get org-ilm--review-data :id))
+     date)
+    (let ((org-ilm--review-update-schedule nil))
+      (org-ilm--review-next))))
 
 (defun org-ilm-review-done ()
   "Apply done on current element."
