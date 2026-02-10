@@ -4375,6 +4375,157 @@ This is done by converting the area to an image first. Note that this will likel
     (region . (virtual text image org))
     (section . (virtual text org))))
 
+;;;;; Content spec
+
+(cl-defstruct (org-ilm-pdf-page
+               (:conc-name org-ilm-pdf-page--))
+  number area selections)
+
+(cl-defstruct (org-ilm-pdf-range
+               (:conc-name org-ilm-pdf-range--))
+  begin end)
+
+(cl-defstruct (org-ilm-pdf-spec
+               (:conc-name org-ilm-pdf-spec--))
+  parts ;; list: org-ilm-pdf-page | org-ilm-pdf-range
+  single-page-p
+  )
+
+(defun org-ilm--pdf-spec-is-valid-rect (rect)
+  (and (listp rect)
+       (= (length rect) 4)
+       (cl-every (lambda (x) (<= 0 x 1)) rect)))
+
+(defun org-ilm--pdf-spec-parse-page (page-data)
+  (cond
+   ((numberp page-data)
+    (make-org-ilm-pdf-page :number page-data))
+   ((and (listp page-data)
+         (numberp (car page-data))
+         (<= (length page-data) 3)
+         (listp (nth 1 page-data))
+         (or (= 4 (length (nth 1 page-data))) ;; area
+             (listp (car (nth 1 page-data))))) ;; selections
+    (let* ((page (car page-data))
+           (area (when (numberp (car (nth 1 page-data))) (nth 1 page-data)))
+           (selections (nth (if area 2 1) page-data)))
+      (when (and area (not (org-ilm--pdf-spec-is-valid-rect area)))
+        (error "Area of page %s not valid: %s" page area))
+      (when (and selections (not (cl-every #'org-ilm--pdf-spec-is-valid-rect selections)))
+        (error "Selections of page %s not valid: %s" page selections))
+      (make-org-ilm-pdf-page :number page :area area :selections selections)))))
+
+(defun org-ilm--pdf-spec-parse (spec-data)
+  (unless (or (numberp spec-data) (listp spec-data))
+    (error "PDF spec invalid: %s" spec-data))
+  
+  (if-let ((page (org-ilm--pdf-spec-parse-page spec-data)))
+      (make-org-ilm-pdf-spec :parts (list page) :single-page-p t)
+    ;; Must be a list of parts
+
+    ;; Skip trailing "-":
+    ;; Technically we could support the remainder of pages being specified with
+    ;; a trailing "-", however we then need to first read the pdf to determine
+    ;; the number of pages which is a pain.
+    (when (eq (car (last spec-data)) '-)
+      (error "PDF page spec cannot end with \"-\": %s" spec-data))
+
+    (let ((i 0)
+          (cur-page 1)
+          range-begin
+          parts)
+      (while-let ((part (nth i spec-data)))
+        (cond-let*
+          ((eq part '-)
+           (when range-begin (error "Cannot have double range (--): %s" spec-data))
+           (if (= i (1- (length spec-data)))
+               (let ((last-part (car parts))
+                     beg)
+                 (cl-etypecase last-part
+                   (org-ilm-pdf-page
+                    (setq beg (1+ (org-ilm-pdf-page--number last-part))))
+                   (org-ilm-pdf-range
+                    (setq beg (1+ (org-ilm-pdf-range--end last-part)))))
+                 (push (make-org-ilm-pdf-range :begin beg) parts))
+             (setq range-begin cur-page))
+           (cl-incf i))
+          
+          ([page (org-ilm--pdf-spec-parse-page part)]
+           (with-slots (number area selections) page
+             (let ((has-parts (or area selections)))
+               (if (and (not has-parts) (eq (nth (1+ i) spec-data) '-))
+                   (progn
+                     (unless range-begin
+                       (setq range-begin (org-ilm-pdf-page--number page)))
+                     (cl-incf i 2))
+                 (cond 
+                  ((null range-begin)
+                   (push page parts))
+                  (has-parts
+                   (let ((range (make-org-ilm-pdf-range
+                                 :begin range-begin
+                                 :end (1- number))))
+                     (push range parts))
+                   (push page parts))
+                  (t
+                   (let ((range (make-org-ilm-pdf-range :begin range-begin :end number)))
+                     (push range parts))))
+                 
+                 (cl-incf i)
+                 (setq cur-page (1+ number)
+                       range-begin nil)))))
+          
+          (t
+           (error "PDF spec contains invalid part: %s" part)))) ;; while
+      (make-org-ilm-pdf-spec :parts (reverse parts)))))
+
+(defun org-ilm--pdf-spec-to-string (spec)
+  (cl-assert (org-ilm-pdf-spec-p spec))
+  (with-slots (parts single-page-p) spec
+    (let ((i 0)
+          spec-data)
+      (dolist (part (org-ilm-pdf-spec--parts spec))
+        (cl-etypecase part
+          (org-ilm-pdf-page
+           (with-slots (number area selections) part
+             (if (not (or area selections))
+                 (push number spec-data)
+               (let ((part-data (list number)))
+                 (when area (push area part-data))
+                 (when selections (push selections part-data))
+                 (push (reverse part-data) spec-data)))))
+          (org-ilm-pdf-range
+           (with-slots (begin end) part
+             (unless (and (= 1 begin) (= 0 i))
+               (push begin spec-data))
+             (push '- spec-data)
+             (push end spec-data))))
+        (cl-incf i))
+
+      (if single-page-p (car spec-data) (reverse spec-data)))))
+
+;; (-> (org-ilm--pdf-spec-parse 4)
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(4 (0.1 0.2 0.3 0.4)))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(4 ((.1 .1 .1 .1) (.2 .2 .2 .2))))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2))))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(2 5))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(- 5))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(2 - 5))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(- 2 - 5))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(3 - 5))
+;;     org-ilm--pdf-spec-to-string)
+;; (-> (org-ilm--pdf-spec-parse '(- 2 (4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2)))))
+;;     org-ilm--pdf-spec-to-string)
+
+
 ;;;;; Commands
 
 (defun org-ilm-pdf-open-full-document ()
@@ -4924,6 +5075,8 @@ attachment from its highlight."
 ;;   (start . end)
 ;; - Area
 ;;   (page . (left top right bottom))
+;; - Areas
+;;   (page . (area1 area2 ...))
 ;; - Range with area
 ;;   ((start . area) . (end . area))
 ;;   ((start . area) . end)
@@ -5003,7 +5156,9 @@ attachment from its highlight."
           :begin-page begin-page
           :begin-area begin-area
           :end-page end-page
-          :end-area end-area)))
+          :end-area end-area
+          ;; :selection nil 
+          )))
 
 (defun org-ilm--pdf-open-virtual (&optional no-region)
   "Open virtual page given by ILM_PDF spec, return buffer if found."
@@ -5310,75 +5465,75 @@ See also `org-ilm-pdf-convert-org-respect-area'."
     (error "Can only create virtual PDF card extracts"))
   
   (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
-    (let* (((extract-id (org-id-new))
-            (current-page (pdf-view-current-page))
-            (current-page-real (org-ilm--pdf-page-normalized))
-            (region (org-ilm--pdf-active-region))
-            (region-normalized (org-ilm--pdf-region-normalized region))
-            (region-text (car (pdf-view-active-region-text)))
-            (pdf-buffer (current-buffer))
-            (title
-             (format "Page %s region%s"
-                     current-page-real
-                     (if region-text
-                         (concat ": " (org-ilm--generate-text-snippet region-text))
-                       "")))
-            (capture-data
-             (list
-              :title title
-              :parent id
-              :id extract-id
-              ;; Add PDF region so that it can be rendered in pdf page even
-              ;; when extracting as eg image
-              :props (list :ILM_PDF (cons current-page-real region-normalized))))
-            capture-on-success)
+    (let* ((extract-id (org-id-new))
+           (current-page (pdf-view-current-page))
+           (current-page-real (org-ilm--pdf-page-normalized))
+           (region (org-ilm--pdf-active-region))
+           (region-normalized (org-ilm--pdf-region-normalized region))
+           (region-text (car (pdf-view-active-region-text)))
+           (pdf-buffer (current-buffer))
+           (title
+            (format "Page %s region%s"
+                    current-page-real
+                    (if region-text
+                        (concat ": " (org-ilm--generate-text-snippet region-text))
+                      "")))
+           (capture-data
+            (list
+             :title title
+             :parent id
+             :id extract-id
+             ;; Add PDF region so that it can be rendered in pdf page even
+             ;; when extracting as eg image
+             :props (list :ILM_PDF (cons current-page-real region-normalized))))
+           capture-on-success)
 
-           (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
-             (user-error "Region smaller than minimum size. Try extracting as text or image."))
+      (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
+        (user-error "Region smaller than minimum size. Try extracting as text or image."))
 
-           (pcase output-type
-             ('virtual)
-             ('text
-              (setf (plist-get capture-data :content) region-text
-                    (plist-get capture-data :ext) "org"))
-             ('image
-              (let ((file (org-ilm--pdf-image-export extract-id :region region)))
-                (setf (plist-get capture-data :file) file
-                      (plist-get capture-data :method) 'mv
-                      (plist-get capture-data :ext) t)))
-             ('org
-              (setf (plist-get capture-data :ext) "org")
-              (setq capture-on-success
-                    (lambda ()
-                      (org-ilm--image-convert-attachment-to-org
-                       ;; TODO this shouldnt be the normalized region i think
-                       (org-ilm--pdf-image-export
-                        extract-id :region region-normalized :dir attach-dir)
-                       extract-id))))
-             (_ (error "Unrecognized output type")))
+      (pcase output-type
+        ('virtual)
+        ('text
+         (setf (plist-get capture-data :content) region-text
+               (plist-get capture-data :ext) "org"))
+        ('image
+         (let ((file (org-ilm--pdf-image-export extract-id :region region)))
+           (setf (plist-get capture-data :file) file
+                 (plist-get capture-data :method) 'mv
+                 (plist-get capture-data :ext) t)))
+        ('org
+         (setf (plist-get capture-data :ext) "org")
+         (setq capture-on-success
+               (lambda ()
+                 (org-ilm--image-convert-attachment-to-org
+                  ;; TODO this shouldnt be the normalized region i think
+                  (org-ilm--pdf-image-export
+                   extract-id :region region-normalized :dir attach-dir)
+                  extract-id))))
+        (_ (error "Unrecognized output type")))
 
-           ;; Temporary disable `org-link-parameters' which is an overkill way to
-           ;; deal with the following problem. When org-pdftools is used,
-           ;; `org-pdftools-setup-link' is called, which adds a custom link in
-           ;; `org-link-parameters' that detects an org capture in a pdf buffer, and
-           ;; then creates a text underline highlight automatically. This is
-           ;; undesired, so this turns it off. The backtrace is:
-           ;;   org-pdftools-store-link()
-           ;;   org-link--try-link-store-functions(nil)
-           ;;   org-store-link(nil)
-           (let ((org-link-parameters nil))
-             (apply #'org-ilm--capture-capture
-                    (if card-p 'card 'material)
-                    :on-success
-                    (lambda (&rest _)
-                      (when capture-on-success
-                        (funcall capture-on-success))
-                      (org-ilm--pdf-captures 'reparse)
-                      (pdf-view-deactivate-region)
-                      (pdf-view-redisplay)
-                      (when (eq major-mode 'pdf-virtual-view-mode)
-                        (org-ilm-pdf-virtual-refresh)))
-                    capture-data))))))
+      ;; Temporary disable `org-link-parameters' which is an overkill way to
+      ;; deal with the following problem. When org-pdftools is used,
+      ;; `org-pdftools-setup-link' is called, which adds a custom link in
+      ;; `org-link-parameters' that detects an org capture in a pdf buffer, and
+      ;; then creates a text underline highlight automatically. This is
+      ;; undesired, so this turns it off. The backtrace is:
+      ;;   org-pdftools-store-link()
+      ;;   org-link--try-link-store-functions(nil)
+      ;;   org-store-link(nil)
+      (let ((org-link-parameters nil))
+        (apply #'org-ilm--capture-capture
+               (if card-p 'card 'material)
+               :on-success
+               (lambda (&rest _)
+                 (when capture-on-success
+                   (funcall capture-on-success))
+                 (org-ilm--pdf-captures 'reparse)
+                 (pdf-view-deactivate-region)
+                 (pdf-view-redisplay)
+                 (when (eq major-mode 'pdf-virtual-view-mode)
+                   (org-ilm-pdf-virtual-refresh)))
+               capture-data))))))
 
 (defun org-ilm-pdf-section-extract (output-type)
   "Extract current section of outline."
