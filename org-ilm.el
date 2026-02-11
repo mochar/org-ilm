@@ -2660,7 +2660,7 @@ COLLECTION specifies in which queue to look at."
      :transient transient--do-call)
     ]
    ["Queue"
-    ("qa" "Add"
+    ("q." "Add this"
      (lambda ()
        (interactive)
        (let* ((element org-ilm--element-transient-element)
@@ -2669,11 +2669,16 @@ COLLECTION specifies in which queue to look at."
          (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
          (with-current-buffer (switch-to-buffer queue-buffer)
            (org-ilm-queue-revert)))))
-    ("qA" "Add all"
+    ("qa" "Add all"
      (lambda ()
        (interactive)
        (transient-quit-all)
        (org-ilm-queue-add-dwim)))
+    ("qc" "Add children"
+     (lambda ()
+       (interactive)
+       (transient-quit-all)
+       (org-ilm-queue-add-dwim nil 'exclude-self)))
     ("qm" "Mark all"
      (lambda ()
        (interactive)
@@ -4375,184 +4380,6 @@ This is done by converting the area to an image first. Note that this will likel
     (region . (virtual text image org))
     (section . (virtual text org))))
 
-;;;;; Content spec
-
-(cl-defstruct (org-ilm-pdf-page
-               (:conc-name org-ilm-pdf-page--))
-  number area selections)
-
-(cl-defstruct (org-ilm-pdf-range
-               (:conc-name org-ilm-pdf-range--))
-  begin end)
-
-(cl-defstruct (org-ilm-pdf-spec
-               (:conc-name org-ilm-pdf-spec--))
-  parts ;; list: org-ilm-pdf-page | org-ilm-pdf-range
-  single-page-p
-  )
-
-(defun org-ilm--pdf-spec-is-valid-rect (rect)
-  (and (listp rect)
-       (= (length rect) 4)
-       (cl-every (lambda (x) (<= 0 x 1)) rect)))
-
-(defun org-ilm--pdf-spec-parse-page (page-data)
-  (cond
-   ((numberp page-data)
-    (make-org-ilm-pdf-page :number page-data))
-   ((and (listp page-data)
-         (numberp (car page-data))
-         (<= (length page-data) 3)
-         (listp (nth 1 page-data))
-         (or (= 4 (length (nth 1 page-data))) ;; area
-             (listp (car (nth 1 page-data))))) ;; selections
-    (let* ((page (car page-data))
-           (area (when (numberp (car (nth 1 page-data))) (nth 1 page-data)))
-           (selections (nth (if area 2 1) page-data)))
-      (when (and area (not (org-ilm--pdf-spec-is-valid-rect area)))
-        (error "Area of page %s not valid: %s" page area))
-      (when (and selections (not (cl-every #'org-ilm--pdf-spec-is-valid-rect selections)))
-        (error "Selections of page %s not valid: %s" page selections))
-      (make-org-ilm-pdf-page :number page :area area :selections selections)))))
-
-(defun org-ilm--pdf-spec-parse (spec-data)
-  (unless (or (numberp spec-data) (listp spec-data))
-    (error "PDF spec invalid: %s" spec-data))
-  
-  (if-let ((page (org-ilm--pdf-spec-parse-page spec-data)))
-      (make-org-ilm-pdf-spec :parts (list page) :single-page-p t)
-    ;; Must be a list of parts
-
-    ;; Skip trailing "-":
-    ;; Technically we could support the remainder of pages being specified with
-    ;; a trailing "-", however we then need to first read the pdf to determine
-    ;; the number of pages which is a pain.
-    (when (eq (car (last spec-data)) '-)
-      (error "PDF page spec cannot end with \"-\": %s" spec-data))
-
-    (let ((i 0)
-          (cur-page 1)
-          range-begin
-          parts)
-      (while-let ((part (nth i spec-data)))
-        (cond-let*
-          ((eq part '-)
-           (when range-begin (error "Cannot have double range (--): %s" spec-data))
-           (if (= i (1- (length spec-data)))
-               (let ((last-part (car parts))
-                     beg)
-                 (cl-etypecase last-part
-                   (org-ilm-pdf-page
-                    (setq beg (1+ (org-ilm-pdf-page--number last-part))))
-                   (org-ilm-pdf-range
-                    (setq beg (1+ (org-ilm-pdf-range--end last-part)))))
-                 (push (make-org-ilm-pdf-range :begin beg) parts))
-             (setq range-begin cur-page))
-           (cl-incf i))
-          
-          ([page (org-ilm--pdf-spec-parse-page part)]
-           (with-slots (number area selections) page
-             (let ((has-parts (or area selections)))
-               (if (and (not has-parts) (eq (nth (1+ i) spec-data) '-))
-                   (progn
-                     (unless range-begin
-                       (setq range-begin (org-ilm-pdf-page--number page)))
-                     (cl-incf i 2))
-                 (cond 
-                  ((null range-begin)
-                   (push page parts))
-                  (has-parts
-                   (let ((range (make-org-ilm-pdf-range
-                                 :begin range-begin
-                                 :end (1- number))))
-                     (push range parts))
-                   (push page parts))
-                  (t
-                   (let ((range (make-org-ilm-pdf-range :begin range-begin :end number)))
-                     (push range parts))))
-                 
-                 (cl-incf i)
-                 (setq cur-page (1+ number)
-                       range-begin nil)))))
-          
-          (t
-           (error "PDF spec contains invalid part: %s" part)))) ;; while
-      (make-org-ilm-pdf-spec :parts (reverse parts)))))
-
-(defun org-ilm--pdf-spec-to-string (spec)
-  (cl-assert (org-ilm-pdf-spec-p spec))
-  (with-slots (parts single-page-p) spec
-    (let ((i 0)
-          spec-data)
-      (dolist (part (org-ilm-pdf-spec--parts spec))
-        (cl-etypecase part
-          (org-ilm-pdf-page
-           (with-slots (number area selections) part
-             (if (not (or area selections))
-                 (push number spec-data)
-               (let ((part-data (list number)))
-                 (when area (push area part-data))
-                 (when selections (push selections part-data))
-                 (push (reverse part-data) spec-data)))))
-          (org-ilm-pdf-range
-           (with-slots (begin end) part
-             (unless (and (= 1 begin) (= 0 i))
-               (push begin spec-data))
-             (push '- spec-data)
-             (push end spec-data))))
-        (cl-incf i))
-
-      (if single-page-p (car spec-data) (reverse spec-data)))))
-
-;; (-> (org-ilm--pdf-spec-parse 4)
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(4 (0.1 0.2 0.3 0.4)))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(4 ((.1 .1 .1 .1) (.2 .2 .2 .2))))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2))))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(2 5))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(- 5))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(2 - 5))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(- 2 - 5))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(3 - 5))
-;;     org-ilm--pdf-spec-to-string)
-;; (-> (org-ilm--pdf-spec-parse '(- 2 (4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2)))))
-;;     org-ilm--pdf-spec-to-string)
-
-
-;;;;; Commands
-
-(defun org-ilm-pdf-open-full-document ()
-  "Open the full PDF document from an extracted virtual view, jump to current page.
-
-TODO Cute if we can use numeric prefix to jump to that page number"
-  (interactive)
-  (save-excursion
-    (org-ilm--pdf-with-point-on-collection-headline 'of-document
-     (org-ilm--attachment-open)
-     (pdf-view-goto-page page))))
-
-(defun org-ilm-pdf-toggle-narrow ()
-  "When in virtual view that specifies an area, toggle between the area and whole page."
-  (interactive)
-  (save-excursion
-    (org-ilm--pdf-with-point-on-collection-headline nil
-     (org-ilm--attachment-open :pdf-no-region region)
-     (pdf-view-goto-page virtual-page))))
-
-(defun org-ilm-pdf-toggle-highlights ()
-  "Toggle render of extract and cloze highlights."
-  (interactive)
-  (let ((state (setq org-ilm-pdf-highlight-captures-p (not org-ilm-pdf-highlight-captures-p))))
-    (message "Highlights turned %s" (if state "on" "off")))
-  (pdf-view-redisplay))
-
 ;;;;; Utilities
 
 (defun org-ilm--pdf-mode-p ()
@@ -4687,7 +4514,7 @@ section at the same or shallower depth."
              (top (alist-get 'top current-item))
              (depth (alist-get 'depth current-item))
              (begin (list page 0 top 1 1))
-             next-item range)
+             next-item range spec-parts)
 
         ;; Find the next item at the same or a shallower depth
         (dolist (j (number-sequence (1+ index) (- (length outline) 1)))
@@ -4695,16 +4522,47 @@ section at the same or shallower depth."
             (when (and (not next-item) (<= (alist-get 'depth potential-next) depth))
               (setf (alist-get 'next current-item) j)
               (setq next-item potential-next))))
-        
-        (let* ((next-page (or (alist-get 'page next-item) num-pages))
-               (next-top (or (alist-get 'top next-item) 1))
-               ;; Range depends on whether or not the next section as on same page
-               (range (if (= next-page page)
-                          (list page 0 top 1 (if next-item next-top 1))
-                        (cons (list page 0 top 1 1) (list next-page 0 0 1 next-top)))))
-          (setf (alist-get 'next-page current-item) next-page
-                (alist-get 'next-top current-item) next-top
-                (alist-get 'range current-item) range))
+
+        (let* ((next-item-page (alist-get 'page next-item))
+               (next-item-top (alist-get 'top next-item))
+               (has-top (and top (not (= top 0))))
+               last-page last-top)
+
+          (if next-item-page
+              (if (or (= page next-item-page) (not (= next-item-top 0)))
+                  (setq last-page next-item-page
+                        last-top next-item-top)
+                (setq last-page (max page (1- next-item-page))))
+            (setq last-page num-pages))
+
+          (if (= last-page page)
+              (progn
+                (when (and last-top (< (- last-top (or top 0)) .02))
+                  (setq last-top nil))
+                (let ((area (when (or has-top last-top) (list 0 top 1 (or last-top 1))))) 
+                  (push (make-org-ilm-pdf-page :number page :area area) spec-parts)))
+
+            (when has-top
+              (push (make-org-ilm-pdf-page :number page :area (list 0 top 1 1)) spec-parts))
+
+            (cond
+             ((> last-page (1+ page))
+              (push (make-org-ilm-pdf-range
+                     :begin (if has-top (1+ page) page)
+                     :end (if last-top (1- last-page) last-page))
+                    spec-parts))
+             ((null has-top)
+              (push (make-org-ilm-pdf-page :number page) spec-parts)))
+            
+            (when last-top
+              (push (make-org-ilm-pdf-page
+                     :number last-page
+                     :area (list 0 0 1 last-top))
+                    spec-parts)))
+          
+          (setf (alist-get 'next-page current-item) last-page
+                (alist-get 'next-top current-item) last-top
+                (alist-get 'spec current-item) (make-org-ilm-pdf-spec :parts (reverse spec-parts) :single-page-p (= last-page page))))
 
         (setf (nth index outline) current-item)))
 
@@ -4718,6 +4576,36 @@ section at the same or shallower depth."
              (<= first-page (alist-get 'page section) last-page))
            outline))
       outline)))
+
+(defun org-ilm--pdf-outline-page-sections (&optional page)
+  "Find the outline section of PAGE. If page overlaps multiple sections,
+ prompt user to select."
+  (setq page (or page (org-ilm--pdf-page-normalized)))
+  (let* ((outline (org-ilm--pdf-outline-get))
+         (num-pages (pdf-info-number-of-pages))
+         within-indices)
+
+    (when outline
+      (setq within-indices
+            (seq-filter
+             (lambda (i)
+               (let ((page-start (alist-get 'page (nth i outline)))
+                     (page-end (if (= i (1- (length outline)))
+                                   num-pages
+                                 (alist-get 'page (nth (1+ i) outline)))))
+                 (and (>= page page-start)
+                      (<= page page-end))))
+             (number-sequence 0 (1- (length outline)))))
+      
+      (cond
+       ((= 1 (length within-indices))
+        (nth (car within-indices) outline))
+       ((> (length within-indices) 1)
+        (let* ((choices (mapcar (lambda (i)
+                                  (cons (alist-get 'title (nth i outline)) i))
+                                within-indices))
+               (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
+          (nth choice outline)))))))
 
 (defun org-ilm--pdf-page-normalized (&optional page)
   "If in virtual mode, maps virtual PAGE to document page, else return as is.
@@ -4802,54 +4690,312 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
         ;; No subregion (whole page shown)
         region))))
 
+(defun org-ilm--pdf-mouse-position-relative ()
+  "Return the relative coordinates (X . Y) of the mouse on the current
+PDF page."
+  (let* ((mouse-pos (mouse-pixel-position))
+         (x (cadr mouse-pos))
+         (y (cddr mouse-pos))
+         (pos (posn-at-x-y x y))
+         (image-pixel-xy (posn-object-x-y pos))
+         (relative-xy (pdf-util-scale-pixel-to-relative 
+                       image-pixel-xy)))
+    relative-xy))
+
+;;;;; Section spec
+
+;; Defines a specification for selecting a set of pages, with optional areas and
+;; selections.
+
+(cl-defstruct (org-ilm-pdf-page
+               (:conc-name org-ilm-pdf-page--))
+  number area selections)
+
+(cl-defstruct (org-ilm-pdf-range
+               (:conc-name org-ilm-pdf-range--))
+  begin end)
+
+(cl-defstruct (org-ilm-pdf-spec
+               (:conc-name org-ilm-pdf-spec--))
+  path ;; path to pdf
+  parts ;; list: org-ilm-pdf-page | org-ilm-pdf-range
+  single-page-p
+  )
+
+(defun org-ilm-pdf-spec--contains (spec page)
+  "Checks if PAGE is part of SPEC."
+  (seq-find
+   (lambda (part)
+     (cl-etypecase part
+       (org-ilm-pdf-page
+        (= page (org-ilm-pdf-page--number part)))
+       (org-ilm-pdf-range
+        (with-slots (begin end) part
+          (<= begin page end)))))
+   (org-ilm-pdf-spec--parts spec)))
+
+(defun org-ilm-pdf-spec--range (spec)
+  "Returns cons of start and end page of pages contained in SPEC."
+  (let (pages)
+    (dolist (part (org-ilm-pdf-spec--parts spec))
+      (cl-etypecase part
+        (org-ilm-pdf-page
+         (push (org-ilm-pdf-page--number part) pages))
+        (org-ilm-pdf-range
+         (with-slots (begin end) part
+           (push begin pages)
+           (push end pages)))))
+    (let ((min (apply #'min pages))
+          (max (apply #'max pages)))
+      (if (= min max)
+          (cons min nil)
+        (cons min max)))))
+      
+(defun org-ilm--pdf-spec-is-valid-rect (rect)
+  "Return non-nil if RECT is list of length 4, each values 0 <= x <= 1."
+  (and (listp rect)
+       (= (length rect) 4)
+       (cl-every (lambda (x) (<= 0 x 1)) rect)))
+
+(defun org-ilm--pdf-spec-parse-page (page-data)
+  (cond
+   ((numberp page-data)
+    (make-org-ilm-pdf-page :number page-data))
+   ((and (listp page-data)
+         (numberp (car page-data))
+         (<= (length page-data) 3)
+         (listp (nth 1 page-data))
+         (or (= 4 (length (nth 1 page-data))) ;; area
+             (listp (car (nth 1 page-data))))) ;; selections
+    (let* ((page (car page-data))
+           (area (when (numberp (car (nth 1 page-data))) (nth 1 page-data)))
+           (selections (nth (if area 2 1) page-data)))
+      (when (and area (not (org-ilm--pdf-spec-is-valid-rect area)))
+        (error "Area of page %s not valid: %s" page area))
+      (when (and selections (not (cl-every #'org-ilm--pdf-spec-is-valid-rect selections)))
+        (error "Selections of page %s not valid: %s" page selections))
+      (make-org-ilm-pdf-page :number page :area area :selections selections)))))
+
+(defun org-ilm--pdf-spec-parse (spec-data &optional pdf-path)
+  (when (stringp spec-data)
+    (setq spec-data (car (read-from-string spec-data))))
+  
+  (unless (or (numberp spec-data) (listp spec-data))
+    (error "PDF spec invalid: %s" spec-data))
+  
+  (if-let ((page (org-ilm--pdf-spec-parse-page spec-data)))
+      (make-org-ilm-pdf-spec :parts (list page) :single-page-p t :path pdf-path)
+    ;; Must be a list of parts
+
+    ;; Skip trailing "-":
+    ;; Technically we could support the remainder of pages being specified with
+    ;; a trailing "-", however we then need to first read the pdf to determine
+    ;; the number of pages which is a pain.
+    (when (eq (car (last spec-data)) '-)
+      (error "PDF page spec cannot end with \"-\": %s" spec-data))
+
+    (let ((i 0)
+          (cur-page 1)
+          range-begin
+          parts)
+      (while-let ((part (nth i spec-data)))
+        (cond-let*
+          ((eq part '-)
+           (when range-begin (error "Cannot have double range (--): %s" spec-data))
+           (if (= i (1- (length spec-data)))
+               (let ((last-part (car parts))
+                     beg)
+                 (cl-etypecase last-part
+                   (org-ilm-pdf-page
+                    (setq beg (1+ (org-ilm-pdf-page--number last-part))))
+                   (org-ilm-pdf-range
+                    (setq beg (1+ (org-ilm-pdf-range--end last-part)))))
+                 (push (make-org-ilm-pdf-range :begin beg) parts))
+             (setq range-begin cur-page))
+           (cl-incf i))
+          
+          ([page (org-ilm--pdf-spec-parse-page part)]
+           (with-slots (number area selections) page
+             (let ((has-parts (or area selections)))
+               (if (and (not has-parts) (eq (nth (1+ i) spec-data) '-))
+                   (progn
+                     (unless range-begin
+                       (setq range-begin (org-ilm-pdf-page--number page)))
+                     (cl-incf i 2))
+                 (cond 
+                  ((null range-begin)
+                   (push page parts))
+                  ((= range-begin number)
+                   (push page parts))
+                  (has-parts
+                   (let ((range (make-org-ilm-pdf-range
+                                 :begin range-begin
+                                 :end (1- number))))
+                     (push range parts))
+                   (push page parts))
+                  (t
+                   (let ((range (make-org-ilm-pdf-range :begin range-begin :end number)))
+                     (push range parts))))
+                 
+                 (cl-incf i)
+                 (setq cur-page (1+ number)
+                       range-begin nil)))))
+          
+          (t
+           (error "PDF spec contains invalid part: %s" part)))) ;; while
+      (make-org-ilm-pdf-spec :parts (reverse parts) :path pdf-path))))
+
+(defun org-ilm--pdf-spec-to-string (spec)
+  (cl-assert (org-ilm-pdf-spec-p spec))
+  (let ((i 0)
+        spec-data)
+    (with-slots (parts single-page-p) spec
+      (dolist (part (org-ilm-pdf-spec--parts spec))
+        (cl-etypecase part
+          (org-ilm-pdf-page
+           (with-slots (number area selections) part
+             (if (not (or area selections))
+                 (push number spec-data)
+               (let ((part-data (list number)))
+                 (when area (push area part-data))
+                 (when selections (push selections part-data))
+                 (push (reverse part-data) spec-data)))))
+          (org-ilm-pdf-range
+           (with-slots (begin end) part
+             (unless (and (= 1 begin) (= 0 i))
+               (push begin spec-data))
+             (push '- spec-data)
+             (push end spec-data))))
+        (cl-incf i))
+
+      (setq spec-data (if single-page-p
+                          (car spec-data)
+                        (reverse spec-data))))
+    spec-data))
+
+(when nil
+  (-> (org-ilm--pdf-spec-parse 4)
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(4 (0.1 0.2 0.3 0.4)))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(4 ((.1 .1 .1 .1) (.2 .2 .2 .2))))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2))))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(2 5))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(- 5))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(2 - 5))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(- 2 - 5))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(3 - 5))
+      org-ilm--pdf-spec-to-string)
+  (-> (org-ilm--pdf-spec-parse '(- 2 (4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2)))))
+      org-ilm--pdf-spec-to-string)
+  )
+
+;;;;; Commands
+
+(defun org-ilm-pdf-open-full-document ()
+  "Open the full PDF document from an extracted virtual view, jump to current page.
+
+TODO Cute if we can use numeric prefix to jump to that page number"
+  (interactive)
+  (save-excursion
+    (org-ilm--pdf-with-point-on-collection-headline 'of-document
+     (org-ilm--attachment-open)
+     (pdf-view-goto-page page))))
+
+(defun org-ilm-pdf-toggle-narrow ()
+  "When in virtual view that specifies an area, toggle between the area and whole page."
+  (interactive)
+  (save-excursion
+    (org-ilm--pdf-with-point-on-collection-headline nil
+     (org-ilm--attachment-open :pdf-no-region region)
+     (pdf-view-goto-page virtual-page))))
+
+(defun org-ilm-pdf-toggle-highlights ()
+  "Toggle render of extract and cloze highlights."
+  (interactive)
+  (let ((state (setq org-ilm-pdf-highlight-selections-p (not org-ilm-pdf-highlight-selections-p))))
+    (message "Highlights turned %s" (if state "on" "off")))
+  (pdf-view-redisplay))
+
 ;;;;; Capture highlights
 
 ;; Highlights of child captures shown in PDF file.
 
-(defvar-local org-ilm-pdf-highlight-captures-p t)
-(defvar-local org-ilm--pdf-captures nil)
+(cl-defstruct (org-ilm-pdf-highlight
+               (:conc-name org-ilm-pdf-highlight--))
+  el-id el-type
+  type ;; selection, area
+  interactive-p ;; user interactive capture selection
+  page rect)
 
-(defun org-ilm--pdf-gather-captures ()
-  "Return list of elements (id type spec) for all child elements of PDF element."
+(defvar-local org-ilm-pdf-highlight-highlights-p t)
+(defvar-local org-ilm--pdf-highlights nil)
+
+(defun org-ilm--pdf-gather-highlights ()
+  "Return list of `org-ilm-pdf-highlight' for all child elements of PDF element."
   (map-let (:id :headline) (org-ilm--pdf-data) 
     (let* ((element (org-ilm--element-by-id id))
-           (include-self (eq (org-ilm-element--type element) 'card))
-           (captures (org-ilm--element-query-children
-                      element :return-type 'headline
-                      :include-self include-self
-                      :more-query '((property "ILM_PDF")))))
-      (seq-keep
-       (lambda (headline)
-         (when-let* ((id (org-element-property :ID headline))
-                     (type (org-ilm--element-type headline))
-                     (range (org-element-property :ILM_PDF headline))
-                     (range (org-ilm--pdf-range-from-string range))
-                     (spec (org-ilm--pdf-parse-spec range)))
-           (list id type spec)))
-       captures))))
+           ;; (include-self (eq (org-ilm-element--type element) 'card))
+           (include-self t)
+           (headlines (org-ilm--element-query-children
+                       element
+                       :return-type 'headline
+                       :include-self include-self
+                       :more-query '((property "ILM_PDF"))))
+           highlights)
+      (dolist (headline headlines)
+        (when-let* ((el-id (org-element-property :ID headline))
+                    (type (org-ilm--element-type headline))
+                    (range (org-element-property :ILM_PDF headline))
+                    (spec (org-ilm--pdf-spec-parse range nil)))
+          (dolist (part (org-ilm-pdf-spec--parts spec))
+            (when (org-ilm-pdf-page-p part)
+              (cond-let*
+                ([selections (org-ilm-pdf-page--selections part)]
+                 (dolist (selection selections)
+                   (push
+                    (make-org-ilm-pdf-highlight
+                     :el-id el-id
+                     :el-type type
+                     :type 'selection
+                     :page (org-ilm-pdf-page--number part)
+                     :rect selection)
+                    highlights)))
+                ([area (org-ilm-pdf-page--area part)]
+                 (unless (string= el-id id)
+                   (push
+                    (make-org-ilm-pdf-highlight
+                     :el-id el-id
+                     :el-type type
+                     :type 'area
+                     :page (org-ilm-pdf-page--number part)
+                     :rect area)
+                    highlights))))))))
+      highlights)))
 
-(defun org-ilm--pdf-captures (&optional reparse-p)
+(defun org-ilm--pdf-highlights (&optional reparse-p)
   (org-ilm--pdf-mode-assert)
-  (or (and (not reparse-p) (bound-and-true-p org-ilm--pdf-captures))
-      (setq-local org-ilm--pdf-captures
-                  (org-ilm--pdf-gather-captures))))
+  (or (and (not reparse-p) (bound-and-true-p org-ilm--pdf-highlights))
+      (setq-local org-ilm--pdf-highlights
+                  (org-ilm--pdf-gather-highlights))))
 
-(defun org-ilm--pdf-page-captures (&optional page)
+(defun org-ilm--pdf-page-highlights (&optional page)
   "Return all specs in or part of PAGE."
   (setq page (or page (org-ilm--pdf-page-normalized)))
   (seq-filter
-   (lambda (capture)
-     (cl-destructuring-bind (&key begin-page end-page &allow-other-keys)
-         (nth 2 capture)
-       (or (and (not end-page) (= begin-page page))
-           (and end-page (<= begin-page page end-page)))))
-   (org-ilm--pdf-captures)))
+   (lambda (highlight)
+     (= page (org-ilm-pdf-highlight--page highlight)))
+   (org-ilm--pdf-highlights)))
 
 (defun org-ilm--pdf-create-capture-context-menu (id)
   "Create a context menu for capture highlight ID."
   (let ((menu (make-sparse-keymap)))
-
-
     (define-key
      menu [ilm-open-collection]
      `(menu-item "Ilm: View in collection"
@@ -4866,10 +5012,9 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
                     (org-ilm--org-with-point-at id
                       (org-ilm--attachment-open)))
                  :help "Open the attachment of this extract."))
-    
     menu))
 
-(defun org-ilm--pdf-create-highlight-hotspots (captures size)
+(defun org-ilm--pdf-create-highlight-hotspots (highlights size)
   "Hotspots specify interactible regions in the image generated by pdf-view.
 
 See :map in info node `(elisp) Image Descriptors'
@@ -4877,44 +5022,43 @@ See :map in info node `(elisp) Image Descriptors'
 See `pdf-annot-create-hotspots', `pdf-annot-hotspot-function', and
 buffer-local `pdf-view--hotspot-functions'."
   (seq-keep
-   (lambda (capture)
-     (when-let* ((id (nth 0 capture))
-                 (type (nth 1 capture))
-                 (spec (nth 2 capture))
-                 ((eq (plist-get spec :type) 'area-page))
-                 (region (org-ilm--pdf-region-denormalized
-                          (plist-get spec :begin-area)))
-                 (id-symb (intern (format "ilm-pdf-capture-%s" id)))
-                 ;; Scale relative coords to pixel coords
-                 (e (pdf-util-scale region size 'round)))
+   (lambda (highlight)
+     (with-slots (el-id el-type page rect) highlight
+         (let* ((region (org-ilm--pdf-region-denormalized rect))
+                (id-symb (intern (format "ilm-pdf-capture-%s" el-id)))
+                ;; Scale relative coords to pixel coords
+                (e (pdf-util-scale region size 'round)))
 
-       ;; Bind the mouse click event for this ID to our handler
-       (local-set-key
-        (vector id-symb 'mouse-1)
-        (lambda ()
-          (interactive)
-          (when-let ((entry (org-mem-entry-by-id id)))
-            (message "%s: %s" (org-mem-entry-todo-state entry)
-                     (org-mem-entry-title entry)))))
+           ;; Bind the mouse click event for this ID to our handler
+           (local-set-key
+            (vector id-symb 'mouse-1)
+            (lambda ()
+              (interactive)
+              (when-let ((el (org-ilm--element-by-id el-id)))
+                (message "%s: %s" (org-ilm-element--type el)
+                         (org-ilm-element--title el)))))
 
-       (local-set-key
-        (vector id-symb 'down-mouse-3)
-        (lambda ()
-          (interactive "@")
-          (popup-menu (org-ilm--pdf-create-capture-context-menu id))))
-       
-       ;; Hotspot data ‘(AREA ID PLIST)’
-       ;; See :map in (info "(elisp) Image Descriptors")
-       (list
-        `(rect . ((,(nth 0 e) . ,(nth 1 e))
-                  . (,(nth 2 e) . ,(nth 3 e))))
-        id-symb
-        (list 'pointer 'hand
-              'help-echo (format "Capture: %s" id)))))
-   captures))
+           (local-set-key
+            (vector id-symb 'down-mouse-3)
+            (lambda ()
+              (interactive "@")
+              (popup-menu (org-ilm--pdf-create-capture-context-menu el-id))))
+           
+           ;; Hotspot data ‘(AREA ID PLIST)’
+           ;; See :map in (info "(elisp) Image Descriptors")
+           (list
+            `(rect . ((,(nth 0 e) . ,(nth 1 e))
+                      . (,(nth 2 e) . ,(nth 3 e))))
+            id-symb
+            (list 'pointer 'hand
+                  'help-echo (format "Capture: %s" el-id))))))
+   highlights))
 
-(defun org-ilm--pdf-info-renderpage-captures (page width captures &optional file-or-buffer)
-  "Render PDF PAGE as image with CAPTURES highlighted."
+(defun org-ilm--pdf-clip-rect (rect)
+  (mapcar (lambda (x) (min (max x 0) 1)) rect))
+
+(defun org-ilm--pdf-info-renderpage-highlights (page width highlights &optional file-or-buffer)
+  "Render PDF PAGE as image with HIGHLIGHTS highlighted."
   ;; To create the image we call `pdf-info-renderpage' at the end. It accepts a
   ;; list of commands that it goes through sequantilally and applies. The
   ;; important commands are setting the current style (:alpha :background
@@ -4922,46 +5066,52 @@ buffer-local `pdf-view--hotspot-functions'."
   (let* ((this-id (car (org-ilm--attachment-data)))
          cmds
          (capture-cmds
-          (lambda (captures color &optional fg-color)
+          (lambda (highlights color &optional fg-color)
             (apply #'append
                    cmds
                    (list :background color :foreground (or fg-color color))
                    (seq-keep
-                    (lambda (capture)
-                      (when (eq (plist-get (nth 2 capture) :type) 'area-page)
+                    (lambda (highlight)
+                      (with-slots (rect) highlight
                         (list :highlight-region
-                              (org-ilm--pdf-region-denormalized
-                               (plist-get (nth 2 capture) :begin-area)))))
-                    captures))))
+                              (org-ilm--pdf-clip-rect
+                               (org-ilm--pdf-region-denormalized rect)))))
+                    highlights))))
          (extract-color (color-darken-name
                          (face-background 'org-ilm-face-extract) 10.))
          (cloze-color (color-darken-name
-                         (face-background 'org-ilm-face-card) 10.))
-         this-capture extracts clozes)
+                       (face-background 'org-ilm-face-card) 10.))
+         (interactive-color (color-darken-name
+                             (face-background 'org-ilm-pdf-interactive-capture-face) 10.))
+         this-highlight extracts clozes interactives)
 
-    (dolist (capture captures)
-      (cond
-       ((equal (car capture) this-id)
-        (setq this-capture capture))
-       ((eq (nth 1 capture) 'material)
-        (push capture extracts))
-       ((eq (nth 1 capture) 'card)
-        (push capture clozes))))
+    (dolist (highlight highlights)
+      (with-slots (el-id el-type interactive-p) highlight
+        (cond
+         (interactive-p
+          (push highlight interactives))
+         ((string= el-id this-id)
+          (setq this-highlight highlight))
+         ((eq el-type 'material)
+          (push highlight extracts))
+         ((eq el-type 'card)
+          (push highlight clozes)))))
 
     (setq cmds
           (append
            (list :alpha org-ilm-pdf-highlight-alpha)
            (funcall capture-cmds extracts extract-color)
            (funcall capture-cmds clozes cloze-color)
-           (pcase (nth 1 this-capture)
+           (funcall capture-cmds interactives interactive-color)
+           (pcase (-some-> this-highlight org-ilm-pdf-highlight--el-type)
              ('material
-              (funcall capture-cmds (list this-capture) extract-color))
+              (funcall capture-cmds (list this-highlight) extract-color))
              ('card
               (append
                (when (and (org-ilm-reviewing-p)
                           (not (plist-get org-ilm--review-data :card-revealed)))
                  (list :alpha 1))
-               (funcall capture-cmds (list this-capture) cloze-color "#000000"))))))
+               (funcall capture-cmds (list this-highlight) cloze-color "#000000"))))))
 
     (apply #'pdf-info-renderpage
            page width file-or-buffer cmds)))
@@ -4973,21 +5123,23 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; `pdf-view-display-region' to create the regions but it gets overwritten as
 ;; soon as the image needs to be generated again.
 (defun org-ilm--advice--pdf-view-create-page (page &optional window)
-  (let* ((captures (when (and (org-ilm--attachment-data)
-                              org-ilm-pdf-highlight-captures-p)
-                     (org-ilm--pdf-page-captures)))
+  (let* ((highlights (or (ensure-list
+                          (org-ilm--pdf-interactive-capture-page-highlight page))
+                         (and (org-ilm--attachment-data)
+                              org-ilm-pdf-highlight-highlights-p
+                              (org-ilm--pdf-page-highlights))))
          
          ;; Replicate logic from pdf-view-display-region
          (size (pdf-view-desired-image-size page window))
          (width (car size))
          (hotspots (append
-                    (org-ilm--pdf-create-highlight-hotspots captures size)
+                    (org-ilm--pdf-create-highlight-hotspots highlights size)
                     ;; Standard hotspots for eg PDF annotations
                     (pdf-view-apply-hotspot-functions window page size)))
          
          ;; Call the low-level renderer with highlight data
-         (data (org-ilm--pdf-info-renderpage-captures
-                page width captures)))
+         (data (org-ilm--pdf-info-renderpage-highlights
+                page width highlights)))
 
     ;; This is just a small wrapper around emacs' `create-image'.
     ;; The properties that are passed can be found in (C-x C-e):
@@ -5008,157 +5160,7 @@ buffer-local `pdf-view--hotspot-functions'."
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--ilm-hook-pdf)
   
 
-;;;;; Annotation highlight
-
-;; Deprecated?
-;; Previously I saved captures as annotations within the PDF file to let
-;; pdf-view render them for me. I don't like this because:
-;;   1. It doesn't reflect the current state of the captures, i.e. when I remove
-;;      a capture or add one in another way.
-;;   2. I wanted to highlight extracting/splitting entire pages in a different
-;;      way to highlighting region captures.
-;;   3. Annotation highlights are baked into the image, so extract will include
-;;      the highlight as well
-
-(defun org-ilm--pdf-add-square-annotation (page region &optional label dont-save-buffer)
-  "Add a square highlight annotation that is stored within the PDF file."
-  ;; Can only make annotations from within main file.
-  (with-current-buffer (find-file-noselect (org-ilm--pdf-path))
-    ;; Need active region for it to be square instead of text highlight
-    (setq pdf-view--have-rectangle-region t)
-    (setq pdf-view-active-region region)
-    (pdf-view--push-mark)
-    (pdf-annot-add-annotation
-     'highlight
-     (list region)
-     (list
-      (cons 'opacity 1.0)
-      (cons 'label label)
-      (cons 'color (face-background 'org-ilm-face-extract))
-      ;; (cons 'contents "")
-      )
-     page)
-    (unless dont-save-buffer
-      (save-buffer))))
-
-(defun org-ilm--pdf-annot-create-context-menu-advice (func &rest args)
-  "Advice the function to add an additional menu item to open the
-attachment from its highlight."
-  (let* ((menu (apply func args))
-         (annotation (car args))
-         (extract-id (alist-get 'label annotation)))
-    (define-key
-     menu [ilm-open-collection]
-     `(menu-item "Ilm: View in collection"
-                 ,(lambda ()
-                    (interactive)
-                    (org-id-goto extract-id))
-                 :help "View this extract in the collection."))
-    (define-key
-     menu [ilm-open-attachment]
-     `(menu-item "Ilm: Open attachment"
-                 ,(lambda ()
-                    (interactive)
-                    (let ((path (org-ilm--org-with-point-at
-                                 extract-id
-                                 (org-ilm--attachment-find))))
-                      (find-file path)))
-                 :help "Open the attachment of this extract."))
-    menu))
-
 ;;;;; Virtual
-
-;; PDF range. One of:
-;; - Page:
-;;   number
-;; - Page range:
-;;   (start . end)
-;; - Area
-;;   (page . (left top right bottom))
-;; - Areas
-;;   (page . (area1 area2 ...))
-;; - Range with area
-;;   ((start . area) . (end . area))
-;;   ((start . area) . end)
-;;   (start . (end . area))
-
-(defun org-ilm--pdf-range-to-string (begin end)
-  "Convert PDF page area from lisp to a string format."
-  (format "(%s %s)"
-          (prin1-to-string begin)
-          (prin1-to-string end)))
-
-(defun org-ilm--pdf-range-from-string (string)
-  "Read STRING that represent a PDF page area to lisp."
-  (let* ((begin-data (read-from-string string))
-         (begin (car begin-data)))
-    (if (= (length string) (cdr begin-data))
-        begin
-      (cons begin (car (read-from-string string (cdr begin-data)))))))
-
-(defun org-ilm--pdf-area-p (area)
-  "Test if  AREA is (page . (left top right bottom)) or ."
-  (and (listp area)
-       (integerp (car area))
-       (listp (cdr area))
-       (or (= 5 (length area))
-           (and (listp (cadr area))
-                (= (length (cadr area)) 4)))))
-
-(defun org-ilm--pdf-parse-spec (range &optional file)
-  "Parse RANGE as spec for viewing in virtual PDF buffers."
-  (let ((first (or (car-safe range) range))
-        (second (cdr-safe range))
-        type begin-page begin-area end-page end-area)
-    (cond
-     ;; Page
-     ((and (integerp first) (null second))
-      (setq type 'page
-            begin-page first))
-     ;; Page range
-     ;; (begin . end)
-     ((and (integerp first) (integerp second))
-      (setq type 'range-pages
-            begin-page first
-            end-page second))
-     ;; Area
-     ;; (page . (left top right bottom))
-     ((org-ilm--pdf-area-p range)
-      (setq type 'area-page
-            begin-page first
-            begin-area second))
-     ;; Range with area
-     ;; (start . (end . area))
-     ((and (integerp first) (org-ilm--pdf-area-p second))
-      (setq type 'range-area-pages
-            begin-page first
-            end-page (car second)
-            end-area (cdr second)))
-     ;; Range with area
-     ;; ((start . area) . end)
-     ((and (integerp second) (org-ilm--pdf-area-p first))
-      (setq type 'range-area-pages
-            begin-page (car first)
-            begin-area (cdr first)
-            end-page second))
-     ;; Range with area
-     ;; ((start . area) . (end . area))
-     ((and (org-ilm--pdf-area-p first) (org-ilm--pdf-area-p second))
-      (setq type 'range-area-pages
-            begin-page (car first)
-            begin-area (cdr first)
-            end-page (car second)
-            end-area (cdr second)))
-     (t (error "Spec range invalid")))
-
-    (list :file file
-          :type type
-          :begin-page begin-page
-          :begin-area begin-area
-          :end-page end-page
-          :end-area end-area
-          ;; :selection nil 
-          )))
 
 (defun org-ilm--pdf-open-virtual (&optional no-region)
   "Open virtual page given by ILM_PDF spec, return buffer if found."
@@ -5166,9 +5168,7 @@ attachment from its highlight."
               (pdf-range (org-entry-get nil "ILM_PDF"))
               (attachment (org-ilm--attachment-find-ancestor "pdf"))
               (attach-dir (file-name-directory attachment))
-              (spec (org-ilm--pdf-parse-spec
-                     (org-ilm--pdf-range-from-string pdf-range)
-                     attachment))
+              (spec (org-ilm--pdf-spec-parse pdf-range attachment))
               (buffer-name (concat (org-id-get) ".pdf")))
 
     ;; For cards, the ILM_PDF property specifies the cloze, so it is not
@@ -5176,17 +5176,17 @@ attachment from its highlight."
     ;; what region should be, and `org-ilm--pdf-render-page-highlights' will
     ;; show the current cloze region with a black border. Further during review,
     ;; the alpha will be set to 1 to hide the cloze.
-    (when (eq el-type 'card)
-      (save-excursion
-        (org-up-heading 1)
-        (if-let ((parent-pdf-range (org-entry-get nil "ILM_PDF")))
-            (setq spec (org-ilm--pdf-parse-spec
-                        (org-ilm--pdf-range-from-string
-                         parent-pdf-range)
-                        attachment))
-          (setq spec (org-ilm--pdf-parse-spec
-                      (plist-get spec :begin-page)
-                      attachment)))))
+    ;; (when (eq el-type 'card)
+    ;;   (save-excursion
+    ;;     (org-up-heading 1)
+    ;;     (if-let ((parent-pdf-range (org-entry-get nil "ILM_PDF")))
+    ;;         (setq spec (org-ilm--pdf-parse-spec
+    ;;                     (org-ilm--pdf-range-from-string
+    ;;                      parent-pdf-range)
+    ;;                     attachment))
+    ;;       (setq spec (org-ilm--pdf-parse-spec
+    ;;                   (plist-get spec :begin-page)
+    ;;                   attachment)))))
 
     (org-ilm--pdf-open-specs (list spec) buffer-name attach-dir no-region)))
 
@@ -5213,29 +5213,17 @@ TODO Handle two column layout"
   (insert ";; %VPDF 1.0\n\n")  
   (insert "(")
   (dolist (spec specs)
-    (cl-destructuring-bind (&key file type begin-page begin-area end-page end-area) spec
-      (insert "(\"" file "\"")
-      (pcase type
-        ('page
-         (insert (number-to-string begin-page)))
-        ('range-pages
-         (insert (format "(%s . %s)" begin-page end-page)))
-        ('area-page
-         (if no-region
-             (insert (format " %s " begin-page))
-           (insert (format "(%s . %s)" begin-page begin-area))))
-        ('range-area-pages
-         ;; Begin
-         (if (and begin-area (not no-region))
-             (insert (format " (%s . %s) " begin-page begin-area))
-           (insert (format " %s " begin-page)))
-         ;; Pages in between begin and endn
-         (when (> (- end-page begin-page) 1)
-           (insert (format " (%s . %s) " (1+ begin-page) (1- end-page))))
-         ;; End
-         (if (and end-area (not no-region))
-             (insert (format " (%s . %s) " end-page end-area))
-           (insert (format " %s " end-page))))))
+    (insert "(\"" (org-ilm-pdf-spec--path spec) "\"")
+    (dolist (part (org-ilm-pdf-spec--parts spec))
+      (cl-etypecase part
+        (org-ilm-pdf-range
+         (with-slots (begin end) part
+           (insert (format "(%s . %s)" begin end))))
+        (org-ilm-pdf-page
+         (with-slots (number area) part
+             (if (and area (not no-region))
+                 (insert (format "(%s . %s)" number area))
+               (insert (format " %s " number)))))))
     (insert ")"))
   (insert ")\n")
   
@@ -5485,7 +5473,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
              :id extract-id
              ;; Add PDF region so that it can be rendered in pdf page even
              ;; when extracting as eg image
-             :props (list :ILM_PDF (cons current-page-real region-normalized))))
+             :props (list :ILM_PDF (list current-page-real region-normalized))))
            capture-on-success)
 
       (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
@@ -5528,12 +5516,12 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                (lambda (&rest _)
                  (when capture-on-success
                    (funcall capture-on-success))
-                 (org-ilm--pdf-captures 'reparse)
+                 (org-ilm--pdf-selections 'reparse)
                  (pdf-view-deactivate-region)
                  (pdf-view-redisplay)
                  (when (eq major-mode 'pdf-virtual-view-mode)
                    (org-ilm-pdf-virtual-refresh)))
-               capture-data))))))
+               capture-data)))))
 
 (defun org-ilm-pdf-section-extract (output-type)
   "Extract current section of outline."
@@ -5542,83 +5530,72 @@ See also `org-ilm-pdf-convert-org-respect-area'."
   (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
     (let* ((extract-id (org-id-new))
            (pdf-buffer (current-buffer))
-           ;; TODO pass orginial file if in virtual
-           (outline (org-ilm--pdf-outline-get))
-           (num-pages (pdf-info-number-of-pages))
-           (current-page (org-ilm--pdf-page-normalized))
-           (section))
+           title spec)
 
-      (unless outline (error "No outline found"))
-
-      ;; Find the outline section of the current page. If page overlaps
-      ;; multiple sections, prompt user to select.
-      (let ((within-indices
-             (seq-filter (lambda (i)
-                           (let ((page-start (alist-get 'page (nth i outline)))
-                                 (page-end (if (= i (1- (length outline)))
-                                               num-pages
-                                             (alist-get 'page (nth (1+ i) outline)))))
-                             (and (>= current-page page-start)
-                                  (<= current-page page-end))))
-                         (number-sequence 0 (1- (length outline))))))
-        (cond
-         ((= 1 (length within-indices))
-          (setq section (nth (car within-indices) outline)))
-         ((> (length within-indices) 1)
-          (let* ((choices (mapcar (lambda (i)
-                                    (cons (alist-get 'title (nth i outline)) i))
-                                  within-indices))
-                 (choice (cdr (assoc (completing-read "Section: " choices nil t) choices))))
-            (setq section (nth choice outline))))
-         (t (error "Current page not within (known) section"))))
+      (cond-let*
+        ((org-ilm--pdf-interactive-capture-p)
+         (setq spec (org-ilm--pdf-interactive-capture-spec)
+               title (read-string "Title: ")))
+        ([section (org-ilm--pdf-outline-page-sections)]
+         (setq spec (alist-get 'spec section)
+               title (alist-get 'title section)))
+        (t (user-error "No outline or section data available")))
 
       ;; TODO When no title use page range
-      (let ((title (concat "Section: " (alist-get 'title section)))
-            (range (alist-get 'range section)))
-        (pcase output-type
-          ('virtual
-           (org-ilm--capture-capture
-            'material
-            :parent id
-            :title title
-            :props (list :ILM_PDF range)))
-          ('text
-           ;; TODO This currently extracts the actual PDF data lol
-           (with-temp-buffer
-             (if (= (length range) 2)
-                 (insert (pdf-info-gettext (car range) (cdr range) nil pdf-buffer) "\n")
-               (let* ((range-begin (car range))
-                      (range-end (cdr range))
-                      (page-begin (car range-begin))
-                      (page-end (car range-end)))
-                 (dolist (page (number-sequence page-begin page-end))
-                   (insert (pdf-info-gettext
-                            page
-                            (cond
-                             ((= page page-begin) (cdr range-begin))
-                             ((= page page-end) (cdr range-end))
-                             (t '(0 0 1 1)))
-                            'word pdf-buffer)
-                           "\n"))))
+      (setq title (concat "Section: " title))
 
-             (org-ilm--capture-capture
-              'material
-              :parent id :content (buffer-string) :ext "org"
-              :title title)))
-          ('org
-           (org-ilm--capture-capture
-            'material
-            :parent id :id extract-id :ext "org"
-            :title title
-            :on-success
-            (lambda (&rest _)
-              (org-ilm--pdf-convert-attachment-to-org
-               pdf-path
-               (cons (1- (alist-get 'page section))
-                     (1- (alist-get 'next-page section)))
-               extract-id
-               :on-success
-               (lambda (proc buf id) (message "Conversion finished.")))))))))))
+      (pcase output-type
+        ('virtual
+         (org-ilm--capture-capture
+          'material
+          :parent id
+          :title title
+          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec)))
+         (when (org-ilm--pdf-interactive-capture-p)
+           (org-ilm--pdf-highlights 'reparse)
+           (org-ilm--pdf-interactive-capture-reset)))
+        ;; ('text
+        ;;  ;; TODO This currently extracts the actual PDF data lol
+        ;;  (with-temp-buffer
+        ;;    (if (= (length range) 2)
+        ;;        (insert (pdf-info-gettext (car range) (cdr range) nil pdf-buffer) "\n")
+        ;;      (let* ((range-begin (car range))
+        ;;             (range-end (cdr range))
+        ;;             (page-begin (car range-begin))
+        ;;             (page-end (car range-end)))
+        ;;        (dolist (page (number-sequence page-begin page-end))
+        ;;          (insert (pdf-info-gettext
+        ;;                   page
+        ;;                   (cond
+        ;;                    ((= page page-begin) (cdr range-begin))
+        ;;                    ((= page page-end) (cdr range-end))
+        ;;                    (t '(0 0 1 1)))
+        ;;                   'word pdf-buffer)
+        ;;                  "\n"))))
+
+        ;;    (org-ilm--capture-capture
+        ;;     'material
+        ;;     :parent id :content (buffer-string) :ext "org"
+        ;;     :title title)))
+        ('org
+         (org-ilm--capture-capture
+          'material
+          :parent id
+          :id extract-id
+          :ext "org"
+          :title title
+          :on-success
+          (lambda (&rest _)
+            (org-ilm--pdf-convert-attachment-to-org
+             pdf-path
+             (cons (1- (alist-get 'page section))
+                   (1- (alist-get 'next-page section)))
+             extract-id
+             :on-success
+             (lambda (proc buf id) (message "Conversion finished."))))))))))
+
+
+
 
 ;;;;; Split
 
@@ -5648,13 +5625,172 @@ See also `org-ilm-pdf-convert-org-respect-area'."
              'material
              :parent id
              :title (concat "Section: " (alist-get 'title section))
-             :props (list :ILM_PDF (alist-get 'range section)))))))))
+             :props (list :ILM_PDF (org-ilm--pdf-spec-to-string (alist-get 'spec section))))))))))
 
 ;;;;; Cloze
 
 (defun org-ilm-pdf-cloze ()
   (interactive)
   (org-ilm-pdf-region-extract 'virtual 'card-p))
+
+;;;;; Interactive capture
+
+;; Interactive capture means user builds up interactively what page (regions)
+;; they want to extract. In addtion, multiple selections can be added to this
+;; capture.
+;; Keybindings:
+;; - '[' -> Select current page as begin page
+;;          Region active: Limit to region area
+;;          Prefix: Point location defines area upper bound
+;; - ']' -> Same as "[" but for end page
+;; - '"' -> Add current selection regions to active selections
+
+(defface org-ilm-pdf-interactive-capture-face
+  '((t :background "grey"))
+  "Face used to highlight interactive capture areas.")
+
+(defvar-local org-ilm-pdf-interactive-capture nil
+  "State of interactive capture.")
+
+(defun org-ilm--pdf-interactive-capture-reset ()
+  "Undo interactive capture selection."
+  (setq-local org-ilm-pdf-interactive-capture nil)
+  (when (org-ilm--pdf-mode-p)
+    (pdf-view-redisplay)))
+
+(defun org-ilm--pdf-interactive-capture-p ()
+  "Return t if something has been selected."
+  (and org-ilm-pdf-interactive-capture
+       (not (cl-every #'null (map-values org-ilm-pdf-interactive-capture)))))
+
+(defun org-ilm--pdf-interactive-capture-print-state ()
+  "Print what is currently being considered for capture."
+  (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom)
+      org-ilm-pdf-interactive-capture
+    (cond
+     (end-page
+      (message "Pages %s to %s selected. C-g to reset." (or begin-page 1) end-page))
+     (begin-page
+      (message "Page %s selected. C-g to reset." begin-page))
+     (t
+      (message "Nothing selected")))))
+
+(defun org-ilm-pdf-select-begin-page (arg)
+  "Select current page as start point of capture.
+With prefix arg, use mouse position as top cutoff point."
+  (interactive "P")
+  (let ((page (org-ilm--pdf-page-normalized))
+        (bottom (plist-get org-ilm-pdf-interactive-capture :begin-bottom))
+        top)
+    
+    (if arg
+      (let ((pos (org-ilm--pdf-mouse-position-relative)))
+        (setq top (cdr pos))
+        (when (and bottom (> top bottom))
+          (setq bottom nil)))
+      (setq bottom nil))
+
+    (map-let (:end-page :end-bottom) org-ilm-pdf-interactive-capture
+      (when (and end-page (<= end-page page))
+        (when (and (= end-page page) end-bottom (> end-bottom (or top 0)))
+          (setq bottom end-bottom))
+        (dolist (k '(:end-page :end-bottom))
+          (setf (plist-get org-ilm-pdf-interactive-capture k) nil))))
+    
+    (setf (plist-get org-ilm-pdf-interactive-capture :begin-page) page
+          (plist-get org-ilm-pdf-interactive-capture :begin-top) top
+          (plist-get org-ilm-pdf-interactive-capture :begin-bottom) bottom)
+    (pdf-view-redisplay)
+    (org-ilm--pdf-interactive-capture-print-state)))
+
+(defun org-ilm-pdf-select-end-page (arg)
+  "Select current page as end point of capture.
+With prefix arg, use mouse position as bottom cutoff point."
+  (interactive "P")
+  (let ((page (org-ilm--pdf-page-normalized))
+        bottom)
+    
+    (when arg
+      (let ((pos (org-ilm--pdf-mouse-position-relative)))
+        (setq bottom (cdr pos))))
+
+    (map-let (:begin-page :begin-top :begin-bottom) org-ilm-pdf-interactive-capture
+      (cond
+       ((or (null begin-page) (< begin-page page))
+        (setf (plist-get org-ilm-pdf-interactive-capture :begin-bottom) nil))
+       ((or (> begin-page page)
+            (and (= begin-page page)
+                 (or (null bottom)))
+                     (and begin-top (< bottom begin-top)))
+        (dolist (k '(:begin-page :begin-top :begin-bottom))
+          (setf (plist-get org-ilm-pdf-interactive-capture k) nil)))
+       ((= begin-page page)
+        (when (and bottom (> bottom (or begin-top 0)))
+          (setf (plist-get org-ilm-pdf-interactive-capture :begin-bottom) bottom))
+        (setq page nil
+              bottom nil)))
+
+      (setf (plist-get org-ilm-pdf-interactive-capture :end-page) page 
+            (plist-get org-ilm-pdf-interactive-capture :end-bottom) bottom))
+    (pdf-view-redisplay)
+    (org-ilm--pdf-interactive-capture-print-state)))
+
+(defun org-ilm--pdf-interactive-capture-page-highlight (&optional page)
+  "Return interactive capture state of PAGE as `org-ilm-pdf-highlight'."
+  (setq page (org-ilm--pdf-page-normalized page))
+  (when (org-ilm--pdf-interactive-capture-p)
+    (map-let ((:id el-id) (:type el-type)) org-ilm--data
+      (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom)
+          org-ilm-pdf-interactive-capture
+        (cond
+         ((and begin-page (= page begin-page))
+          (make-org-ilm-pdf-highlight
+           :el-id el-id :el-type el-type
+           :type 'area :interactive-p t
+           :page page
+           :rect (list 0 (or begin-top 0) 1 (or begin-bottom 1))))
+         ((and end-page (<= (or begin-page 1) page end-page))
+          (make-org-ilm-pdf-highlight
+           :el-id el-id :el-type el-type
+           :type 'area :interactive-p t
+           :page page
+           :rect (list 0 0 1 (or (when (= end-page page) end-bottom) 1)))))))))
+
+(defun org-ilm--pdf-interactive-capture-spec ()
+  "Return interactive capture state as `org-ilm-pdf-spec'."
+  (when (org-ilm--pdf-interactive-capture-p)
+    (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom)
+        org-ilm-pdf-interactive-capture
+      (let (spec-data)
+        (when begin-page
+          (push (append
+                 `(,begin-page)
+                 (when (or begin-top begin-bottom)
+                   (list (list 0 (or begin-top 0) 1 (or begin-bottom 1)))))
+                spec-data))
+        (when end-page
+          (push '- spec-data)
+          (push (append
+                 `(,end-page)
+                 (when end-bottom (list (list 0 0 1 (or end-bottom 1)))))
+                spec-data))
+        (org-ilm--pdf-spec-parse (reverse spec-data))))))
+
+(defun org-ilm--pdf-interactive-capure--hook ()
+  (cond
+   (org-ilm-global-minor-mode
+    (define-key pdf-view-mode-map (kbd "[") #'org-ilm-pdf-select-begin-page)
+    (define-key pdf-view-mode-map (kbd "]") #'org-ilm-pdf-select-end-page)
+    (advice-add 'keyboard-quit :before #'org-ilm--pdf-interactive-capture-reset)
+    )
+   (t
+    (define-key pdf-view-mode-map (kbd "[") nil)
+    (define-key pdf-view-mode-map (kbd "]") nil)
+    (advice-remove 'keyboard-quit #'org-ilm--pdf-interactive-capture-reset)
+    )))
+
+(add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-interactive-capure--hook)
+    
 
 
 ;;;; Image attachment
@@ -5723,8 +5859,7 @@ holding headline is an ilm element."
     'with-self 'first-match))
 
 (defvar-local org-ilm--data nil
-  "Buffer-local ilm data stored in element attachment buffers.
-This is used to keep track of changes in priority and scheduling.")
+  "Buffer-local ilm data stored in element attachment buffers.")
 
 ;; TODO org-attach-delete-all
 
@@ -5841,6 +5976,7 @@ This is used to keep track of changes in priority and scheduling.")
       (setq-local
        org-ilm--data
        (list :id id
+             :type (org-ilm-element--type element)
              :collection collection
              ;; TODO porbably remove and just use `org-ilm--element-by-id' to
              ;; get most recent
@@ -5860,11 +5996,7 @@ This is used to keep track of changes in priority and scheduling.")
       (pcase major-mode
         ('org-mode
          (cursor-intangible-mode 1)
-         (org-ilm-recreate-overlays)
-         (setf (plist-get org-ilm--data :size)
-               (save-restriction
-                 (widen)
-                 (- (point-max) (point-min)))))
+         (org-ilm-recreate-overlays))
         ('pdf-virtual-view-mode
          (setq-local default-directory "")
          )
@@ -5884,37 +6016,6 @@ missing, something else is wrong, so throw an error."
     (unless (bound-and-true-p org-ilm--data)
       (error "Could not create attachment data `org-ilm--data'"))))
 
-(defun org-ilm--attachment-priority-compile ()
-  (org-ilm--attachment-ensure-data-object)
-  (cl-destructuring-bind
-      (&key id beta start a b cards extracts &allow-other-keys) org-ilm--data
-    (let ((actions (+ cards extracts))
-          (duration (float-time (time-subtract (current-time) start))))
-      ;; Rewards extracts and cards
-      (cl-incf b (org-ilm--priority-b-from-actions actions))
-      
-      ;; Only add duration penalty when reviewing
-      ;; TODO Commented out because duration is not determinsitic. Any change to
-      ;; priority needs to happen immediately, not queued up then applied.
-      ;; (when (org-ilm-reviewing-id-p id)
-      ;;   (cl-incf a (org-ilm--priority-a-from-duration duration)))
-      
-      (cons a b))))
-
-(defun org-ilm--attachment-priority-update (action)
-  (org-ilm--attachment-ensure-data-object)
-  (pcase action
-    ('extract
-     (cl-incf (plist-get org-ilm--data :extracts)))
-    ('card
-     (cl-incf (plist-get org-ilm--data :cards)))
-    (_ (error "Wrong value for ACTION")))
-  (let ((update-params (org-ilm--attachment-priority-compile)))
-    (org-ilm--org-with-point-at (plist-get org-ilm--data :id)
-      (org-ilm--priority-update
-       :beta (plist-get org-ilm--data :beta)
-       :a (car update-params)
-       :b (cdr update-params)))))
 
 ;;;;; Navigation
 
@@ -7159,7 +7260,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
 ;; - Mainly queue-specific priorities.
 ;; - Exclude cards.
 ;; Replace current arg with double arg
-(defun org-ilm-queue-add-dwim (&optional arg)
+(defun org-ilm-queue-add-dwim (&optional arg exclude-self)
   "Add element at point + descendants to queue. With ARG, add to new queue.
 
 If point on headline, add headline and descendants.
@@ -7187,6 +7288,7 @@ If point on concept, add all headlines of concept."
          (org-back-to-heading t)
          (let ((end (save-excursion (org-end-of-subtree t)))
                el)
+           (when exclude-self (outline-next-heading))
            (while (< (point) end)
              (when (setq el (org-ilm--element-at-point))
                (when (org-ilm--queue-insert el :buffer queue-buffer :exists-ok t)
