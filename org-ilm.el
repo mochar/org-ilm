@@ -4331,10 +4331,7 @@ the ytdlp flags which I don't care to do atm."
 
 ;;;; PDF attachment
 
-;; Nice functions/macros:
-;; pdf-util-track-mouse-dragging
-;; pdf-view-display-region
-;; pdf-virtual-document-page: normalized virtual page + range -> actual
+;;;;; Variables
 
 (defvar-keymap org-ilm-pdf-map
   :doc "Keymap for PDF attachments."
@@ -4451,7 +4448,7 @@ When OF-DOCUMENT non-nil, jump to headline which has the orginal document as att
 REGION: Note that if in virtual view with region, already exports that region."
   (org-ilm--pdf-mode-assert)
   (let ((region (or region '(0 0 1 1)))
-        (page (or page (org-ilm--pdf-page-normalized)))
+        (page (or page (pdf-view-current-page)))
         (img-buffer (get-buffer-create "*Org Ilm PDF Image*"))
         img-type img-ext img-path)
     ;; TODO Supports combining multiple regions as one image, might be nice for
@@ -4700,7 +4697,14 @@ PDF page."
          (image-pixel-xy (posn-object-x-y pos))
          (relative-xy (pdf-util-scale-pixel-to-relative 
                        image-pixel-xy)))
+    ;; Correct for virtual pdf view area
+    (let ((norm (org-ilm--pdf-region-normalized (list (car relative-xy) (cdr relative-xy) 1 1))))
+      (setq relative-xy (cons (nth 0 norm) (nth 1 norm))))
     relative-xy))
+
+(defun org-ilm--pdf-clip-rect (rect)
+  (mapcar (lambda (x) (min (max x 0) 1)) rect))
+
 
 ;;;;; Section spec
 
@@ -4953,8 +4957,10 @@ TODO Cute if we can use numeric prefix to jump to that page number"
         (when-let* ((el-id (org-element-property :ID headline))
                     (type (org-ilm--element-type headline))
                     (range (org-element-property :ILM_PDF headline))
-                    (spec (org-ilm--pdf-spec-parse range nil)))
+                    (spec (org-ilm--pdf-spec-parse range)))
           (dolist (part (org-ilm-pdf-spec--parts spec))
+            ;; TODO Find some way to also highlight ranges without creating a
+            ;; highlight object per page
             (when (org-ilm-pdf-page-p part)
               (cond-let*
                 ([selections (org-ilm-pdf-page--selections part)]
@@ -4976,7 +4982,18 @@ TODO Cute if we can use numeric prefix to jump to that page number"
                      :type 'area
                      :page (org-ilm-pdf-page--number part)
                      :rect area)
-                    highlights))))))))
+                    highlights)))
+                (t
+                 (unless (string= el-id id)
+                   (push
+                    (make-org-ilm-pdf-highlight
+                     :el-id el-id
+                     :el-type type
+                     :type 'page
+                     :page (org-ilm-pdf-page--number part)
+                     :rect (list 0 0 1 1))
+                    highlights)))
+                )))))
       highlights)))
 
 (defun org-ilm--pdf-highlights (&optional reparse-p)
@@ -5054,9 +5071,6 @@ buffer-local `pdf-view--hotspot-functions'."
                   'help-echo (format "Capture: %s" el-id))))))
    highlights))
 
-(defun org-ilm--pdf-clip-rect (rect)
-  (mapcar (lambda (x) (min (max x 0) 1)) rect))
-
 (defun org-ilm--pdf-info-renderpage-highlights (page width highlights &optional file-or-buffer)
   "Render PDF PAGE as image with HIGHLIGHTS highlighted."
   ;; To create the image we call `pdf-info-renderpage' at the end. It accepts a
@@ -5124,7 +5138,7 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; soon as the image needs to be generated again.
 (defun org-ilm--advice--pdf-view-create-page (page &optional window)
   (let* ((highlights (or (ensure-list
-                          (org-ilm--pdf-interactive-capture-page-highlight page))
+                          (org-ilm--pdf-interactive-capture-page-highlights page))
                          (and (org-ilm--attachment-data)
                               org-ilm-pdf-highlight-highlights-p
                               (org-ilm--pdf-page-highlights))))
@@ -5393,7 +5407,6 @@ See also `org-ilm-pdf-convert-org-respect-area'."
   
   (pcase extent
     ('page (org-ilm-pdf-page-extract output-type))
-    ('outline (org-ilm-pdf-outline-extract))
     ('region (org-ilm-pdf-region-extract output-type))
     ('section (org-ilm-pdf-section-extract output-type))))
 
@@ -5418,14 +5431,22 @@ See also `org-ilm-pdf-convert-org-respect-area'."
         ('text
          (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
            (org-ilm--capture-capture
-            'material :parent id :content text :ext "org")))
+            'material
+            :parent id
+            :content text
+            :props (list :ILM_PDF current-page-real)
+            :ext "org")))
         ('image
          (let* ((img-path (org-ilm--pdf-image-export extract-id)))
            (org-ilm--capture-capture
             'material
-            :parent id :file img-path
+            :parent id
+            :file img-path
             :title (format "Page %s" current-page-real)
-            :id extract-id :method 'mv :ext t)))
+            :id extract-id
+            :method 'mv
+            :ext t
+            :props (list :ILM_PDF current-page-real))))
         ('org
          (org-ilm--capture-capture
           'material
@@ -5433,6 +5454,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
           :title (format "Page %s" current-page-real)
           :id extract-id
           :ext "org"
+          :props (list :ILM_PDF current-page-real)
           :on-success
           (lambda (&rest _)
             (org-ilm--pdf-convert-attachment-to-org
@@ -5675,6 +5697,60 @@ See also `org-ilm-pdf-convert-org-respect-area'."
      (t
       (message "Nothing selected")))))
 
+(defun org-ilm--pdf-interactive-capture-page-highlights (&optional page)
+  "Return interactive capture state of PAGE as `org-ilm-pdf-highlight' objects."
+  (setq page (org-ilm--pdf-page-normalized page))
+  (when (org-ilm--pdf-interactive-capture-p)
+    (map-let ((:id el-id) (:type el-type)) org-ilm--data
+      (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom :selections)
+          org-ilm-pdf-interactive-capture
+        (cond-let*
+          ([hls (seq-keep
+                 (lambda (s)
+                   (when (= page (car s))
+                     (make-org-ilm-pdf-highlight
+                      :el-id el-id :el-type el-type
+                      :type 'selection :interactive-p t
+                      :page page :rect (cdr s))))
+                 selections)]
+           hls)
+          ((and begin-page (= page begin-page))
+           (make-org-ilm-pdf-highlight
+            :el-id el-id :el-type el-type
+            :type 'area :interactive-p t
+            :page page
+            :rect (list 0 (or begin-top 0) 1 (or begin-bottom 1))))
+          ((and end-page (<= (or begin-page 1) page end-page))
+           (make-org-ilm-pdf-highlight
+            :el-id el-id :el-type el-type
+            :type 'area :interactive-p t
+            :page page
+            :rect (list 0 0 1 (or (when (= end-page page) end-bottom) 1)))))))))
+
+(defun org-ilm--pdf-interactive-capture-spec ()
+  "Return interactive capture state as `org-ilm-pdf-spec'."
+  (when (org-ilm--pdf-interactive-capture-p)
+    (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom :selections)
+        org-ilm-pdf-interactive-capture
+      (let (spec-data)
+        (when begin-page
+          (push (append
+                 `(,begin-page)
+                 (when (or begin-top begin-bottom)
+                   (list (list 0 (or begin-top 0) 1 (or begin-bottom 1))))
+                 (seq-keep
+                  (lambda (s) (when (= (car s) begin-page) (cdr s)))
+                  selections)
+                 )
+                spec-data))
+        (when end-page
+          (push '- spec-data)
+          (push (append
+                 `(,end-page)
+                 (when end-bottom (list (list 0 0 1 (or end-bottom 1)))))
+                spec-data))
+        (org-ilm--pdf-spec-parse (reverse spec-data))))))
+
 (defun org-ilm-pdf-select-begin-page (arg)
   "Select current page as start point of capture.
 With prefix arg, use mouse position as top cutoff point."
@@ -5716,14 +5792,17 @@ With prefix arg, use mouse position as bottom cutoff point."
 
     (map-let (:begin-page :begin-top :begin-bottom) org-ilm-pdf-interactive-capture
       (cond
-       ((or (null begin-page) (< begin-page page))
+       ((null begin-page)
+        (setf (plist-get org-ilm-pdf-interactive-capture :begin-page) (org-ilm--pdf-page-normalized 1)))
+       ((< begin-page page)
         (setf (plist-get org-ilm-pdf-interactive-capture :begin-bottom) nil))
        ((or (> begin-page page)
             (and (= begin-page page)
                  (or (null bottom)))
                      (and begin-top (< bottom begin-top)))
-        (dolist (k '(:begin-page :begin-top :begin-bottom))
-          (setf (plist-get org-ilm-pdf-interactive-capture k) nil)))
+        (setf (plist-get org-ilm-pdf-interactive-capture :begin-page) (org-ilm--pdf-page-normalized 1)
+              (plist-get org-ilm-pdf-interactive-capture :begin-top) nil
+              (plist-get org-ilm-pdf-interactive-capture :begin-bottom) nil))
        ((= begin-page page)
         (when (and bottom (> bottom (or begin-top 0)))
           (setf (plist-get org-ilm-pdf-interactive-capture :begin-bottom) bottom))
@@ -5735,57 +5814,37 @@ With prefix arg, use mouse position as bottom cutoff point."
     (pdf-view-redisplay)
     (org-ilm--pdf-interactive-capture-print-state)))
 
-(defun org-ilm--pdf-interactive-capture-page-highlight (&optional page)
-  "Return interactive capture state of PAGE as `org-ilm-pdf-highlight'."
-  (setq page (org-ilm--pdf-page-normalized page))
-  (when (org-ilm--pdf-interactive-capture-p)
-    (map-let ((:id el-id) (:type el-type)) org-ilm--data
-      (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom)
-          org-ilm-pdf-interactive-capture
-        (cond
-         ((and begin-page (= page begin-page))
-          (make-org-ilm-pdf-highlight
-           :el-id el-id :el-type el-type
-           :type 'area :interactive-p t
-           :page page
-           :rect (list 0 (or begin-top 0) 1 (or begin-bottom 1))))
-         ((and end-page (<= (or begin-page 1) page end-page))
-          (make-org-ilm-pdf-highlight
-           :el-id el-id :el-type el-type
-           :type 'area :interactive-p t
-           :page page
-           :rect (list 0 0 1 (or (when (= end-page page) end-bottom) 1)))))))))
-
-(defun org-ilm--pdf-interactive-capture-spec ()
-  "Return interactive capture state as `org-ilm-pdf-spec'."
-  (when (org-ilm--pdf-interactive-capture-p)
-    (map-let (:begin-page :begin-top :begin-bottom :end-page :end-bottom)
-        org-ilm-pdf-interactive-capture
-      (let (spec-data)
-        (when begin-page
-          (push (append
-                 `(,begin-page)
-                 (when (or begin-top begin-bottom)
-                   (list (list 0 (or begin-top 0) 1 (or begin-bottom 1)))))
-                spec-data))
-        (when end-page
-          (push '- spec-data)
-          (push (append
-                 `(,end-page)
-                 (when end-bottom (list (list 0 0 1 (or end-bottom 1)))))
-                spec-data))
-        (org-ilm--pdf-spec-parse (reverse spec-data))))))
+(defun org-ilm-pdf-select-region ()
+  ""
+  (interactive)
+  (unless (pdf-view-active-region-p)
+    (user-error "No region selected"))
+  (let ((page (org-ilm--pdf-page-normalized))
+        (area (org-ilm--pdf-region-normalized)))
+    (if pdf-view--have-rectangle-region
+        (push (cons page area)
+              (plist-get org-ilm-pdf-interactive-capture :selections))
+      (let* ((page-rel (car pdf-view-active-region))
+             (area-rel (cadr pdf-view-active-region))
+            (rects (pdf-info-getselection
+                    page-rel area-rel pdf-view-selection-style)))
+        (dolist (rect rects)
+          (push (cons page (org-ilm--pdf-region-normalized rect page-rel))
+                (plist-get org-ilm-pdf-interactive-capture :selections))))  
+      )))
 
 (defun org-ilm--pdf-interactive-capure--hook ()
   (cond
    (org-ilm-global-minor-mode
     (define-key pdf-view-mode-map (kbd "[") #'org-ilm-pdf-select-begin-page)
     (define-key pdf-view-mode-map (kbd "]") #'org-ilm-pdf-select-end-page)
+    (define-key pdf-view-mode-map (kbd "\"") #'org-ilm-pdf-select-region)
     (advice-add 'keyboard-quit :before #'org-ilm--pdf-interactive-capture-reset)
     )
    (t
     (define-key pdf-view-mode-map (kbd "[") nil)
     (define-key pdf-view-mode-map (kbd "]") nil)
+    (define-key pdf-view-mode-map (kbd "\"") nil)
     (advice-remove 'keyboard-quit #'org-ilm--pdf-interactive-capture-reset)
     )))
 
