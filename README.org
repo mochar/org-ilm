@@ -9,13 +9,13 @@ This Emacs package implements [[https://supermemo.guru/wiki/Incremental_reading]
   :vc (:url "https://github.com/mochar/org-ilm" :rev :newest)
   :config
 
-  ;; convtools
-  (global-set-key (kbd "C-c v") #'convtools-org-convert)
+  ;; org-ilm-convert
+  (global-set-key (kbd "C-c v") #'org-ilm-convert-org-convert)
 
-  ;; org-registry
-  (require 'org-registry)
-  (keymap-set global-map "C-c r" org-registry-prefix-map)
-  (org-registry-global-minor-mode 1)
+  ;; org-ilm-registry
+  (require 'org-ilm-registry)
+  (keymap-set global-map "C-c r" org-ilm-registry-prefix-map)
+  (org-ilm-registry-global-minor-mode 1)
 
   ;; org-ilm
   (require 'org-ilm)

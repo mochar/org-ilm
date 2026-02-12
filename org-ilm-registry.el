@@ -1,11 +1,4 @@
-;;; org-registry.el --- Registry in Org mode -*- lexical-binding: t; -*-
-
-;; Copyright (C) 2025
-
-;; Author: M Charrout
-;; Version: 0.1
-;; Package-Requires: ((emacs "27.1"))
-;; Keywords: html, org
+;;; org-ilm-registry.el --- Registry in Org mode -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -14,35 +7,34 @@
 ;;; Code:
 
 ;;;; Requirements
+
 (require 'org)
 (require 'org-id)
 (require 'org-attach)
+(require 'org-capture)
 ;; (require 'org-latex-preview)
 (require 'org-ql)
 (require 'org-node)
 (require 'org-transclusion)
+(require 'ol) ;; org-link
 (require 'cl-lib)
 (require 'dash)
 (require 'zotra)
 (require 'parsebib)
+(require 'transient)
+(require 'consult)
 
-(require 'mochar-utils)
-(require 'convtools)
+(require 'org-ilm-utils)
+(require 'org-ilm-convert)
 
 ;;;; Customization
 
-(defgroup org-registry nil
-  "Org registry"
-  :group 'org
-  :prefix "org-registry-"
-  :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
-
-(defcustom org-registry-registries '("~/org/registry.org")
+(defcustom org-ilm-registry-registries '("~/org/registry.org")
   "List of Org file paths to be used as registries."
   :type '(repeat file)
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
-(defcustom org-registry-types nil
+(defcustom org-ilm-registry-types nil
   "Alist mapping registry type name to plist properties.
 
 Properties are:
@@ -58,11 +50,11 @@ Properties are:
 
 `:setup'
 
-  Called when `org-registry-global-minor-mode' is activated.
+  Called when `org-ilm-registry-global-minor-mode' is activated.
 
 `:cleanup'
 
-  Called when `org-registry-global-minor-mode' is deactivated.
+  Called when `org-ilm-registry-global-minor-mode' is deactivated.
 
 `:paste'
 
@@ -79,7 +71,7 @@ Properties are:
 `:aliases'
 
   Optional list of aliases for this type. You may also use
-  `org-registry-type-aliases'.
+  `org-ilm-registry-type-aliases'.
 
 One of the following properties can be passed to create a new entry of
 this type. Note that they are mutually exclusive:
@@ -87,7 +79,7 @@ this type. Note that they are mutually exclusive:
 `:create'
 
   Return org registry entry data, which will be passed to
-  `org-registry--register'. If instead you'd like to add the entry in
+  `org-ilm-registry--register'. If instead you'd like to add the entry in
   the registry yourself, use `:register' instead. This is useful for
   example when you have an asynchronous process that creates the
   properties.
@@ -96,125 +88,125 @@ this type. Note that they are mutually exclusive:
 
   Add an entry to the registry. This function is responsible for
   creating the entry in the registry, similar to
-  `org-registry--register'. If instead you'd like to delegate that to
-  org-registry and only return the data for it, use `:create' instead.
+  `org-ilm-registry--register'. If instead you'd like to delegate that to
+  org-ilm-registry and only return the data for it, use `:create' instead.
 "
   :type '(alist :tag "Registry type parameters"
                 :key-type string
 		:value-type plist)
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
-(defcustom org-registry-type-aliases
+(defcustom org-ilm-registry-type-aliases
   '(("file" . ("video")))
-  "Alist mapping `org-registry-types' types to aliases that can be used in their place.
+  "Alist mapping `org-ilm-registry-types' types to aliases that can be used in their place.
 This helps share functionality of a type while being able to filter on a more granular level."
   :type '(alist :key-type string :value-type (repeat string))
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
-(defcustom org-registry-add-link-in-title nil
+(defcustom org-ilm-registry-add-link-in-title nil
   "Add a link to where the entry was registered in the title."
   :type 'string
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
-(defface org-registry-link-face
+(defface org-ilm-registry-link-face
   '((t :inherit org-link))
   "Face used by registry link types."
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
 ;;;; Minor mode
 
-(defun org-registry--delete-overlay-advice (&rest args)
+(defun org-ilm-registry--delete-overlay-advice (&rest args)
   "Advice to detect if our org-link face was deleted."
   ;; TODO in org-transclusion-remove: (delete-overlay tc-pair-ov)
   ;; Might be nice to detect transclusions being deactivated
   (let ((ov (car args)))
-    (when-let* ((type (overlay-get ov 'org-registry-type))
-                (data (cdr (org-registry--type-data type)))
+    (when-let* ((type (overlay-get ov 'org-ilm-registry-type))
+                (data (cdr (org-ilm-registry--type-data type)))
                 (teardown-func (plist-get data :teardown)))
       (funcall teardown-func ov))))
 
-(define-minor-mode org-registry-global-minor-mode
+(define-minor-mode org-ilm-registry-global-minor-mode
   "Prepare some hooks and advices some functions."
   :init-value nil
   :global t
   :lighter nil ;; String to display in mode line
-  :group 'org-registry
-  (if org-registry-global-minor-mode
+  :group 'org-ilm-registry
+  (if org-ilm-registry-global-minor-mode
       ;; Enable
       (progn
         ;; Detect deletion, call type :teardown ov
         (advice-add 'delete-overlay
-                    :before #'org-registry--delete-overlay-advice)
+                    :before #'org-ilm-registry--delete-overlay-advice)
         
-        (dolist (type-data org-registry-types)
+        (dolist (type-data org-ilm-registry-types)
           (when-let ((f (plist-get (cdr type-data) :setup)))
             (funcall f))))
     ;; Disable
-    (dolist (type-data org-registry-types)
+    (dolist (type-data org-ilm-registry-types)
         (when-let ((f (plist-get (cdr type-data) :cleanup)))
           (funcall f)))
     (advice-remove 'delete-overlay
-                   #'org-registry--delete-overlay-advice)))
+                   #'org-ilm-registry--delete-overlay-advice)))
 
 ;;;; Commands
 
 ;;;###autoload
-(defvar-keymap org-registry-prefix-map
-  "o" #'org-registry-open
-  "f" #'org-registry-find
-  "i" #'org-registry-insert
-  "p" #'org-registry-paste
-  "r" #'org-registry-register-dwim
-  "a" #'org-registry-attachments)
+(defvar-keymap org-ilm-registry-prefix-map
+  "o" #'org-ilm-registry-open
+  "f" #'org-ilm-registry-find
+  "i" #'org-ilm-registry-insert
+  "p" #'org-ilm-registry-paste
+  "r" #'org-ilm-registry-register-dwim
+  "a" #'org-ilm-registry-attachments)
 
 ;;;###autoload
-(defun org-registry-open ()
+(defun org-ilm-registry-open ()
   (interactive)
-  (find-file (org-registry--registry-select)))
+  (find-file (org-ilm-registry--registry-select)))
   
 ;;;###autoload
-(defun org-registry-find ()
+(defun org-ilm-registry-find ()
   (interactive)
-  (org-node-goto (org-registry--select-entry)))
+  (org-node-goto (org-ilm-registry--select-entry)))
 
 ;;;###autoload
-(defun org-registry-insert (entry-id)
+(defun org-ilm-registry-insert (entry-id)
   (interactive
-   (list (org-mem-entry-id (org-registry--select-entry))))
+   (list (org-mem-entry-id (org-ilm-registry--select-entry))))
   (insert (format "[[registry:%s]]" entry-id))
   (org-link-preview))
 
 ;;;###autoload
-(defun org-registry-paste ()
+(defun org-ilm-registry-paste ()
   "Paste the contents of the entry rather than linking to it."
   (interactive)
-  (let* ((entry (org-registry--select-entry))
+  (let* ((entry (org-ilm-registry--select-entry))
          (type (org-mem-entry-property "TYPE" entry))
-         (data (cdr (org-registry--type-data type)))
+         (data (cdr (org-ilm-registry--type-data type)))
          (paste-func (plist-get data :paste)))
     (funcall paste-func entry)))
 
 ;;;###autoload
-(defun org-registry-register (type-name &optional args)
+(defun org-ilm-registry-register (type-name &optional args)
   "Add something to the registry."
   (interactive
    (list
-    (pcase (length org-registry-types)
+    (pcase (length org-ilm-registry-types)
       (0 (user-error "No registry types"))
-      (1 (caar org-registry-types))
-      (_ (completing-read "Type: " org-registry-types nil t)))))
-  (let ((type (assoc type-name org-registry-types)))
+      (1 (caar org-ilm-registry-types))
+      (_ (completing-read "Type: " org-ilm-registry-types nil t)))))
+  (let ((type (assoc type-name org-ilm-registry-types)))
     (cond-let*
       ([create-func (plist-get (cdr type) :create)]
        [data (funcall create-func args)]
-       (org-registry--register (car type) data))
+       (org-ilm-registry--register (car type) data))
       ([register-func (plist-get (cdr type) :register)]
        (funcall register-func args))
       ;; When nothing assigned, create empty capture
-      (t (org-registry--register (car type) nil)))))
+      (t (org-ilm-registry--register (car type) nil)))))
 
 ;;;###autoload
-(defun org-registry-register-dwim ()
+(defun org-ilm-registry-register-dwim ()
   "Add element at point to the registry."
   (interactive)
   (if-let ((types
@@ -225,27 +217,27 @@ This helps share functionality of a type while being able to filter on a more gr
                 (when-let* ((f (plist-get (cdr type) :parse))
                             (data (funcall f)))
                   (cons (car type) data)))
-              org-registry-types)))
+              org-ilm-registry-types)))
            (type (if (> (length types) 1)
                      (let ((type (completing-read "Type: " (mapcar #'car types) nil t)))
                        (assoc type types))
                    (car types))))
-      (funcall #'org-registry-register
+      (funcall #'org-ilm-registry-register
                (car type) (cdr type))
-    (call-interactively #'org-registry-register)))
+    (call-interactively #'org-ilm-registry-register)))
 
 ;;;###autoload
-(defun org-registry-attachments ()
+(defun org-ilm-registry-attachments ()
   "View the attachments of a registry entry."
   (interactive)
   (let* ((attachments (org-attach-file-list (org-attach-dir)))
-         (conversion (convtools--conversion-by-id (org-id-get)))
+         (conversion (org-ilm-convert--conversion-by-id (org-id-get)))
          conversion-name)
     (when (and conversion (not (eq (plist-get conversion :state) 'success)))
       (setq conversion-name
             (concat (propertize (plist-get conversion :name) 'face 'italic)
                     " ("
-                    (convtools--conversion-propertize-state (plist-get conversion :state))
+                    (org-ilm-convert--conversion-propertize-state (plist-get conversion :state))
                     ")"))
       (push conversion-name attachments))
     (let ((choice (completing-read "Attachment: " attachments nil t)))
@@ -255,70 +247,70 @@ This helps share functionality of a type while being able to filter on a more gr
 
 ;;;; Functions
 
-(cl-defun org-registry--select-entry (&key types registries)
+(cl-defun org-ilm-registry--select-entry (&key types registries)
   "Select registry entry."
-  (let* ((types (if types (ensure-list types) (mapcar #'car org-registry-types)))
+  (let* ((types (if types (ensure-list types) (mapcar #'car org-ilm-registry-types)))
          (registries (mapcar
                       (lambda (x) (expand-file-name x "~/"))
                       (if registries
                           (if (listp registries) registries (list registries))
-                        org-registry-registries))))
+                        org-ilm-registry-registries))))
 
     (car
      (consult--multi
       (seq-map
        (lambda (type-name)
          (list :name type-name
-               :narrow (plist-get (cdr (assoc type-name org-registry-types)) :key)
+               :narrow (plist-get (cdr (assoc type-name org-ilm-registry-types)) :key)
                :items
                (lambda ()
                  (seq-keep
                   (lambda (entry)
                     (when (member (org-mem-entry-property "TYPE" entry)
-                                  (org-registry--type-name-and-aliases type-name))
+                                  (org-ilm-registry--type-name-and-aliases type-name))
                       (cons (org-mem-entry-title entry) entry)))
                   (org-mem-entries-in-files registries)))))
        types)
       :require-match t
       :prompt "Registry entry: "))))
 
-(defun org-registry-type-aliases ()
+(defun org-ilm-registry-type-aliases ()
   "Return alist of type name to aliases.
-Aliases are retrieved from `org-registry-type-aliases' and the :aliases
- key in `org-registry-types'."
+Aliases are retrieved from `org-ilm-registry-type-aliases' and the :aliases
+ key in `org-ilm-registry-types'."
   (mapcar
    (lambda (type)
      (let ((name (car type))
            (data (cdr type)))
        (cons
         name
-        (cl-union (cdr (assoc name org-registry-type-aliases))
+        (cl-union (cdr (assoc name org-ilm-registry-type-aliases))
                   (plist-get data :aliases)
                   :test #'equal))))
-   org-registry-types))
+   org-ilm-registry-types))
 
-(defun org-registry--type-name-and-aliases (typename-or-alias)
+(defun org-ilm-registry--type-name-and-aliases (typename-or-alias)
   "Return a list of which name is first element and remainder are aliases."
-  (let ((type (assoc typename-or-alias org-registry-types))
-        (type-aliases (org-registry-type-aliases)))
+  (let ((type (assoc typename-or-alias org-ilm-registry-types))
+        (type-aliases (org-ilm-registry-type-aliases)))
     (if type
         (assoc typename-or-alias type-aliases)
       (cl-find-if (lambda (aliases)
                     (member typename-or-alias aliases))
                   type-aliases))))
 
-(defun org-registry--type-data (typename-or-alias)
-  (when-let ((type-name (car (org-registry--type-name-and-aliases typename-or-alias))))
-    (assoc type-name org-registry-types)))
+(defun org-ilm-registry--type-data (typename-or-alias)
+  (when-let ((type-name (car (org-ilm-registry--type-name-and-aliases typename-or-alias))))
+    (assoc type-name org-ilm-registry-types)))
 
-(defun org-registry--type-data-from-entry (entry-or-id)
+(defun org-ilm-registry--type-data-from-entry (entry-or-id)
   (when-let* ((entry (if (org-mem-entry-p entry-or-id)
                          entry-or-id
                        (org-mem-entry-by-id entry-or-id)))
               (type (org-mem-entry-property "TYPE" entry)))
-    (org-registry--type-data type)))
+    (org-ilm-registry--type-data type)))
 
-(defun org-registry--id-links-to-entry (&optional entry-or-id)
+(defun org-ilm-registry--id-links-to-entry (&optional entry-or-id)
   "All ID-links targeting registry entry with ID.
 
 From: `org-mem-id-links-to-id'
@@ -335,20 +327,20 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
         ;; that you also have, and have non-ID links targeting that.
         (seq-filter (##equal (org-mem-link-type %) "registry") links)))))
 
-(defun org-registry--registry-select (&optional type)
-  (pcase (length org-registry-registries)
+(defun org-ilm-registry--registry-select (&optional type)
+  (pcase (length org-ilm-registry-registries)
     (0 nil)
-    (1 (car org-registry-registries))
-    (t (completing-read "Registry: " org-registry-registries nil t))))
+    (1 (car org-ilm-registry-registries))
+    (_ (completing-read "Registry: " org-ilm-registry-registries nil t))))
 
-(defun org-registry--entry-contents (entry)
+(defun org-ilm-registry--entry-contents (entry)
   (cl-assert (org-mem-entry-p entry))
   (save-excursion
-    (mochar-utils--org-with-point-at
+    (org-ilm--org-with-point-at
      (org-mem-entry-id entry)
-     (org-registry--org-get-contents))))
+     (org-ilm-registry--org-get-contents))))
 
-(defun org-registry--plist-keys (plist)
+(defun org-ilm-registry--plist-keys (plist)
   "Return a list of keys in PLIST."
   (let (keys)
     (while plist
@@ -356,7 +348,7 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
       (setq plist (cddr plist)))
     (nreverse keys)))
 
-(defun org-registry--link-target ()
+(defun org-ilm-registry--link-target ()
   (if (and (eq major-mode 'org-mode) (org-id-get))
       (concat "id:" (org-id-get))
     ;; Previously parsed with org-store-link but sometimes useless targets
@@ -369,24 +361,24 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 ;;;; Content capture
 
 ;; TODO Finish. Idea is to ahve a capture buffer with more space where eg latex
-;; can be typed out before send to `org-registry--register' but i'm facing
+;; can be typed out before send to `org-ilm-registry--register' but i'm facing
 ;; scoping issues and i dont like having two capture buffers in a row.
 
-(defcustom org-registry-content-capture-path
+(defcustom org-ilm-registry-content-capture-path
   (expand-file-name
-   "org-registry-input.org"
+   "org-ilm-registry-input.org"
    temporary-file-directory)
   "Path of file where content is captured to, to be used with type registers."
   :type 'string
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
-(defun org-registry--org-capture (on-capture)
+(defun org-ilm-registry--org-capture (on-capture)
   (cl-letf* (((symbol-value 'org-capture-templates)
                (list
                 (list
                  "i" "Input"
                  'plain
-                 (list 'file org-registry-content-capture-path)
+                 (list 'file org-ilm-registry-content-capture-path)
                  ""
                  :hook
                  (lambda ()
@@ -412,7 +404,7 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
                    )
                  ;; :after-finalize
                  ;; (lambda ()
-                 ;;   (with-current-buffer (find-file-noselect org-registry-content-capture-path)
+                 ;;   (with-current-buffer (find-file-noselect org-ilm-registry-content-capture-path)
                  ;;     ,@body))
                  :kill-buffer t
                  ))))
@@ -421,10 +413,10 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
 
 ;;;; Register
 
-(defvar org-registry-register-hook nil
+(defvar org-ilm-registry-register-hook nil
   "Hook run after an entry has been registered.")
 
-(cl-defun org-registry--register (type data &key registry template)
+(cl-defun org-ilm-registry--register (type data &key registry template)
   "Add an entry of TYPE with DATA to the REGISTRY.
 
 DATA is a plist that can contain :title, :body, :id, :type, :props,
@@ -432,7 +424,7 @@ DATA is a plist that can contain :title, :body, :id, :type, :props,
 
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
-  (let* ((registry (or registry (org-registry--registry-select)))
+  (let* ((registry (or registry (org-ilm-registry--registry-select)))
          (title (ignore-errors (string-trim (plist-get data :title))))
          (body (plist-get data :body))
          (type (or (plist-get data :type) type))
@@ -440,10 +432,10 @@ org-capture template properties."
          (props (org-combine-plists (list :ID id) (plist-get data :props)))
          (on-success (plist-get data :on-success))
          (template-string (car template)))
-    (when org-registry-add-link-in-title
+    (when org-ilm-registry-add-link-in-title
       (setq title
             (concat
-             (format "[[%s][%s]]: " (org-registry--link-target) type)
+             (format "[[%s][%s]]: " (org-ilm-registry--link-target) type)
              title)))
     (setf (plist-get props :SOURCE) (org-store-link '(4)))
     (unless template-string
@@ -474,7 +466,7 @@ org-capture template properties."
                    (if org-note-abort
                        nil
 
-                     (mochar-utils--org-mem-update-cache-after-capture 'entry)
+                     (org-ilm--org-mem-update-cache-after-capture 'entry)
 
                      (when on-success (funcall on-success id))
 
@@ -482,9 +474,9 @@ org-capture template properties."
                        (when (and begin end (yes-or-no-p "Replace with registry link? "))
                          (save-restriction
                            (delete-region begin end)
-                           (org-registry-insert id))))
+                           (org-ilm-registry-insert id))))
 
-                     (run-hook-with-args 'org-registry-register-hook id)))
+                     (run-hook-with-args 'org-ilm-registry-register-hook id)))
                  ))
                (template-props (org-combine-plists
                                 (cdr template) default-template-props))
@@ -495,7 +487,7 @@ org-capture template properties."
                   template-props))))
       (org-capture nil "r"))))
 
-(defun org-registry--org-get-contents ()
+(defun org-ilm-registry--org-get-contents ()
   (save-excursion
     (org-back-to-heading-or-point-min)
     (org-end-of-meta-data 'full)
@@ -510,48 +502,48 @@ org-capture template properties."
 
 ;;;; Types
 
-(defun org-registry-set-type (type &rest parameters)
+(defun org-ilm-registry-set-type (type &rest parameters)
   "Set registry TYPE properties to PARAMETERS.
-PARAMETERS should be keyword value pairs. See `org-registry-types'."
-  (let ((data (assoc type org-registry-types)))
+PARAMETERS should be keyword value pairs. See `org-ilm-registry-types'."
+  (let ((data (assoc type org-ilm-registry-types)))
     (if data
         (setcdr data (org-combine-plists (cdr data) parameters))
-      (push (cons type parameters) org-registry-types))))
+      (push (cons type parameters) org-ilm-registry-types))))
 
-(defun org-registry--link-preview (ov id link)
+(defun org-ilm-registry--link-preview (ov id link)
   ;; This function must return a non-nil value to indicate success.
   (when-let* ((entry (org-mem-entry-by-id id))
-              (type-data (org-registry--type-data-from-entry entry)))
-    (overlay-put ov 'org-registry-type (car type-data))
+              (type-data (org-ilm-registry--type-data-from-entry entry)))
+    (overlay-put ov 'org-ilm-registry-type (car type-data))
     (org-with-point-at (org-element-begin link)
       (funcall (plist-get (cdr type-data) :preview) entry ov link))))
 
-(defun org-registry--link-follow (id prefix-arg)
+(defun org-ilm-registry--link-follow (id prefix-arg)
   (org-node-goto-id id))
 
-(defun org-registry--link-face (id)
-  (if-let ((type-data (org-registry-type-data-from-entry id))
-           (face (plist-get (car data) :face)))
+(defun org-ilm-registry--link-face (id)
+  (if-let* ((type-data (org-ilm-registry-type-data-from-entry id))
+            (face (plist-get (car type-data) :face)))
       face
-    'org-registry-link-face))
+    'org-ilm-registry-link-face))
 
 (org-link-set-parameters
  "registry"
- :follow #'org-registry--link-follow
- :preview #'org-registry--link-preview
- :face #'org-registry--link-face)
+ :follow #'org-ilm-registry--link-follow
+ :preview #'org-ilm-registry--link-preview
+ :face #'org-ilm-registry--link-face)
 
 
 ;;;;; Latex type
 
-(defun org-registry--type-latex-from-entry (entry)
+(defun org-ilm-registry--type-latex-from-entry (entry)
   "Return the latex content from ENTRY.
 Can be either in the LATEX property or the body text."
   (or
    (org-mem-entry-property "LATEX" entry)
-   (org-registry--entry-contents entry)))
+   (org-ilm-registry--entry-contents entry)))
 
-(defun org-registry--type-latex-preview (entry ov link)
+(defun org-ilm-registry--type-latex-preview (entry ov link)
   "Place a latex overlay on the link.
 
 The way this is implemented is by using `org-latex-preview-place' which
@@ -562,25 +554,25 @@ The way this is implemented is by using `org-latex-preview-place' which
  the 'modification-hooks overlay property does not detect overlay
  deletions. So my best solution at the moment is to advice
  `delete-overlay', which is done in the global minor mode."
-  (when-let ((latex (org-registry--type-latex-from-entry entry)))
-    (overlay-put ov 'org-registry-latex t)
+  (when-let ((latex (org-ilm-registry--type-latex-from-entry entry)))
+    (overlay-put ov 'org-ilm-registry-latex t)
     (org-latex-preview-place
      org-latex-preview-process-default
      (list
       (list (overlay-start ov) (overlay-end ov) latex )))
     t))
 
-(defun org-registry--type-latex-teardown (ov)
+(defun org-ilm-registry--type-latex-teardown (ov)
   "When latex registry link ov gets deleted, remove the latex ov inside it."
   (dolist (o (overlays-in (overlay-start ov) (overlay-end ov)))
     (when (eq (overlay-get o 'org-overlay-type)
               'org-latex-overlay)
       (delete-overlay o))))
 
-(defun org-registry--type-latex-paste (entry)
-  (insert (org-registry--type-latex-from-entry entry)))
+(defun org-ilm-registry--type-latex-paste (entry)
+  (insert (org-ilm-registry--type-latex-from-entry entry)))
 
-(defun org-registry--type-latex-parse ()
+(defun org-ilm-registry--type-latex-parse ()
   "Parses latex value from text at point.
 If inline fragment, use it as entry property value. If
 environment (multiline), paste it in headline body."
@@ -596,7 +588,7 @@ environment (multiline), paste it in headline body."
             :begin (org-element-property :begin org-element)
             :end (org-element-property :end org-element)))))
 
-(defun org-registry--type-latex-create (&optional args)
+(defun org-ilm-registry--type-latex-create (&optional args)
   (cl-destructuring-bind (&key latex title fragment begin end) args
     (if (null latex)
         (list :title title :props (list :LATEX ""))
@@ -605,20 +597,20 @@ environment (multiline), paste it in headline body."
             :props (list :LATEX (when fragment latex))
             :region (list begin end)))))
 
-(org-registry-set-type
+(org-ilm-registry-set-type
  "latex"
  :key ?l
- :preview #'org-registry--type-latex-preview
- :teardown #'org-registry--type-latex-teardown
- :paste #'org-registry--type-latex-paste
- :parse #'org-registry--type-latex-parse
- :create #'org-registry--type-latex-create
+ :preview #'org-ilm-registry--type-latex-preview
+ :teardown #'org-ilm-registry--type-latex-teardown
+ :paste #'org-ilm-registry--type-latex-paste
+ :parse #'org-ilm-registry--type-latex-parse
+ :create #'org-ilm-registry--type-latex-create
  )
 
 
 ;;;;; File type
 
-(defun org-registry--type-file-preview (entry ov link)
+(defun org-ilm-registry--type-file-preview (entry ov link)
   (org-link-preview-file
    ov
    (with-current-buffer (find-file-noselect (org-mem-entry-file entry))
@@ -628,13 +620,13 @@ environment (multiline), paste it in headline body."
                          (org-attach-dir)))))
    link))
 
-(defun org-registry--type-file-paste (entry)
+(defun org-ilm-registry--type-file-paste (entry)
   (let ((path (org-mem-entry-property "PATH" entry)))
     (insert (org-link-make-string
              (concat "file:" path)
              (file-name-base path)))))
 
-(defun org-registry--type-file-from-path (path &optional title)
+(defun org-ilm-registry--type-file-from-path (path &optional title)
   "Return data for registry entry of type file from PATH."
   (when (and (stringp path) (file-exists-p path))
     (let* ((ext (file-name-extension path))
@@ -644,25 +636,25 @@ environment (multiline), paste it in headline body."
                   (t "file"))))
       (list :title title :path path :type type))))
 
-(defun org-registry--type-file-parse ()
+(defun org-ilm-registry--type-file-parse ()
   (if-let* ((el (when (eq major-mode 'org-mode) (org-element-context)))
             (_ (and (eq (org-element-type el) 'link)
                     (string= (org-element-property :type el) "file"))))
       (org-combine-plists
-       (org-registry--type-file-from-path
+       (org-ilm-registry--type-file-from-path
         (expand-file-name (org-element-property :path (org-element-context)))
         (car (flatten-list (org-element-property :caption (org-element-at-point)))))
        (list :begin (org-element-property :begin el)
              :end (org-element-property :end el)))
-    (when-let ((data (org-registry--type-file-from-path
+    (when-let ((data (org-ilm-registry--type-file-from-path
                       (buffer-file-name (buffer-base-buffer)))))
       ;; We only dwim if its a non-generic file
       (unless (string= (plist-get data :type) "file") data))))
 
 ;; TODO Deprecated for register function
-(defun org-registry--type-file-create (&optional args)
+(defun org-ilm-registry--type-file-create (&optional args)
   (unless args
-    (setq args (org-registry--type-file-from-path (read-file-name "File: "))))
+    (setq args (org-ilm-registry--type-file-from-path (read-file-name "File: "))))
   (cl-destructuring-bind (&key title path type begin end) args
     ;; TODO Debating on whether to batch query-replace this link in all org,
     ;; org-mem files, current dir files or not. Alternative would be to view
@@ -670,10 +662,10 @@ environment (multiline), paste it in headline body."
     ;; latter.
     (list :title title :type type :props (list :PATH path))))
 
-(defun org-registry--type-file-register (&optional args)
+(defun org-ilm-registry--type-file-register (&optional args)
   (cl-destructuring-bind (&key title path type begin end)
-      (or args (org-registry--type-file-from-path (read-file-name "File: ")))
-    (let ((registry (org-registry--registry-select))
+      (or args (org-ilm-registry--type-file-from-path (read-file-name "File: ")))
+    (let ((registry (org-ilm-registry--registry-select))
           (id (org-id-new))
           attach-dir)
       (with-current-buffer (find-file-noselect registry)
@@ -681,7 +673,7 @@ environment (multiline), paste it in headline body."
           (goto-char (point-min))
           (setq attach-dir (expand-file-name (org-attach-dir-get-create)))))
       
-      (org-registry--register
+      (org-ilm-registry--register
        "file"
        (list
         :title title
@@ -698,24 +690,24 @@ environment (multiline), paste it in headline body."
           )
         )))))
 
-(org-registry-set-type
+(org-ilm-registry-set-type
  "file"
  :key ?f
  :aliases '("image" "video" "audio")
- :preview #'org-registry--type-file-preview
- :paste #'org-registry--type-file-paste
- :parse #'org-registry--type-file-parse
- ;; :create #'org-registry--type-file-create
- :register #'org-registry--type-file-register
+ :preview #'org-ilm-registry--type-file-preview
+ :paste #'org-ilm-registry--type-file-paste
+ :parse #'org-ilm-registry--type-file-parse
+ ;; :create #'org-ilm-registry--type-file-create
+ :register #'org-ilm-registry--type-file-register
  )
 
 ;;;;; Org type
 
-(defface org-registry-org-header-face
+(defface org-ilm-registry-org-header-face
   '((t :slant italic))
   "Face used to display the title above the transcluded content.")
 
-(defun org-registry--type-org-preview (entry ov link)
+(defun org-ilm-registry--type-org-preview (entry ov link)
   "Transclude Org mode content with org-transclusion."
   (let ((begin (overlay-start ov))
         (end (overlay-end ov)))
@@ -724,10 +716,10 @@ environment (multiline), paste it in headline body."
     (org-transclusion-add)
     (overlay-put ov 'display (org-mem-entry-title entry))
     ;; TODO fgiure out how to not inherit org-link properties
-    (overlay-put ov 'face 'org-registry-org-header-face)
+    (overlay-put ov 'face 'org-ilm-registry-org-header-face)
     t))
 
-(defun org-registry--type-org-teardown (ov)
+(defun org-ilm-registry--type-org-teardown (ov)
   (save-excursion
     (goto-char (overlay-end ov))
     ;; TODO might be better to keep checking until non-emtpy line
@@ -742,33 +734,33 @@ environment (multiline), paste it in headline body."
      (t
       (message "Cannot find transclusion to clean up")))))
 
-(defun org-registry--type-org-paste (entry)
-  (insert (org-registry--entry-contents entry)))
+(defun org-ilm-registry--type-org-paste (entry)
+  (insert (org-ilm-registry--entry-contents entry)))
 
-(defun org-registry--type-org-parse ()
+(defun org-ilm-registry--type-org-parse ()
   (when (and (eq major-mode 'org-mode) (region-active-p))
     (let ((begin (region-beginning))
           (end (region-end)))
       (list :body (buffer-substring-no-properties begin end)
             :region (list begin end)))))
 
-(defun org-registry--type-org-create (&optional args)
+(defun org-ilm-registry--type-org-create (&optional args)
   args)
 
-(org-registry-set-type
+(org-ilm-registry-set-type
  "org"
  :key ?o
- :preview #'org-registry--type-org-preview
- :teardown #'org-registry--type-org-teardown
- :paste #'org-registry--type-org-paste
- :parse #'org-registry--type-org-parse
- :create #'org-registry--type-org-create
+ :preview #'org-ilm-registry--type-org-preview
+ :teardown #'org-ilm-registry--type-org-teardown
+ :paste #'org-ilm-registry--type-org-paste
+ :parse #'org-ilm-registry--type-org-parse
+ :create #'org-ilm-registry--type-org-create
  )
 
 ;;;;; Resource type
 
 ;; TODO All of this has been copied over to org-ilm import resource. Still not
-;; sure if it should be in org-registry as well.
+;; sure if it should be in org-ilm-registry as well.
 
 ;; Generic object with citation that contains zero or more attachments. Think of:
 ;; - Website article / blog post
@@ -776,21 +768,21 @@ environment (multiline), paste it in headline body."
 ;; - Paper from arxiv link or doi (paper)
 ;; - Paper from local pdf file
 
-(defcustom org-registry--type-resource-fields nil
+(defcustom org-ilm-registry--type-resource-fields nil
   "List of field names to include in the entry.
 See `parsebib-read-entry'."
   :type '(repeat string)
-  :group 'org-registry)
+  :group 'org-ilm-registry)
 
-(defvar org-registry--type-resource-data nil)
+(defvar org-ilm-registry--type-resource-data nil)
 
-(defun org-registry--type-resource-transient-args (&optional args)
-  (setq args (or args (transient-args 'org-registry--type-resource-transient)))
+(defun org-ilm-registry--type-resource-transient-args (&optional args)
+  (setq args (or args (transient-args 'org-ilm-registry--type-resource-transient)))
   (list :source (transient-arg-value "--source=" args)
-        :source-type (plist-get org-registry--type-resource-data :source-type)
+        :source-type (plist-get org-ilm-registry--type-resource-data :source-type)
         :type (transient-arg-value "--type=" args)
-        :bibtex (plist-get org-registry--type-resource-data :bibtex)
-        :key (plist-get org-registry--type-resource-data :key)
+        :bibtex (plist-get org-ilm-registry--type-resource-data :bibtex)
+        :key (plist-get org-ilm-registry--type-resource-data :key)
 
         :paper-download (transient-arg-value "--paper-download" args)
 
@@ -812,7 +804,7 @@ See `parsebib-read-entry'."
 
         ))
 
-(defun org-registry--type-resource-process-source (&optional source bibtex)
+(defun org-ilm-registry--type-resource-process-source (&optional source bibtex)
   (unless source
     ;; TODO Support for path to pdf -> recover bibtex data (zotero-like)
     ;; (setq source (ffap-read-file-or-url "URL/path/DOI: " nil))
@@ -830,7 +822,7 @@ See `parsebib-read-entry'."
 
       ;; Figure out what type 
       (cond
-       ((convtools--transient-media-url-is-media-p source)
+       ((org-ilm-convert--transient-media-url-is-media-p source)
         (setq type "media"))
        (t (setq type "website"))))
 
@@ -849,7 +841,7 @@ See `parsebib-read-entry'."
         (with-temp-buffer
           (insert (s-trim bibtex-string))
           (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
-                                      :fields org-registry--type-resource-fields
+                                      :fields org-ilm-registry--type-resource-fields
                                       :expand-strings t
                                       :inheritance t
                                       :replace-TeX t)))
@@ -860,12 +852,12 @@ See `parsebib-read-entry'."
             key (cdr (assoc "=key=" bibtex))))
 
     (when (and (null title) (eq source-type 'url))
-      (setq title (mochar-utils--get-page-title source)))
+      (setq title (org-ilm--get-page-title source)))
 
     (list :source source :source-type source-type :title title
           :bibtex bibtex :key key :type type)))
 
-(transient-define-infix org-registry--type-resource-transient-source ()
+(transient-define-infix org-ilm-registry--type-resource-transient-source ()
   :class 'transient-option
   :transient 'transient--do-call
   :key "s"
@@ -876,13 +868,13 @@ See `parsebib-read-entry'."
   :prompt "URL/path/DOI: "
   :reader
   (lambda (prompt initial-input history)
-    (let ((source-data (org-registry--type-resource-process-source)))
-      (setq org-registry--type-resource-data source-data)
-      (mochar-utils--transiet-set-target-value "t" (plist-get source-data :type))
-      (mochar-utils--transiet-set-target-value "k" (plist-get source-data :key))
+    (let ((source-data (org-ilm-registry--type-resource-process-source)))
+      (setq org-ilm-registry--type-resource-data source-data)
+      (org-ilm--transient-set-target-value "t" (plist-get source-data :type))
+      (org-ilm--transient-set-target-value "k" (plist-get source-data :key))
       (plist-get source-data :source))))
 
-(transient-define-infix org-registry--type-resource-transient-key ()
+(transient-define-infix org-ilm-registry--type-resource-transient-key ()
   :class 'transient-option
   :transient 'transient--do-call
   :key "k"
@@ -890,55 +882,55 @@ See `parsebib-read-entry'."
   (lambda ()
     (concat
      "Key"
-     (when-let* ((key (plist-get org-registry--type-resource-data :key))
+     (when-let* ((key (plist-get org-ilm-registry--type-resource-data :key))
                  (entry (org-mem-entry-by-roam-ref (concat "@" key))))
        (propertize " DUPLICATE" 'face 'error))))
   :argument "--key="
   :always-read t
   :allow-empty nil
   :inapt-if
-  (lambda () (null (plist-get org-registry--type-resource-data :bibtex)))
+  (lambda () (null (plist-get org-ilm-registry--type-resource-data :bibtex)))
   :reader
   (lambda (prompt initial-input history)
     (let ((key (read-string "Key (empty to auto-generate): ")))
       (when (string-empty-p key)
         (with-temp-buffer
-          (insert (mochar-utils--format-bibtex-entry
-                   (plist-get org-registry--type-resource-data :bibtex)
-                   (plist-get org-registry--type-resource-data :key)))
+          (insert (org-ilm--format-bibtex-entry
+                   (plist-get org-ilm-registry--type-resource-data :bibtex)
+                   (plist-get org-ilm-registry--type-resource-data :key)))
           (goto-char (point-min))
           (setq key (ignore-errors (bibtex-generate-autokey)))
           (when (string-empty-p key) (setq key nil))))
-      (setf (plist-get org-registry--type-resource-data :key) key))))
+      (setf (plist-get org-ilm-registry--type-resource-data :key) key))))
 
-(transient-define-prefix org-registry--type-resource-transient ()
+(transient-define-prefix org-ilm-registry--type-resource-transient ()
   :refresh-suffixes t
   :value
   (lambda ()
     (append
      '("--webpage-simplify-to-markdown" "--webpage-orgify")
-     (let ((source (plist-get org-registry--type-resource-data :source)))
+     (let ((source (plist-get org-ilm-registry--type-resource-data :source)))
        (unless source
-         (setq org-registry--type-resource-data
-               (org-registry--type-resource-process-source))
-         (setq source (plist-get org-registry--type-resource-data :source)))
+         (setq org-ilm-registry--type-resource-data
+               (org-ilm-registry--type-resource-process-source))
+         (setq source (plist-get org-ilm-registry--type-resource-data :source)))
        (list (concat "--source=" source)
-             (concat "--key=" (plist-get org-registry--type-resource-data :key))
-             (concat "--type=" (plist-get org-registry--type-resource-data :type))))))
+             (concat "--key=" (plist-get org-ilm-registry--type-resource-data :key))
+             (concat "--type=" (plist-get org-ilm-registry--type-resource-data :type))))))
 
   ["Resource"
-   (org-registry--type-resource-transient-source)
+   (org-ilm-registry--type-resource-transient-source)
    (:info
     (lambda ()
-      (let ((title (plist-get org-registry--type-resource-data :title)))
+      (let ((title (plist-get org-ilm-registry--type-resource-data :title)))
           (propertize title 'face 'italic)))
-    :if (lambda () (plist-get org-registry--type-resource-data :title)))
-   (org-registry--type-resource-transient-key)
+    :if (lambda () (plist-get org-ilm-registry--type-resource-data :title)))
+   (org-ilm-registry--type-resource-transient-key)
    ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
       :always-read t :allow-empty nil)
    ("P" "Paper PDF download" "--paper-download" :transient transient--do-call
     :if (lambda ()
-          (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+          (when-let ((args (org-ilm-registry--type-resource-transient-args (transient-get-value))))
             (and (string= "paper" (plist-get args :type))
                  (member (plist-get args :source-type) '(url id))))))
    ]
@@ -946,21 +938,21 @@ See `parsebib-read-entry'."
   ["Webpage download"
    :hide
    (lambda ()
-     (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+     (when-let ((args (org-ilm-registry--type-resource-transient-args (transient-get-value))))
        (not (member (plist-get args :source-type) '(url)))))
    :setup-children
    (lambda (_)
-     (convtools--transient-webpage-build t t))]
+     (org-ilm-convert--transient-webpage-build t t))]
 
   ["Media download"
    :if
    (lambda ()
-     (when-let ((args (org-registry--type-resource-transient-args (transient-get-value))))
+     (when-let ((args (org-ilm-registry--type-resource-transient-args (transient-get-value))))
        (and (string= (plist-get args :type) "media")
             (eq (plist-get args :source-type) 'url))))
    :setup-children
    (lambda (_)
-     (convtools--transient-media-build))
+     (org-ilm-convert--transient-media-build))
    ]
 
   ["Actions"
@@ -972,7 +964,7 @@ See `parsebib-read-entry'."
                 paper-download
                 webpage-download webpage-simplify webpage-orgify
                 media-download media-template media-audio-only media-sub-langs)
-          (org-registry--type-resource-transient-args)
+          (org-ilm-registry--type-resource-transient-args)
 
         (when (and (null title) bibtex)
           (setq title
@@ -981,15 +973,15 @@ See `parsebib-read-entry'."
                     (cdr (assoc "url" bibtex))
                     source)))
 
-        (let* ((transient-args (transient-args 'org-registry--type-resource-transient))
+        (let* ((transient-args (transient-args 'org-ilm-registry--type-resource-transient))
                (id (org-id-new))
-               (registry (org-registry--registry-select))
+               (registry (org-ilm-registry--registry-select))
                ;; Determine attach dir from within registry in case the dir is set
                ;; buffer or dir local
                (attach-dir (with-current-buffer (find-file-noselect registry)
                              (org-attach-dir-from-id id))))
 
-          (org-registry--register
+          (org-ilm-registry--register
            "resource"
            (list
             :title title
@@ -998,7 +990,7 @@ See `parsebib-read-entry'."
             :props
             (append
              (when key (list :KEY key))
-             (mochar-utils--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
+             (org-ilm--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
              (list :ROAM_REFS (if key (concat source " @" key) source)))
             :on-success
             (lambda (_)
@@ -1009,29 +1001,29 @@ See `parsebib-read-entry'."
                   (ignore-errors
                     (zotra-download-attachment
                      source nil
-                     (expand-file-name (concat (mochar-utils--slugify-title title) ".pdf")
+                     (expand-file-name (concat (org-ilm--slugify-title title) ".pdf")
                                        attach-dir))
-                    (mochar-utils--org-with-point-at id
+                    (org-ilm--org-with-point-at id
                       (org-attach-sync))))
 
                 (when webpage-download
-                  (convtools--transient-webpage-run
+                  (org-ilm-convert--transient-webpage-run
                    source title attach-dir id transient-args))
 
                 (when (or media-download media-sub-langs)
-                  (convtools--transient-media-run
+                  (org-ilm-convert--transient-media-run
                    source attach-dir id transient-args))
                 ))
             ))))))
    ]
   )
 
-(defun org-registry--type-resource-parse ()
+(defun org-ilm-registry--type-resource-parse ()
   (cond-let*
     ([bibtex (ignore-errors
                ;; TODO Only works if point at start of bibtex entry
                (parsebib-read-entry
-                org-registry--type-resource-fields
+                org-ilm-registry--type-resource-fields
                 (make-hash-table :test #'equal)
                 t))]
      (let ((url (or (cdr (assoc "url" bibtex)) (cdr (assoc "doi" bibtex)))))
@@ -1039,27 +1031,25 @@ See `parsebib-read-entry'."
     ([url (thing-at-point 'url)]
      (list :source url))))
 
-(defun org-registry--type-resource-register (&optional args)
-  (setq org-registry--type-resource-data
-        (org-registry--type-resource-process-source
+(defun org-ilm-registry--type-resource-register (&optional args)
+  (setq org-ilm-registry--type-resource-data
+        (org-ilm-registry--type-resource-process-source
          (plist-get args :source)
          (plist-get args :bibtex)))
-  (mochar-utils--add-hook-once
+  (org-ilm--add-hook-once
        'transient-post-exit-hook
-       (lambda () (setq org-registry--type-resource-data nil)))
-  (org-registry--type-resource-transient))
+       (lambda () (setq org-ilm-registry--type-resource-data nil)))
+  (org-ilm-registry--type-resource-transient))
 
-(org-registry-set-type
+(org-ilm-registry-set-type
  "resource"
  :key ?r
- :parse #'org-registry--type-resource-parse
- :register #'org-registry--type-resource-register
+ :parse #'org-ilm-registry--type-resource-parse
+ :register #'org-ilm-registry--type-resource-register
  )
 
 ;;;; Footer
 
-(provide 'org-registry)
+(provide 'org-ilm-registry)
 
-;;; org-registry.el ends here
-
-
+;;; org-ilm-registry.el ends here

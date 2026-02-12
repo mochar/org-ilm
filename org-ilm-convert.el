@@ -1,11 +1,4 @@
-;;; convtools.el --- Some tools to convert between things -*- lexical-binding: t; -*-
-
-;; Copyright (C) 2025
-
-;; Author: M Charrout
-;; Version: 0.1
-;; Package-Requires: ((emacs "27.1"))
-;; Keywords: 
+;;; org-ilm-convert.el --- Convert between file types -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -14,40 +7,46 @@
 ;;; Code:
 
 ;;;; Requirements
+
+(require 'org)
 (require 'cl-lib)
 (require 'dash)
 (require 'vtable)
+(require 'org-attach)
+(require 'transient)
+(require 'org-mem)
+(require 'org-node)
+(require 'consult)
 
-;;;; Global customization
+(require 'org-ilm-utils)
 
-(defgroup convtools nil
-  "Conversion tools"
-  :prefix "convtools-"
-  :link '(url-link :tag "GitHub" "https://github.com/mochar/org-ilm"))
+;;;; Variables
 
-(defcustom convtools-node-path (executable-find "node")
+(defcustom org-ilm-convert-node-path (executable-find "node")
   "Path to the node executable."
   :type 'file
-  :group 'convtools)
+  :group 'org-ilm-convert)
 
-(defcustom convtools-keep-buffer-alive 'always
+(defcustom org-ilm-convert-keep-buffer-alive 'always
   "Keep the conversion process buffer alive, regardless of success or fail."
   :type '(choice (const :tag "Always" always)
                  (const :tag "On success" success)
                  (const :tag "On error" error))
-  :group 'convtools)
+  :group 'org-ilm-convert)
+
+(defvar-local org-ilm-convert--convert-state nil)
 
 ;;;; Convert process
 
-(cl-defun convtools--convert-make-process (&key name id command on-success on-error keep-buffer-alive prevent-success-state buffer-data &allow-other-keys)
+(cl-defun org-ilm-convert--convert-make-process (&key name id command on-success on-error keep-buffer-alive prevent-success-state buffer-data &allow-other-keys)
   "Create an async process to run COMMAND."
-  (let* ((process-name (format "convtools-%s (%s)" name id))
+  (let* ((process-name (format "org-ilm-convert-%s (%s)" name id))
          (process-buffer (get-buffer-create (concat "*" process-name "*"))))
     (with-current-buffer process-buffer
-      (setq-local convtools--convert-name name
-                  convtools--convert-id id
-                  convtools--convert-state 'busy
-                  convtools--convert-data buffer-data)
+      (setq-local org-ilm-convert--convert-name name
+                  org-ilm-convert--convert-id id
+                  org-ilm-convert--convert-state 'busy
+                  org-ilm-convert--convert-data buffer-data)
       (goto-char (point-max))
       (insert (format "\n====== START: %s ======\n" process-name)))
     (make-process
@@ -65,7 +64,7 @@
 
            (unless (and success prevent-success-state)
              (with-current-buffer process-buffer
-               (setq-local convtools--convert-state
+               (setq-local org-ilm-convert--convert-state
                            (if success 'success 'error))))
            
            (if success
@@ -74,13 +73,13 @@
              (when on-error
                (funcall on-error proc process-buffer id)))
            (unless (or keep-buffer-alive
-                       (eq convtools-keep-buffer-alive 'always)
-                       (and success (eq convtools-keep-buffer-alive 'success))
-                       (and (not success) (eq convtools-keep-buffer-alive 'error)))
+                       (eq org-ilm-convert-keep-buffer-alive 'always)
+                       (and success (eq org-ilm-convert-keep-buffer-alive 'success))
+                       (and (not success) (eq org-ilm-convert-keep-buffer-alive 'error)))
              (kill-buffer process-buffer))))))
     process-buffer))
 
-(cl-defun convtools--convert-multi (&rest args &key process-name process-id converters on-error on-final-success)
+(cl-defun org-ilm-convert--convert-multi (&rest args &key process-name process-id converters on-error on-final-success)
   "Run multiple convert processes successively.
 
 CONVERTERS is an alist. Each element's car is the converter function and
@@ -89,7 +88,7 @@ ID and NAME.
 
 The callback ON-ERROR can be given which will be called after the
 on-error callback of each converter. Note that the process buffer local
-variables `convtools--convert-name' and `convtools--convert-id' can be used
+variables `org-ilm-convert--convert-name' and `org-ilm-convert--convert-id' can be used
 to determine the failing process, so just this one ON-ERROR callback
 should be enough.
 
@@ -118,7 +117,7 @@ final converter succeeds."
               (funcall converter-on-success proc buf id))
             (if rest
                 ;; If there are converters left, call the next one
-                (apply #'convtools--convert-multi
+                (apply #'org-ilm-convert--convert-multi
                        (plist-put args :converters rest))
               ;; If final converter, call on-final-success
               (when on-final-success
@@ -131,7 +130,7 @@ final converter succeeds."
             :on-success on-success
             :process-name process-name
             :process-id process-id
-            ;; convtools--convert-make-process adds a buffer local variable that
+            ;; org-ilm-convert--convert-make-process adds a buffer local variable that
             ;; signifies success or failure of a process. dont set success
             ;; unless we are on the last converter.
             :prevent-success-state (if rest t nil)
@@ -140,7 +139,7 @@ final converter succeeds."
 
 ;;;; Pandoc
 
-(cl-defun convtools--convert-with-pandoc (&rest args &key process-id process-name input-path input-format output-dir output-name &allow-other-keys)
+(cl-defun org-ilm-convert--convert-with-pandoc (&rest args &key process-id process-name input-path input-format output-dir output-name &allow-other-keys)
   "Convert a file to Org mode format using Pandoc."
   (unless (and process-id input-path input-format)
     (error "Required args: PROCESS-ID INPUT-PATH INPUT-FORMAT"))
@@ -152,7 +151,7 @@ final converter succeeds."
          ;; Make sure we are in output dir so that media files references correct
          (default-directory output-dir))
     (apply
-     #'convtools--convert-make-process
+     #'org-ilm-convert--convert-make-process
      (org-combine-plists
       args
       (list
@@ -178,11 +177,11 @@ final converter succeeds."
 ;; Defuddle: https://github.com/kepano/defuddle
 ;; Simplify html to markdown
 
-(defconst convtools-defuddle-path
+(defconst org-ilm-convert-defuddle-path
   (expand-file-name "scripts/defuddle.mjs"
                     (file-name-directory (or load-file-name buffer-file-name))))
 
-(cl-defun convtools--convert-with-defuddle (&rest args &key process-id process-name input-path output-format &allow-other-keys)
+(cl-defun org-ilm-convert--convert-with-defuddle (&rest args &key process-id process-name input-path output-format &allow-other-keys)
   "Convert an HTM file to Markdown using Defuddle."
   (unless (and process-id input-path output-format)
     (error "Required args: PROCESS-ID INPUT-PATH OUTPUT-FORMAT"))
@@ -196,7 +195,7 @@ final converter succeeds."
                                (if to-markdown "md" "html"))
                        (file-name-directory input-path))))
     (apply
-     #'convtools--convert-make-process
+     #'org-ilm-convert--convert-make-process
      (org-combine-plists
       args
       (list
@@ -204,8 +203,8 @@ final converter succeeds."
        :id process-id
        :command
        (list
-        convtools-node-path
-        convtools-defuddle-path
+        org-ilm-convert-node-path
+        org-ilm-convert-defuddle-path
         "html"
         input-path
         output-format
@@ -216,12 +215,12 @@ final converter succeeds."
 ;; Marker: https://github.com/datalab-to/marker
 ;; Much better Org formatting when converting from markdown
 
-(defcustom convtools-marker-path (executable-find "marker_single")
+(defcustom org-ilm-convert-marker-path (executable-find "marker_single")
   "Path to the marker_single executable."
   :type 'file
-  :group 'convtools-marker)
+  :group 'org-ilm-convert-marker)
 
-(cl-defun convtools--convert-with-marker (&rest args &key process-id process-name input-path format output-dir pages disable-image-extraction move-content-out new-name to-org flags on-success &allow-other-keys)
+(cl-defun org-ilm-convert--convert-with-marker (&rest args &key process-id process-name input-path format output-dir pages disable-image-extraction move-content-out new-name to-org flags on-success &allow-other-keys)
   "Convert a PDF document or image using Marker.
 
 OUTPUT-DIR is the output directory. If not specified, will be the same
@@ -234,8 +233,8 @@ does not have an option for this so it is done here.
 "
   (unless (and process-id input-path format)
     (error "Required args: PROCESS-ID INPUT-PATH FORMAT"))
-  (unless (and convtools-marker-path (file-executable-p convtools-marker-path))
-    (user-error "Marker executable not available. See convtools-marker-path."))
+  (unless (and org-ilm-convert-marker-path (file-executable-p org-ilm-convert-marker-path))
+    (user-error "Marker executable not available. See org-ilm-convert-marker-path."))
   (unless (member format '("markdown" "json" "html" "chunks"))
     (error "FORMAT must be one of [markdown|json|html|chunks]"))
   (unless (or (not to-org) (member format '("markdown" "html")))
@@ -248,7 +247,7 @@ does not have an option for this so it is done here.
                        (file-name-directory input-path)))
          (output-dir-dir (file-name-concat output-dir (file-name-base input-path))))
     (apply
-     #'convtools--convert-make-process
+     #'org-ilm-convert--convert-make-process
      (org-combine-plists
       args
       (list
@@ -257,7 +256,7 @@ does not have an option for this so it is done here.
        :command
        (append
         (list
-         convtools-marker-path
+         org-ilm-convert-marker-path
          input-path
          "--output_format" format
          "--output_dir" output-dir)
@@ -290,7 +289,7 @@ does not have an option for this so it is done here.
          ;; name in each otuput folder file name, but only if the file
          ;; name starts with it. This is to hit less false positives if
          ;; the base file name is small, which won't be the case i think
-         ;; since convtools works with org-ids all the time.
+         ;; since org-ilm-convert works with org-ids all the time.
 
          ;; TODO Works ok but I think a better approach would be to create
          ;; a symlink with the new name and point marker to that. Then
@@ -320,18 +319,18 @@ does not have an option for this so it is done here.
          (when on-success
            (funcall on-success proc buf id))))))))
 
-(cl-defun convtools--convert-to-org-with-marker-pandoc (&key process-id input-path new-name pdf-pages on-success on-error)
+(cl-defun org-ilm-convert--convert-to-org-with-marker-pandoc (&key process-id input-path new-name pdf-pages on-success on-error)
   "Convert a PDF file or image to Markdown using Marker, then to Org mode using Pandoc."
   (unless (and process-id input-path new-name)
     (error "Required args: PROCESS-ID INPUT-PATH NEW-NAME"))
   (let ((input-dir (file-name-directory input-path))
         (process-name "marker-pandoc"))
-    (convtools--convert-multi
+    (org-ilm-convert--convert-multi
      :process-name process-name
      :process-id process-id
      :converters
      (list
-      (cons #'convtools--convert-with-marker
+      (cons #'org-ilm-convert--convert-with-marker
             (list
              :input-path input-path
              :format "markdown"
@@ -339,7 +338,7 @@ does not have an option for this so it is done here.
              :pages pdf-pages
              :move-content-out t
              :to-org t))
-      (cons #'convtools--convert-with-pandoc
+      (cons #'org-ilm-convert--convert-with-pandoc
             (list
              :input-path (file-name-concat input-dir (concat new-name ".md"))
              :input-format "markdown")))
@@ -349,18 +348,18 @@ does not have an option for this so it is done here.
 
 ;;;; Monolith
 
-(defcustom convtools-monolith-path (executable-find "monolith")
+(defcustom org-ilm-convert-monolith-path (executable-find "monolith")
   "Path to the monolith executable."
   :type 'file
-  :group 'convtools-monolith)
+  :group 'org-ilm-convert-monolith)
 
-(defcustom convtools-monolith-args
+(defcustom org-ilm-convert-monolith-args
   '("--no-fonts" "--no-js")
   "Arguments passed to monolith."
   :type '(repeat string)
-  :group 'convtools-monolith)
+  :group 'org-ilm-convert-monolith)
 
-(cl-defun convtools--monolith-compile-paths (&rest args &key process-id input-path output-path &allow-other-keys)
+(cl-defun org-ilm-convert--monolith-compile-paths (&rest args &key process-id input-path output-path &allow-other-keys)
     (unless (and process-id input-path)
     (error "Required args: PROCESS-ID INPUT-PATH"))
 
@@ -386,15 +385,15 @@ does not have an option for this so it is done here.
                 temporary-file-directory))))
     (list :input-path input-path :output-path output-path)))
 
-(cl-defun convtools--convert-with-monolith (&rest args &key process-id process-name input-path output-path &allow-other-keys)
+(cl-defun org-ilm-convert--convert-with-monolith (&rest args &key process-id process-name input-path output-path &allow-other-keys)
   "Convert a web URL or local HTML file to a single HTML file using Monolith."
-  (unless (and convtools-monolith-path (file-executable-p convtools-monolith-path))
-    (user-error "Monolith executable not available. See convtools-monolith-path."))
+  (unless (and org-ilm-convert-monolith-path (file-executable-p org-ilm-convert-monolith-path))
+    (user-error "Monolith executable not available. See org-ilm-convert-monolith-path."))
 
   (cl-destructuring-bind (&key input-path output-path)
-      (apply #'convtools--monolith-compile-paths args)
+      (apply #'org-ilm-convert--monolith-compile-paths args)
     (apply
-     #'convtools--convert-make-process
+     #'org-ilm-convert--convert-make-process
      (org-combine-plists
       args
       (list
@@ -403,12 +402,12 @@ does not have an option for this so it is done here.
        :command
        (append 
         (list
-         convtools-monolith-path
+         org-ilm-convert-monolith-path
          input-path
          "-o" output-path)
-        convtools-monolith-args))))))
+        org-ilm-convert-monolith-args))))))
 
-(cl-defun convtools--convert-with-monolith-defuddle (&key process-id on-success on-error monolith-args defuddle-args)
+(cl-defun org-ilm-convert--convert-with-monolith-defuddle (&key process-id on-success on-error monolith-args defuddle-args)
   "Convert a URL or HTML file to single file HTML using Monolith, and
  simplify it to Markdown or replaced HTML file with Pandoc."
   (unless (and process-id monolith-args)
@@ -418,7 +417,7 @@ does not have an option for this so it is done here.
         (plist-put monolith-args :process-id process-id))
   
   (cl-destructuring-bind (&key input-path output-path)
-      (apply #'convtools--monolith-compile-paths monolith-args)
+      (apply #'org-ilm-convert--monolith-compile-paths monolith-args)
     (let* ((monolith-output-path output-path)
            (output-format (plist-get defuddle-args :output-format))
            (defuddle-output-path (concat
@@ -426,20 +425,20 @@ does not have an option for this so it is done here.
                                   "."
                                   (if (string= output-format "markdown")
                                       "md" "html"))))
-      (convtools--convert-multi
+      (org-ilm-convert--convert-multi
        :process-name "monolith-defuddle"
        :process-id process-id
        :converters
        (list
-        (cons #'convtools--convert-with-monolith monolith-args)
-        (cons #'convtools--convert-with-defuddle
+        (cons #'org-ilm-convert--convert-with-monolith monolith-args)
+        (cons #'org-ilm-convert--convert-with-defuddle
               (append
                (list :input-path monolith-output-path)
                defuddle-args)))
        :on-error on-error
        :on-final-success on-success))))
 
-(cl-defun convtools--convert-to-org-with-monolith-pandoc (&key process-id on-success on-error monolith-args pandoc-args)
+(cl-defun org-ilm-convert--convert-to-org-with-monolith-pandoc (&key process-id on-success on-error monolith-args pandoc-args)
   "Convert a URL or HTML file to single file HTML using Monolith, then to Org mode using Pandoc."
   (unless (and process-id monolith-args)
     (error "Required args: PROCESS-ID MONOLITH-ARGS"))
@@ -448,14 +447,14 @@ does not have an option for this so it is done here.
         (plist-put monolith-args :process-id process-id))
   
   (cl-destructuring-bind (&key input-path output-path)
-      (apply #'convtools--monolith-compile-paths monolith-args)
-    (convtools--convert-multi
+      (apply #'org-ilm-convert--monolith-compile-paths monolith-args)
+    (org-ilm-convert--convert-multi
      :process-name "monolith-pandoc"
      :process-id process-id
      :converters
      (list
-      (cons #'convtools--convert-with-monolith monolith-args)
-      (cons #'convtools--convert-with-pandoc
+      (cons #'org-ilm-convert--convert-with-monolith monolith-args)
+      (cons #'org-ilm-convert--convert-with-pandoc
             (append
              pandoc-args
              (list
@@ -464,7 +463,7 @@ does not have an option for this so it is done here.
      :on-error on-error
      :on-final-success on-success)))
 
-(cl-defun convtools--convert-to-org-with-monolith-defuddle-pandoc (&key process-id on-success on-error monolith-args defuddle-args pandoc-args)
+(cl-defun org-ilm-convert--convert-to-org-with-monolith-defuddle-pandoc (&key process-id on-success on-error monolith-args defuddle-args pandoc-args)
   "Convert a URL or HTML file to single file HTML using Monolith, simplify to Markdown with Defuddle, then to Org mode using Pandoc."
   (unless (and process-id monolith-args)
     (error "Required args: PROCESS-ID MONOLITH-ARGS"))
@@ -473,7 +472,7 @@ does not have an option for this so it is done here.
         (plist-put monolith-args :process-id process-id))
   
   (cl-destructuring-bind (&key input-path output-path)
-      (apply #'convtools--monolith-compile-paths monolith-args)
+      (apply #'org-ilm-convert--monolith-compile-paths monolith-args)
     (let* ((monolith-output-path output-path)
            (defuddle-output-format (plist-get defuddle-args :output-format))
            (defuddle-output-path (concat
@@ -481,17 +480,17 @@ does not have an option for this so it is done here.
                                   "."
                                   (if (string= defuddle-output-format "markdown")
                                       "md" "html"))))
-    (convtools--convert-multi
+    (org-ilm-convert--convert-multi
      :process-name "monolith-defuddle-pandoc"
      :process-id process-id
      :converters
      (list
-      (cons #'convtools--convert-with-monolith monolith-args)
-      (cons #'convtools--convert-with-defuddle
+      (cons #'org-ilm-convert--convert-with-monolith monolith-args)
+      (cons #'org-ilm-convert--convert-with-defuddle
             (append
              (list :input-path monolith-output-path)
              defuddle-args))
-      (cons #'convtools--convert-with-pandoc
+      (cons #'org-ilm-convert--convert-with-pandoc
             (append
              pandoc-args
              (list
@@ -502,18 +501,18 @@ does not have an option for this so it is done here.
 
 ;;;; yt-dlp
 
-(defcustom convtools-ytdlp-path (executable-find "yt-dlp")
+(defcustom org-ilm-convert-ytdlp-path (executable-find "yt-dlp")
   "Path to the yt-dlp executable."
   :type 'file
-  :group 'convtools-ytdlp)
+  :group 'org-ilm-convert-ytdlp)
 
 ;; https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
-(defcustom convtools-ytdlp-args '("--cookies-from-browser" "firefox")
+(defcustom org-ilm-convert-ytdlp-args '("--cookies-from-browser" "firefox")
   "Arguments to always pass to yt-dlp."
   :type '(repeat string)
-  :group 'convtools-ytdlp)
+  :group 'org-ilm-convert-ytdlp)
 
-(defun convtools--ytdlp-filename-from-url (url &optional template restrict-p)
+(defun org-ilm-convert--ytdlp-filename-from-url (url &optional template restrict-p)
   "Get the filename that will be generated for URL and TEMPLATE.
 
 See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-examples"
@@ -525,13 +524,13 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
       (when template (list "-o" template))
       (list url)
       (when restrict-p '("--restrict-filenames"))
-      convtools-ytdlp-args
+      org-ilm-convert-ytdlp-args
       '("--no-warnings"))))))
 
-(defun convtools--ytdlp-title-from-url (url)
-  (convtools--ytdlp-filename-from-url url "%(title)s"))
+(defun org-ilm-convert--ytdlp-title-from-url (url)
+  (org-ilm-convert--ytdlp-filename-from-url url "%(title)s"))
 
-(defun convtools--ytdlp-subtitles-from-url (url)
+(defun org-ilm-convert--ytdlp-subtitles-from-url (url)
   "Returns two alists of alist: 'subtitles and 'auto.
 
 Parse the OUTPUT string from:
@@ -541,7 +540,7 @@ Parse the OUTPUT string from:
                          (append
                           '("yt-dlp" "--print" "subtitles_table" "--print" "automatic_captions_table")
                           (list url)
-                          convtools-ytdlp-args
+                          org-ilm-convert-ytdlp-args
                           '("--no-warnings")))))
          (result '())
          (section nil))
@@ -581,18 +580,18 @@ Parse the OUTPUT string from:
       (setcdr r (nreverse (cdr r))))
     (nreverse result)))
 
-(cl-defun convtools--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs audio-only-p no-download working-dir on-success &allow-other-keys)
+(cl-defun org-ilm-convert--convert-with-ytdlp (&rest args &key process-id process-name url output-dir output-path filename-template sub-langs audio-only-p no-download working-dir on-success &allow-other-keys)
   "Download media from url using yt-dlp.
 
 SUB-LANGS may also be 'all' to download all subtitles."
   (unless (and process-id url (or (xor output-path output-dir) sub-langs))
     (error "Required args: PROCESS-ID URL [OUTPUT-DIR|OUTPUT-PATH]"))
-  (unless (and convtools-ytdlp-path (file-executable-p convtools-ytdlp-path))
-    (user-error "The yt-dlp executable not available. See convtools-ytdlp-path."))
+  (unless (and org-ilm-convert-ytdlp-path (file-executable-p org-ilm-convert-ytdlp-path))
+    (user-error "The yt-dlp executable not available. See org-ilm-convert-ytdlp-path."))
 
   (when (and (not output-path) output-dir)
     (setq output-path (expand-file-name
-                       (convtools--ytdlp-filename-from-url url filename-template 'restrict)
+                       (org-ilm-convert--ytdlp-filename-from-url url filename-template 'restrict)
                        output-dir)))
 
   (when sub-langs
@@ -604,7 +603,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
   (let ((default-directory (or working-dir default-directory)))
     (apply
-     #'convtools--convert-make-process
+     #'org-ilm-convert--convert-make-process
      (org-combine-plists
       args
       (list
@@ -613,10 +612,10 @@ SUB-LANGS may also be 'all' to download all subtitles."
        :command
        (append
         (list
-         convtools-ytdlp-path
+         org-ilm-convert-ytdlp-path
          url
          "--embed-chapters")
-        convtools-ytdlp-args
+        org-ilm-convert-ytdlp-args
         (cond
          (output-path (list "-o" output-path))
          (filename-template (list  "-o" filename-template "--no-download"))
@@ -635,16 +634,16 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
 ;;;; Conversions view
 
-(defconst convtools--conversions-buffer-name
-  "*convtools conversions*")
+(defconst org-ilm-convert--conversions-buffer-name
+  "*org-ilm-convert conversions*")
 
-(defvar-keymap convtools-conversions-map
+(defvar-keymap org-ilm-convert-conversions-map
   :doc "Keymap for the conversions view."
   ;; Navigation
   "n" (lambda ()
         (interactive)
-        (next-line)
-        (when (eobp) (previous-line)))
+        (forward-line)
+        (when (eobp) (forward-line -1)))
   "p" #'previous-line
   "b" #'backward-char
   "f" #'forward-char
@@ -653,89 +652,89 @@ SUB-LANGS may also be 'all' to download all subtitles."
         (interactive)
         (kill-buffer (current-buffer)))
   ;; Actions
-  "SPC" #'convtools-conversions-goto
-  "RET" #'convtools-conversions-buffer-open
-  "d" #'convtools-conversions-buffer-delete
-  "B" #'convtools-conversions-ibuffer
-  "g" #'convtools-conversions-revert)
+  "SPC" #'org-ilm-convert-conversions-goto
+  "RET" #'org-ilm-convert-conversions-buffer-open
+  "d" #'org-ilm-convert-conversions-buffer-delete
+  "B" #'org-ilm-convert-conversions-ibuffer
+  "g" #'org-ilm-convert-conversions-revert)
 
-(defun convtools-conversions-goto ()
+(defun org-ilm-convert-conversions-goto ()
   "View element of object at point in collection."
   (interactive)
   (let ((org-id (plist-get (vtable-current-object) :id)))
     (org-id-goto org-id)))
 
-(defun convtools-conversions-buffer-open ()
+(defun org-ilm-convert-conversions-buffer-open ()
   "Open buffer of object at point."
   (interactive)
   (pop-to-buffer (plist-get (vtable-current-object) :buffer)))
 
-(defun convtools-conversions-buffer-delete ()
+(defun org-ilm-convert-conversions-buffer-delete ()
   "Kill buffer of object at point."
   (interactive)
   (when (yes-or-no-p "Kill buffer?")
     (kill-buffer (plist-get (vtable-current-object) :buffer))
-    (convtools-conversions-revert)))
+    (org-ilm-convert-conversions-revert)))
 
-(defun convtools-conversions-ibuffer ()
+(defun org-ilm-convert-conversions-ibuffer ()
   "Open conversion buffers in ibuffer."
   (interactive)
   (ibuffer nil "*Ilm Conversion Buffers*"
-           '((name . "^\\*convtools-"))))
+           '((name . "^\\*org-ilm-convert-"))))
 
-(defun convtools--conversions-buffers ()
+(defun org-ilm-convert--conversions-buffers ()
   "Return all make-process buffers of convertors."
   (seq-filter
    (lambda (buf)
      (string-match-p
-      (rx bol "*convtools-" (+? anything) " (" (+? anything) ")*" eol)
+      (rx bol "*org-ilm-convert-" (+? anything) " (" (+? anything) ")*" eol)
       (buffer-name buf)))
    (buffer-list)))
 
-(defun convtools--conversions ()
+(defun org-ilm-convert--conversions ()
   "Return list of plists containing info of each conversion."
   (mapcar
    (lambda (buf)
      (let* ((buffer-name (buffer-name buf))
             (_ (string-match
-                "^\\*convtools-\\([^ ]+\\) (\\([^)]*\\))\\*$"
+                "^\\*org-ilm-convert-\\([^ ]+\\) (\\([^)]*\\))\\*$"
                 buffer-name))
             (name (match-string 1 buffer-name))
             (id (match-string 2 buffer-name))
             (state (with-current-buffer buf
-                     convtools--convert-state)))
+                     org-ilm-convert--convert-state)))
        (list :name name :id id :buffer buf :state state)))
-   (convtools--conversions-buffers)))
+   (org-ilm-convert--conversions-buffers)))
 
-(defun convtools--conversion-by-id (id)
+(defun org-ilm-convert--conversion-by-id (id)
   (seq-find
    (lambda (conversion)
      (string= (plist-get conversion :id) id))
-   (convtools--conversions)))
+   (org-ilm-convert--conversions)))
 
-(defun convtools--conversion-propertize-state (state)
+(defun org-ilm-convert--conversion-propertize-state (state)
   (pcase state
     ('error (propertize "Error" 'face 'error))
     ('success (propertize "Success" 'face 'success))
     ('busy (propertize "Busy" 'face 'italic))))
 
-(defun convtools-conversions-revert ()
+(defun org-ilm-convert-conversions-revert ()
   (interactive)
   (cond
-   ((not (string= (buffer-name) convtools--conversions-buffer-name))
+   ((not (string= (buffer-name) org-ilm-convert--conversions-buffer-name))
     (user-error "Not in conversions buffer"))
-   ((convtools--conversions)
+   ((org-ilm-convert--conversions)
     (vtable-revert-command))
    (t
-    (kill-buffer convtools--conversions-buffer-name)
+    (kill-buffer org-ilm-convert--conversions-buffer-name)
     (message "No conversions found!"))))
 
-(defun convtools--conversions-make-vtable ()
+(defun org-ilm-convert--conversions-make-vtable ()
   "Build conversions view vtable."
   (make-vtable
    :insert nil ; Return vtable object rather than insert at point
    :objects-function
-   #'convtools--conversions
+   #'org-ilm-convert--conversions
    :columns
    `((:name
       "State")
@@ -748,22 +747,22 @@ SUB-LANGS may also be 'all' to download all subtitles."
    (lambda (object column vtable)
      (pcase (vtable-column vtable column)
        ("ID" (plist-get object :id))
-       ("State" (convtools--conversion-propertize-state (plist-get object :state)))
+       ("State" (org-ilm-convert--conversion-propertize-state (plist-get object :state)))
        ("Converter" (plist-get object :name))))
-   :keymap convtools-conversions-map))
+   :keymap org-ilm-convert-conversions-map))
 
-(defun convtools-conversions ()
+(defun org-ilm-convert-conversions ()
   "Open the conversions view."
   (interactive)
-  (let ((buf (get-buffer-create convtools--conversions-buffer-name))
-        (conversions (convtools--conversions)))
+  (let ((buf (get-buffer-create org-ilm-convert--conversions-buffer-name))
+        (conversions (org-ilm-convert--conversions)))
     (cond
      (conversions
       (with-current-buffer buf
         (setq-local buffer-read-only nil)
         (erase-buffer)
         (goto-char (point-min))
-        (vtable-insert (convtools--conversions-make-vtable))
+        (vtable-insert (org-ilm-convert--conversions-make-vtable))
         (setq-local buffer-read-only t)
         (goto-char (point-min)))
       (switch-to-buffer buf))
@@ -775,14 +774,14 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
 ;; Convert using metadata in Org heading properties and attachments.
 
-(defvar convtools--org-data nil)
+(defvar org-ilm-convert--org-data nil)
 
-(defun convtools-org-convert ()
+(defun org-ilm-convert-org-convert ()
   (interactive)
   (let* ((attach-dir (org-attach-dir))
          (attachments (when attach-dir (org-attach-file-list attach-dir)))
          (entry (org-node-at-point))
-         (refs (mochar-utils--org-mem-refs entry)))
+         (refs (org-ilm--org-mem-refs entry)))
     (when-let ((url (org-entry-get nil "URL")))
       (cl-pushnew url refs :test #'equal))
     (setq refs (seq-filter #'org-url-p refs))
@@ -804,28 +803,28 @@ SUB-LANGS may also be 'all' to download all subtitles."
            (source (car choice))
            (type (if (string= (plist-get (cdr choice) :name) "Attachments")
                    'attachment 'url)))
-      (setq convtools--org-data
+      (setq org-ilm-convert--org-data
             (list :title (org-mem-entry-title entry) :source source :type type))
-      (mochar-utils--add-hook-once
+      (org-ilm--add-hook-once
        'transient-post-exit-hook
-       (lambda () (setq convtools--org-data nil)))
-      (convtools--org-transient))))
+       (lambda () (setq org-ilm-convert--org-data nil)))
+      (org-ilm-convert--org-transient))))
 
-(transient-define-prefix convtools--org-transient ()
+(transient-define-prefix org-ilm-convert--org-transient ()
   :refresh-suffixes t
   :value
   (lambda ()
-    (list (concat "--source=" (plist-get convtools--org-data :source))))
+    (list (concat "--source=" (plist-get org-ilm-convert--org-data :source))))
 
   ["Convtool"
    (:info*
     (lambda ()
-      (propertize (plist-get convtools--org-data :title) 'face 'italic))
-    :if (lambda () (plist-get convtools--org-data :title)))
+      (propertize (plist-get org-ilm-convert--org-data :title) 'face 'italic))
+    :if (lambda () (plist-get org-ilm-convert--org-data :title)))
    (:info*
     (lambda ()
-      (propertize (plist-get convtools--org-data :source) 'face 'transient-value))
-    :if (lambda () (plist-get convtools--org-data :source)))
+      (propertize (plist-get org-ilm-convert--org-data :source) 'face 'transient-value))
+    :if (lambda () (plist-get org-ilm-convert--org-data :source)))
    ]
 
   [:hide (lambda () t) ("s" "Source" "--source=")]
@@ -833,51 +832,51 @@ SUB-LANGS may also be 'all' to download all subtitles."
   ["Webpage"
    :if
    (lambda ()
-     (or (eq (plist-get convtools--org-data :type) 'url)
-         (string= (file-name-extension (plist-get convtools--org-data :source)) "webpage")))
+     (or (eq (plist-get org-ilm-convert--org-data :type) 'url)
+         (string= (file-name-extension (plist-get org-ilm-convert--org-data :source)) "webpage")))
    :setup-children
    (lambda (_)
-     (convtools--transient-webpage-build
-      (eq (plist-get convtools--org-data :type) 'url)))
+     (org-ilm-convert--transient-webpage-build
+      (eq (plist-get org-ilm-convert--org-data :type) 'url)))
    ]
 
   ["Media"
    :if
    (lambda ()
-     (and (eq (plist-get convtools--org-data :type) 'url)
-          (convtools--transient-media-url-is-media-p
-           (plist-get convtools--org-data :source))))
+     (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
+          (org-ilm-convert--transient-media-url-is-media-p
+           (plist-get org-ilm-convert--org-data :source))))
    :setup-children
    (lambda (_)
-     (convtools--transient-media-build))
+     (org-ilm-convert--transient-media-build))
    ]
 
   ["Actions"
    ("RET" "Convert"
     (lambda ()
       (interactive)
-      (when-let* ((args (transient-args 'convtools--org-transient))
-                  (source (plist-get convtools--org-data :source))
-                  (type (plist-get convtools--org-data :type))
+      (when-let* ((args (transient-args 'org-ilm-convert--org-transient))
+                  (source (plist-get org-ilm-convert--org-data :source))
+                  (type (plist-get org-ilm-convert--org-data :type))
                   (org-id (org-id-get))
                   (attach-dir (org-attach-dir-get-create)))
 
         ;; Webpage
         (when-let ((_ (transient-arg-value "--webpage-download" args))
                    (title (if (eq type 'url)
-                              (if-let ((title (mochar-utils--get-page-title source)))
-                                  (mochar-utils--slugify-title title)
+                              (if-let ((title (org-ilm--get-page-title source)))
+                                  (org-ilm--slugify-title title)
                                 org-id)
                             (file-name-base source))))
-          (convtools--transient-webpage-run source title attach-dir org-id args))
+          (org-ilm-convert--transient-webpage-run source title attach-dir org-id args))
 
         ;; Media
         (when (or (transient-arg-value "--media-download" args)
                   (cdr (assoc "--media-subs=" args)))
-          (convtools--transient-media-run source attach-dir org-id args))))
+          (org-ilm-convert--transient-media-run source attach-dir org-id args))))
     :inapt-if
     (lambda ()
-      (and (eq (plist-get convtools--org-data :type) 'url)
+      (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
            (not (transient-arg-value "--webpage-download" (transient-get-value)))
            (not (transient-arg-value "--media-download" (transient-get-value)))
            (not (cdr (assoc "--media-subs=" (transient-get-value)))))))
@@ -886,10 +885,10 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
 ;;;;; Webpage
 
-(defvar convtools--transient-webpage-download-suffix
+(defvar org-ilm-convert--transient-webpage-download-suffix
   '("wd" "Download" "--webpage-download" :transient transient--do-call))
 
-(defvar convtools--transient-webpage-simplify-suffix
+(defvar org-ilm-convert--transient-webpage-simplify-suffix
   '("ws" "Simplify" "--webpage-simplify="
      :class transient-switches
      :transient transient--do-call
@@ -897,12 +896,12 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :argument-regexp "\\(--webpage-simplify-to-\\(markdown\\|html\\)\\)"
      :choices ("markdown" "html")))
 
-(defvar convtools--transient-webpage-orgify-suffix
+(defvar org-ilm-convert--transient-webpage-orgify-suffix
   '("wo" "Orgify" "--webpage-orgify"
     :summary "Convert to Org mode with Pandoc"
     :transient transient--do-call))
 
-(defun convtools--transient-webpage-build (&optional with-download hide-invalid-p)
+(defun org-ilm-convert--transient-webpage-build (&optional with-download hide-invalid-p)
   (let ((condition
          (lambda ()
            (and with-download
@@ -912,14 +911,14 @@ SUB-LANGS may also be 'all' to download all subtitles."
        (transient-parse-suffix 'transient--prefix suffix))
      (append
       (when with-download
-        (list convtools--transient-webpage-download-suffix))
+        (list org-ilm-convert--transient-webpage-download-suffix))
       (mapcar
        (lambda (suffix)
          (append suffix (list (if hide-invalid-p :if-not :inapt-if) condition)))
-       (list convtools--transient-webpage-simplify-suffix
-             convtools--transient-webpage-orgify-suffix))))))
+       (list org-ilm-convert--transient-webpage-simplify-suffix
+             org-ilm-convert--transient-webpage-orgify-suffix))))))
 
-(defun convtools--transient-webpage-run (source title output-dir id transient-args)
+(defun org-ilm-convert--transient-webpage-run (source title output-dir id transient-args)
   (let* ((download (transient-arg-value "--webpage-download" transient-args))
          (simplify (cond
                     ((transient-arg-value "--webpage-simplify-to-html" transient-args)
@@ -930,26 +929,26 @@ SUB-LANGS may also be 'all' to download all subtitles."
          (html-path (expand-file-name (concat title ".html") output-dir))
          (on-success
           (lambda (proc buf id)
-            (message "[Convtools] HTML conversion completed: %s" source)
-            (mochar-utils--org-with-point-at id
+            (message "[Org-Ilm-Convert] HTML conversion completed: %s" source)
+            (org-ilm--org-with-point-at id
               (org-attach-sync))))
          converters)
 
     (when download
       (push
-       (cons #'convtools--convert-with-monolith
+       (cons #'org-ilm-convert--convert-with-monolith
              (list :input-path source :output-path html-path))
        converters))
 
     (when simplify
       (push
-       (cons #'convtools--convert-with-defuddle
+       (cons #'org-ilm-convert--convert-with-defuddle
              (list :input-path html-path :output-format simplify))
        converters))
 
     (when orgify
       (push
-       (cons #'convtools--convert-with-pandoc
+       (cons #'org-ilm-convert--convert-with-pandoc
              (list :input-path
                    (if simplify
                        (concat
@@ -963,7 +962,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
     (setq converters (reverse converters))
     
-    (convtools--convert-multi
+    (org-ilm-convert--convert-multi
      :process-name "webpage"
      :process-id id
      :converters converters
@@ -972,30 +971,30 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
 ;;;;; Media
 
-(defun convtools--transient-media-url-is-media-p (url)
+(defun org-ilm-convert--transient-media-url-is-media-p (url)
   ;; Determine if media type by attempting to extract filename from url
   ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
   ;; not media type.
   ;; NOTE Quite slow (~3 sec)
   ;; (condition-case err
-  ;;     (or (convtools--ytdlp-filename-from-url url) t)
+  ;;     (or (org-ilm-convert--ytdlp-filename-from-url url) t)
   ;;   (error nil))
 
   ;; Instead just check if its a youtube link for now
   (member (url-domain (url-generic-parse-url url))
           '("youtube.com" "youtu.be")))
 
-(defvar convtools--transient-media-download-suffix
+(defvar org-ilm-convert--transient-media-download-suffix
   '("md" "Download" "--media-download" :transient transient--do-call))
 
-(defvar convtools--transient-media-template-suffix
+(defvar org-ilm-convert--transient-media-template-suffix
   '("mt" "Template" "--media-template="
     :prompt "Template: " :transient transient--do-call))
 
-(defvar convtools--transient-media-audio-suffix
+(defvar org-ilm-convert--transient-media-audio-suffix
   '("ma" "Audio only" "--media-audio" :transient transient--do-call))
 
-(defvar convtools--transient-media-subs-suffix
+(defvar org-ilm-convert--transient-media-subs-suffix
   '("ms" "Subtitles download" "--media-subs="
     :class transient-option
     :transient transient--do-call
@@ -1003,40 +1002,40 @@ SUB-LANGS may also be 'all' to download all subtitles."
     :choices
     (lambda ()
       (let* ((url (transient-arg-value "--source=" (transient-args transient-current-command)))
-             (subs (convtools--ytdlp-subtitles-from-url url)))
+             (subs (org-ilm-convert--ytdlp-subtitles-from-url url)))
         (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs))))))
 
-(defun convtools--transient-media-build (&optional no-template)
+(defun org-ilm-convert--transient-media-build (&optional no-template)
   (let ((inapt-if
          (lambda ()
            (null (transient-arg-value "--media-download" (transient-get-value)))))
         suffixes)
         
-    (push convtools--transient-media-subs-suffix suffixes)
+    (push org-ilm-convert--transient-media-subs-suffix suffixes)
     (push (append
-           convtools--transient-media-audio-suffix
+           org-ilm-convert--transient-media-audio-suffix
            (list :inapt-if inapt-if)) suffixes)
     (push (append
-           convtools--transient-media-template-suffix
+           org-ilm-convert--transient-media-template-suffix
            (if no-template
                (list :inapt-if-nil nil)
            (list :inapt-if inapt-if)))
           suffixes)
-    (push convtools--transient-media-download-suffix suffixes)
+    (push org-ilm-convert--transient-media-download-suffix suffixes)
     
     (mapcar
      (lambda (suffix)
        (transient-parse-suffix 'transient--prefix suffix))
      suffixes)))
 
-(defun convtools--transient-media-run (url output-dir id transient-args &optional on-success)
+(defun org-ilm-convert--transient-media-run (url output-dir id transient-args &optional on-success)
   "Convert a media URL to a local video file."
   (let* ((download (transient-arg-value "--media-download" transient-args))
          (template (transient-arg-value "--media-template=" transient-args))
          (audio-only (transient-arg-value "--media-audio" transient-args))
          (sub-langs (cdr (assoc "--media-subs=" transient-args))))
 
-    (convtools--convert-with-ytdlp
+    (org-ilm-convert--convert-with-ytdlp
      :process-id id
      :url url
      :output-dir output-dir
@@ -1046,8 +1045,8 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :no-download (not download)
      :on-success
      (lambda (proc buf id output-path)
-       (message "[Convtools] Media conversion completed: %s" url)
-       (mochar-utils--org-with-point-at id
+       (message "[Org-Ilm-Convert] Media conversion completed: %s" url)
+       (org-ilm--org-with-point-at id
          (org-attach-sync)
          (when on-success
            (funcall on-success id output-path)))))))
@@ -1056,6 +1055,6 @@ SUB-LANGS may also be 'all' to download all subtitles."
 
 ;;;; Footer
 
-(provide 'convtools)
+(provide 'org-ilm-convert)
 
-;;; convtools.el ends here
+;;; org-ilm-convert.el ends here
