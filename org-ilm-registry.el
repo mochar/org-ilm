@@ -25,14 +25,10 @@
 (require 'consult)
 
 (require 'org-ilm-utils)
+(require 'org-ilm-collection)
 (require 'org-ilm-convert)
 
 ;;;; Customization
-
-(defcustom org-ilm-registry-registries '("~/org/registry.org")
-  "List of Org file paths to be used as registries."
-  :type '(repeat file)
-  :group 'org-ilm-registry)
 
 (defcustom org-ilm-registry-types nil
   "Alist mapping registry type name to plist properties.
@@ -113,9 +109,9 @@ This helps share functionality of a type while being able to filter on a more gr
   "Face used by registry link types."
   :group 'org-ilm-registry)
 
-;;;; Minor mode
+;;;; Set up
 
-(defun org-ilm-registry--delete-overlay-advice (&rest args)
+(defun org-ilm--registry-delete-overlay-advice (&rest args)
   "Advice to detect if our org-link face was deleted."
   ;; TODO in org-transclusion-remove: (delete-overlay tc-pair-ov)
   ;; Might be nice to detect transclusions being deactivated
@@ -125,28 +121,24 @@ This helps share functionality of a type while being able to filter on a more gr
                 (teardown-func (plist-get data :teardown)))
       (funcall teardown-func ov))))
 
-(define-minor-mode org-ilm-registry-global-minor-mode
-  "Prepare some hooks and advices some functions."
-  :init-value nil
-  :global t
-  :lighter nil ;; String to display in mode line
-  :group 'org-ilm-registry
-  (if org-ilm-registry-global-minor-mode
-      ;; Enable
-      (progn
-        ;; Detect deletion, call type :teardown ov
-        (advice-add 'delete-overlay
-                    :before #'org-ilm-registry--delete-overlay-advice)
+(defun org-ilm--registry-setup ()
+  (cond
+   (org-ilm-global-minor-mode
+    ;; Detect deletion, call type :teardown ov
+    (advice-add 'delete-overlay
+                :before #'org-ilm--registry-delete-overlay-advice)
         
-        (dolist (type-data org-ilm-registry-types)
-          (when-let ((f (plist-get (cdr type-data) :setup)))
-            (funcall f))))
-    ;; Disable
     (dolist (type-data org-ilm-registry-types)
-        (when-let ((f (plist-get (cdr type-data) :cleanup)))
-          (funcall f)))
+      (when-let ((f (plist-get (cdr type-data) :setup)))
+        (funcall f))))
+   (t
+    (dolist (type-data org-ilm-registry-types)
+      (when-let ((f (plist-get (cdr type-data) :cleanup)))
+        (funcall f)))
     (advice-remove 'delete-overlay
-                   #'org-ilm-registry--delete-overlay-advice)))
+                   #'org-ilm--registry-delete-overlay-advice))))
+
+(add-hook 'org-ilm-global-minor-mode #'org-ilm--registry-setup)
 
 ;;;; Commands
 
@@ -162,7 +154,7 @@ This helps share functionality of a type while being able to filter on a more gr
 ;;;###autoload
 (defun org-ilm-registry-open ()
   (interactive)
-  (find-file (org-ilm-registry--registry-select)))
+  (find-file (org-ilm--collection-registry-path)))
   
 ;;;###autoload
 (defun org-ilm-registry-find ()
@@ -209,21 +201,18 @@ This helps share functionality of a type while being able to filter on a more gr
 (defun org-ilm-registry-register-dwim ()
   "Add element at point to the registry."
   (interactive)
-  (if-let ((types
-            (cl-remove-if
-             #'null
-             (mapcar
-              (lambda (type)
-                (when-let* ((f (plist-get (cdr type) :parse))
-                            (data (funcall f)))
-                  (cons (car type) data)))
-              org-ilm-registry-types)))
+  (if-let ((types (seq-keep
+                   (lambda (type)
+                     (-some->> (plist-get (cdr type) :parse)
+                       funcall
+                       (cons (car type))))
+                   org-ilm-registry-types))
            (type (if (> (length types) 1)
-                     (let ((type (completing-read "Type: " (mapcar #'car types) nil t)))
-                       (assoc type types))
+                     (assoc
+                      (completing-read "Type: " (mapcar #'car types) nil t)
+                      types)
                    (car types))))
-      (funcall #'org-ilm-registry-register
-               (car type) (cdr type))
+      (funcall #'org-ilm-registry-register (car type) (cdr type))
     (call-interactively #'org-ilm-registry-register)))
 
 ;;;###autoload
@@ -247,20 +236,15 @@ This helps share functionality of a type while being able to filter on a more gr
 
 ;;;; Functions
 
-(cl-defun org-ilm-registry--select-entry (&key types registries)
+(cl-defun org-ilm-registry--select-entry (&key types collection)
   "Select registry entry."
   (let* ((types (if types (ensure-list types) (mapcar #'car org-ilm-registry-types)))
-         (registries (mapcar
-                      (lambda (x) (expand-file-name x "~/"))
-                      (if registries
-                          (if (listp registries) registries (list registries))
-                        org-ilm-registry-registries))))
-
+         (registry (org-ilm--collection-registry-path collection)))
     (car
      (consult--multi
       (seq-map
        (lambda (type-name)
-         (list :name type-name
+         (list :name (capitalize type-name)
                :narrow (plist-get (cdr (assoc type-name org-ilm-registry-types)) :key)
                :items
                (lambda ()
@@ -269,7 +253,7 @@ This helps share functionality of a type while being able to filter on a more gr
                     (when (member (org-mem-entry-property "TYPE" entry)
                                   (org-ilm-registry--type-name-and-aliases type-name))
                       (cons (org-mem-entry-title entry) entry)))
-                  (org-mem-entries-in-files registries)))))
+                  (org-mem-entries-in-file registry)))))
        types)
       :require-match t
       :prompt "Registry entry: "))))
@@ -326,12 +310,6 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
         ;; possible, for example, to have a heading named identical to some ID
         ;; that you also have, and have non-ID links targeting that.
         (seq-filter (##equal (org-mem-link-type %) "registry") links)))))
-
-(defun org-ilm-registry--registry-select (&optional type)
-  (pcase (length org-ilm-registry-registries)
-    (0 nil)
-    (1 (car org-ilm-registry-registries))
-    (_ (completing-read "Registry: " org-ilm-registry-registries nil t))))
 
 (defun org-ilm-registry--entry-contents (entry)
   (cl-assert (org-mem-entry-p entry))
@@ -424,7 +402,7 @@ DATA is a plist that can contain :title, :body, :id, :type, :props,
 
 TEMPLATE is a cons with car optional template string and cdr plist of
 org-capture template properties."
-  (let* ((registry (or registry (org-ilm-registry--registry-select)))
+  (let* ((registry (or registry (org-ilm--collection-registry-path)))
          (title (ignore-errors (string-trim (plist-get data :title))))
          (body (plist-get data :body))
          (type (or (plist-get data :type) type))
@@ -665,7 +643,7 @@ environment (multiline), paste it in headline body."
 (defun org-ilm-registry--type-file-register (&optional args)
   (cl-destructuring-bind (&key title path type begin end)
       (or args (org-ilm-registry--type-file-from-path (read-file-name "File: ")))
-    (let ((registry (org-ilm-registry--registry-select))
+    (let ((registry (org-ilm--collection-registry-path))
           (id (org-id-new))
           attach-dir)
       (with-current-buffer (find-file-noselect registry)
@@ -975,7 +953,7 @@ See `parsebib-read-entry'."
 
         (let* ((transient-args (transient-args 'org-ilm-registry--type-resource-transient))
                (id (org-id-new))
-               (registry (org-ilm-registry--registry-select))
+               (registry (org-ilm--collection-registry-path))
                ;; Determine attach dir from within registry in case the dir is set
                ;; buffer or dir local
                (attach-dir (with-current-buffer (find-file-noselect registry)

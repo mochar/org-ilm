@@ -43,7 +43,7 @@ holding headline is an ilm element."
               (src-file (expand-file-name src-file)) ;; sep line, else err
               (collection (org-ilm-element--collection element)))
     ;; Exclude registries
-    (unless (seq-some (lambda (r) (string= (expand-file-name r) src-file)) org-ilm-registry-registries)
+    (unless (string= src-file (org-ilm--collection-registry-path collection))
       (when (member type '(material card))
         (list file-title collection src-file)))))
 

@@ -532,9 +532,11 @@ If `HEADLINE' is passed, read it as org-property."
     state))
 
 (defun org-ilm--org-capture-target-buffer (target)
+  "Returns the buffer of TARGET."
   (require 'org-capture)
   (let ((org-capture-plist nil))
     (org-capture-set-target-location target)
+    ;; TODO Return :pos as well?
     (org-capture-get :buffer)))
 
 (defun org-ilm--org-capture-programmatic (target text type &optional properties)

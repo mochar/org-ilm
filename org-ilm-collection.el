@@ -196,6 +196,14 @@ Raise error if neither file nor folder."
         (f-file-p path)
       (error "No path found for collection %s" collection))))
 
+(defun org-ilm--collection-registry-path (&optional collection)
+  "Return path to registry of COLLECTION."
+  (when-let* ((collection (or collection (org-ilm--active-collection)))
+              (target (org-ilm--collection-property collection :registry))
+              (buf (org-ilm--org-capture-target-buffer target))
+              (path (buffer-file-name buf)))
+    path))
+
 (defun org-ilm-bibliography ()
   (interactive)
   (if-let* ((target (org-ilm--collection-property (org-ilm--active-collection) :bib))
