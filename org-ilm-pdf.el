@@ -45,8 +45,13 @@ This is done by converting the area to an image first. Note that this will likel
   :type 'boolean
   :group 'org-ilm-pdf)
 
-(defcustom org-ilm-pdf-highlight-alpha 0.35
-  "The alpha value of the extract highlights on the PDF page."
+(defcustom org-ilm-pdf-highlight-alpha 0.25
+  "The alpha value of the highlights on the PDF page."
+  :type 'number
+  :group 'org-ilm-pdf)
+
+(defcustom org-ilm-pdf-capture-alpha 0.85
+  "The alpha value of the capture highlights on the PDF page."
   :type 'number
   :group 'org-ilm-pdf)
 
@@ -607,84 +612,107 @@ TODO Cute if we can use numeric prefix to jump to that page number"
 
 ;; Highlights of child captures shown in PDF file.
 
+(cl-defstruct (org-ilm-pdf-capture
+               (:conc-name org-ilm-pdf-capture--))
+  id type self-p spec)
+
 (cl-defstruct (org-ilm-pdf-highlight
                (:conc-name org-ilm-pdf-highlight--))
   el-id el-type
   type ;; selection, area
   interactive-p ;; user interactive capture selection
+  self-p ;; highlight of current element
   page rect)
 
 (defvar-local org-ilm-pdf-highlight-highlights-p t)
-(defvar-local org-ilm--pdf-highlights nil)
+(defvar-local org-ilm--pdf-captures nil)
 
-(defun org-ilm--pdf-gather-highlights ()
-  "Return list of `org-ilm-pdf-highlight' for all child elements of PDF element."
+(defun org-ilm--pdf-gather-captures ()
+  "Return list of `org-ilm-pdf-capture' for all child elements of PDF element."
   (map-let (:id :headline) (org-ilm--pdf-data) 
     (let* ((element (org-ilm--element-by-id id))
-           ;; (include-self (eq (org-ilm-element--type element) 'card))
-           (include-self t)
            (headlines (org-ilm--element-query-children
                        element
                        :return-type 'headline
-                       :include-self include-self
+                       :include-self t
                        :more-query '((property "ILM_PDF"))))
-           highlights)
+           captures)
       (dolist (headline headlines)
         (when-let* ((el-id (org-element-property :ID headline))
                     (type (org-ilm--element-type headline))
                     (range (org-element-property :ILM_PDF headline))
                     (spec (org-ilm--pdf-spec-parse range)))
-          (dolist (part (org-ilm-pdf-spec--parts spec))
-            ;; TODO Find some way to also highlight ranges without creating a
-            ;; highlight object per page
-            (when (org-ilm-pdf-page-p part)
-              (cond-let*
-                ([selections (org-ilm-pdf-page--selections part)]
-                 (dolist (selection selections)
-                   (push
-                    (make-org-ilm-pdf-highlight
-                     :el-id el-id
-                     :el-type type
-                     :type 'selection
-                     :page (org-ilm-pdf-page--number part)
-                     :rect selection)
-                    highlights)))
-                ([area (org-ilm-pdf-page--area part)]
-                 (unless (string= el-id id)
-                   (push
-                    (make-org-ilm-pdf-highlight
-                     :el-id el-id
-                     :el-type type
-                     :type 'area
-                     :page (org-ilm-pdf-page--number part)
-                     :rect area)
-                    highlights)))
-                (t
-                 (unless (string= el-id id)
-                   (push
-                    (make-org-ilm-pdf-highlight
-                     :el-id el-id
-                     :el-type type
-                     :type 'page
-                     :page (org-ilm-pdf-page--number part)
-                     :rect (list 0 0 1 1))
-                    highlights)))
-                )))))
-      highlights)))
+          (push (make-org-ilm-pdf-capture
+                 :id el-id
+                 :type type
+                 :self-p (string= el-id id)
+                 :spec spec)
+                captures)))
+      captures)))
 
-(defun org-ilm--pdf-highlights (&optional reparse-p)
+(defun org-ilm--pdf-captures (&optional reparse-p)
   (org-ilm--pdf-mode-assert)
-  (or (and (not reparse-p) (bound-and-true-p org-ilm--pdf-highlights))
-      (setq-local org-ilm--pdf-highlights
-                  (org-ilm--pdf-gather-highlights))))
+  (or (and (not reparse-p) (bound-and-true-p org-ilm--pdf-captures))
+      (setq-local org-ilm--pdf-captures
+                  (org-ilm--pdf-gather-captures))))
 
 (defun org-ilm--pdf-page-highlights (&optional page)
-  "Return all specs in or part of PAGE."
+  "Turn all of PAGE's captures into `org-ilm-pdf-highlight' objects."
   (setq page (or page (org-ilm--pdf-page-normalized)))
-  (seq-filter
-   (lambda (highlight)
-     (= page (org-ilm-pdf-highlight--page highlight)))
-   (org-ilm--pdf-highlights)))
+  (let (highlights)
+    (dolist (capture (org-ilm--pdf-captures))
+      (with-slots (id type self-p spec) capture
+        (dolist (part (org-ilm-pdf-spec--parts spec))
+          (cl-etypecase part
+            (org-ilm-pdf-page
+             (when (= page (oref part number))
+               (cond-let*
+                 ([selections (org-ilm-pdf-page--selections part)]
+                  (dolist (selection selections)
+                    (push
+                     (make-org-ilm-pdf-highlight
+                      :el-id id
+                      :el-type type
+                      :self-p self-p
+                      :type 'selection
+                      :page (org-ilm-pdf-page--number part)
+                      :rect selection)
+                     highlights)))
+                 ([area (org-ilm-pdf-page--area part)]
+                  (unless self-p
+                    (push
+                     (make-org-ilm-pdf-highlight
+                      :el-id id
+                      :el-type type
+                      :self-p self-p
+                      :type 'area
+                      :page (org-ilm-pdf-page--number part)
+                      :rect area)
+                     highlights)))
+                 (t
+                  (unless self-p
+                    (push
+                     (make-org-ilm-pdf-highlight
+                      :el-id id
+                      :el-type type
+                      :self-p self-p
+                      :type 'page
+                      :page (org-ilm-pdf-page--number part)
+                      :rect (list 0 0 1 1))
+                     highlights))))))
+            (org-ilm-pdf-range
+             (when (and (not self-p)
+                        (<= (oref part begin) page (oref part end)))
+               (push
+                (make-org-ilm-pdf-highlight
+                 :el-id id
+                 :el-type type
+                 :self-p self-p
+                 :type 'range
+                 :page page
+                 :rect (list 0 0 1 1))
+                highlights)))))))
+    highlights))
 
 (defun org-ilm--pdf-create-capture-context-menu (id)
   "Create a context menu for capture highlight ID."
@@ -716,7 +744,8 @@ See `pdf-annot-create-hotspots', `pdf-annot-hotspot-function', and
 buffer-local `pdf-view--hotspot-functions'."
   (seq-keep
    (lambda (highlight)
-     (with-slots (el-id el-type page rect) highlight
+     (with-slots (el-id el-type page rect interactive-p) highlight
+       (unless interactive-p
          (let* ((region (org-ilm--pdf-region-denormalized rect))
                 (id-symb (intern (format "ilm-pdf-capture-%s" el-id)))
                 ;; Scale relative coords to pixel coords
@@ -744,7 +773,7 @@ buffer-local `pdf-view--hotspot-functions'."
                       . (,(nth 2 e) . ,(nth 3 e))))
             id-symb
             (list 'pointer 'hand
-                  'help-echo (format "Capture: %s" el-id))))))
+                  'help-echo (format "Capture: %s" el-id)))))))
    highlights))
 
 (defun org-ilm--pdf-info-renderpage-highlights (page width highlights &optional file-or-buffer)
@@ -753,8 +782,7 @@ buffer-local `pdf-view--hotspot-functions'."
   ;; list of commands that it goes through sequantilally and applies. The
   ;; important commands are setting the current style (:alpha :background
   ;; :foreground) and creating a highlight (:highlight-region).
-  (let* ((this-id (car (org-ilm--attachment-data)))
-         cmds
+  (let* (cmds
          (capture-cmds
           (lambda (highlights color &optional fg-color)
             (apply #'append
@@ -776,11 +804,11 @@ buffer-local `pdf-view--hotspot-functions'."
          this-highlight extracts clozes interactives)
 
     (dolist (highlight highlights)
-      (with-slots (el-id el-type interactive-p) highlight
+      (with-slots (el-id el-type self-p interactive-p) highlight
         (cond
          (interactive-p
           (push highlight interactives))
-         ((string= el-id this-id)
+         (self-p
           (setq this-highlight highlight))
          ((eq el-type 'material)
           (push highlight extracts))
@@ -789,9 +817,10 @@ buffer-local `pdf-view--hotspot-functions'."
 
     (setq cmds
           (append
-           (list :alpha org-ilm-pdf-highlight-alpha)
+           (list :alpha org-ilm-pdf-capture-alpha)
            (funcall capture-cmds extracts extract-color)
            (funcall capture-cmds clozes cloze-color)
+           (list :alpha org-ilm-pdf-highlight-alpha)
            (funcall capture-cmds interactives interactive-color)
            (pcase (-some-> this-highlight org-ilm-pdf-highlight--el-type)
              ('material
@@ -1385,6 +1414,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                      (make-org-ilm-pdf-highlight
                       :el-id el-id :el-type el-type
                       :type 'selection :interactive-p t
+                      :self-p t
                       :page page :rect (cdr s))))
                  selections)]
            hls)
@@ -1392,13 +1422,13 @@ See also `org-ilm-pdf-convert-org-respect-area'."
            (make-org-ilm-pdf-highlight
             :el-id el-id :el-type el-type
             :type 'area :interactive-p t
-            :page page
+            :page page :self-p t
             :rect (list 0 (or begin-top 0) 1 (or begin-bottom 1))))
           ((and end-page (<= (or begin-page 1) page end-page))
            (make-org-ilm-pdf-highlight
             :el-id el-id :el-type el-type
             :type 'area :interactive-p t
-            :page page
+            :page page :self-p t
             :rect (list 0 0 1 (or (when (= end-page page) end-bottom) 1)))))))))
 
 (defun org-ilm--pdf-interactive-capture-spec ()
@@ -1504,8 +1534,9 @@ With prefix arg, use mouse position as bottom cutoff point."
                     page-rel area-rel pdf-view-selection-style)))
         (dolist (rect rects)
           (push (cons page (org-ilm--pdf-region-normalized rect page-rel))
-                (plist-get org-ilm-pdf-interactive-capture :selections))))  
-      )))
+                (plist-get org-ilm-pdf-interactive-capture :selections)))))
+    (pdf-view-redisplay)
+    (org-ilm--pdf-interactive-capture-print-state)))
 
 (defun org-ilm--pdf-interactive-capure--hook ()
   (cond
@@ -1513,14 +1544,12 @@ With prefix arg, use mouse position as bottom cutoff point."
     (define-key pdf-view-mode-map (kbd "[") #'org-ilm-pdf-select-begin-page)
     (define-key pdf-view-mode-map (kbd "]") #'org-ilm-pdf-select-end-page)
     (define-key pdf-view-mode-map (kbd "\"") #'org-ilm-pdf-select-region)
-    (advice-add 'keyboard-quit :before #'org-ilm--pdf-interactive-capture-reset)
-    )
+    (advice-add 'keyboard-quit :before #'org-ilm--pdf-interactive-capture-reset))
    (t
     (define-key pdf-view-mode-map (kbd "[") nil)
     (define-key pdf-view-mode-map (kbd "]") nil)
     (define-key pdf-view-mode-map (kbd "\"") nil)
-    (advice-remove 'keyboard-quit #'org-ilm--pdf-interactive-capture-reset)
-    )))
+    (advice-remove 'keyboard-quit #'org-ilm--pdf-interactive-capture-reset))))
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-interactive-capure--hook)
     
