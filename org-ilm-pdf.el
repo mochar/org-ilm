@@ -782,58 +782,40 @@ buffer-local `pdf-view--hotspot-functions'."
   ;; list of commands that it goes through sequantilally and applies. The
   ;; important commands are setting the current style (:alpha :background
   ;; :foreground) and creating a highlight (:highlight-region).
-  (let* (cmds
-         (capture-cmds
-          (lambda (highlights color &optional fg-color)
-            (apply #'append
-                   cmds
-                   (list :background color :foreground (or fg-color color))
-                   (seq-keep
-                    (lambda (highlight)
-                      (with-slots (rect) highlight
-                        (list :highlight-region
-                              (org-ilm--pdf-clip-rect
-                               (org-ilm--pdf-region-denormalized rect)))))
-                    highlights))))
-         (extract-color (color-darken-name
-                         (face-background 'org-ilm-face-extract) 10.))
-         (cloze-color (color-darken-name
-                       (face-background 'org-ilm-face-card) 10.))
-         (interactive-color (color-darken-name
-                             (face-background 'org-ilm-pdf-interactive-capture-face) 10.))
-         this-highlight extracts clozes interactives)
+  (let* ((extract-color (face-background 'org-ilm-face-extract))
+         (cloze-color (face-background 'org-ilm-face-card))
+         (interactive-color (face-background 'org-ilm-pdf-interactive-capture-face)) 
+         cmds)
 
     (dolist (highlight highlights)
-      (with-slots (el-id el-type self-p interactive-p) highlight
-        (cond
-         (interactive-p
-          (push highlight interactives))
-         (self-p
-          (setq this-highlight highlight))
-         ((eq el-type 'material)
-          (push highlight extracts))
-         ((eq el-type 'card)
-          (push highlight clozes)))))
+      (with-slots (el-type type interactive-p self-p rect) highlight
+        (let (color alpha)
+          (cond
+           (interactive-p
+            (setq alpha org-ilm-pdf-highlight-alpha
+                  color interactive-color))
+           ((eq el-type 'card)
+            (if (and self-p
+                     (org-ilm-reviewing-p)
+                     (not (plist-get org-ilm--review-data :card-revealed)))
+                (setq alpha 1)
+              (setq alpha org-ilm-pdf-capture-alpha))
+            (setq color cloze-color))
+           ((eq el-type 'material)
+            (setq alpha org-ilm-pdf-capture-alpha
+                  color extract-color)))
 
-    (setq cmds
-          (append
-           (list :alpha org-ilm-pdf-capture-alpha)
-           (funcall capture-cmds extracts extract-color)
-           (funcall capture-cmds clozes cloze-color)
-           (list :alpha org-ilm-pdf-highlight-alpha)
-           (funcall capture-cmds interactives interactive-color)
-           (pcase (-some-> this-highlight org-ilm-pdf-highlight--el-type)
-             ('material
-              (funcall capture-cmds (list this-highlight) extract-color))
-             ('card
-              (append
-               (when (and (org-ilm-reviewing-p)
-                          (not (plist-get org-ilm--review-data :card-revealed)))
-                 (list :alpha 1))
-               (funcall capture-cmds (list this-highlight) cloze-color "#000000"))))))
+          (unless self-p
+            (setq color (color-darken-name color 10.)))
 
-    (apply #'pdf-info-renderpage
-           page width file-or-buffer cmds)))
+          (setq cmds (append
+                      (list
+                       :alpha alpha :background color :foreground color
+                       :highlight-region (org-ilm--pdf-clip-rect
+                                          (org-ilm--pdf-region-denormalized rect)))
+                      cmds)))))
+
+    (apply #'pdf-info-renderpage page width file-or-buffer cmds)))
 
 ;; Advice `pdf-view-create-page' to add highlights for our captures. The
 ;; function is responsible for generating an image of the PDF. During this
