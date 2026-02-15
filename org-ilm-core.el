@@ -51,6 +51,13 @@ here."
 
 (defconst org-ilm-element-types '(material card concept task queue))
 
+;;;; Generics
+
+(cl-defgeneric org-ilm--extract ()
+  (user-error "Cannot extract here"))
+
+(cl-defgeneric org-ilm--cloze ()
+  (user-error "Cannot cloze here"))
 
 ;;; Footer
 

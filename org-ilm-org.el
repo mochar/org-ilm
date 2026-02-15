@@ -144,9 +144,8 @@ is then passed as a file move capture."
     (setq org-ilm--org-mark-element nil
           org-ilm--org-mark-point nil)))
 
-(defun org-ilm-org-extract-dwim ()
+(cl-defmethod org-ilm--extract (&context (ilm-attachment org))
   "Extract text in Org mode attachments by cycling through regions."
-  (interactive)
   (if (region-active-p)
       (org-ilm-org-extract)
     (org-ilm-mark-mode 1)))
@@ -223,6 +222,9 @@ is then passed as a file move capture."
        ))))
 
 ;;;; Cloze
+
+(cl-defmethod org-ilm--cloze (&context (ilm-attachment org))
+  (org-ilm-org-cloze))
 
 (defun org-ilm-org-cloze ()
   "Create a cloze card.

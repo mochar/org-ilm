@@ -238,24 +238,12 @@
 (defun org-ilm-extract ()
   "Extract region depending on file."
   (interactive)
-  (if (eq 'attachment (car (org-ilm--where-am-i)))
-    (cond
-     ((eq major-mode 'org-mode)
-      (call-interactively #'org-ilm-org-extract-dwim))
-     ((org-ilm--pdf-mode-p)
-      (call-interactively #'org-ilm-pdf-extract)))
-    (user-error "Extracts can only be made from within an attachment")))
+  (org-ilm--extract))
 
 (defun org-ilm-cloze ()
   "Create a cloze card"
   (interactive)
-  (if (eq 'attachment (car (org-ilm--where-am-i)))
-      (cond
-       ((eq major-mode 'org-mode)
-        (call-interactively #'org-ilm-org-cloze))
-       ((org-ilm--pdf-mode-p)
-        (call-interactively #'org-ilm-pdf-cloze)))
-    (user-error "Clozes can only be made from within an attachment")))
+  (org-ilm--cloze))
 
 (defun org-ilm-split ()
   "Split document by section."

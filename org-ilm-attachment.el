@@ -32,20 +32,25 @@ holding headline is an ilm element."
 ;; TODO org-attach-delete-all
 
 (defun org-ilm--attachment-data ()
-  "Returns (org-id collection file) if current buffer is collection attachment file."
+  "Returns (org-id collection file type) if current buffer is collection attachment file."
   (when-let* ((file-title (file-name-base
                            ;; Allow for non-file buffer: pdf virtual view
                            (or buffer-file-name (buffer-name))))
               (entry (org-mem-entry-by-id file-title))
               (element (org-ilm--element-from-entry entry))
-              (type (org-ilm-element--type element))
               (src-file (org-mem-entry-file entry))
               (src-file (expand-file-name src-file)) ;; sep line, else err
-              (collection (org-ilm-element--collection element)))
+              (collection (org-ilm-element--collection element))
+              (type (cond
+                     ((org-ilm--pdf-mode-p) 'pdf)
+                     ((oref element media) 'media)
+                     ((eq major-mode 'org-mode) 'org)
+                     ((eq major-mode 'image-mode) 'image)
+                     (t major-mode))))
     ;; Exclude registries
-    (unless (string= src-file (org-ilm--collection-registry-path collection))
-      (when (member type '(material card))
-        (list file-title collection src-file)))))
+    (when (and (member (oref element type) '(material card))
+               (not (string= src-file (org-ilm--collection-registry-path collection))))
+      (list file-title collection src-file type))))
 
 (defun org-ilm--attachment-extension ()
   "Return the extension of the attachment at point, assuming in collection."

@@ -23,8 +23,13 @@
 ;;;; Ilm
 
 (defun org-ilm--where-am-i ()
-  "Returns one of ('collection collection), ('attachment (org-id collection)),
-('queue collection org-id), nil."
+  "Returns org-ilm location.
+
+One of:
+- ('collection collection)
+- ('registry collection)
+- ('attachment org-id collection path type)
+- ('queue collection org-id)"
   (require 'org-ilm-collection)
   (require 'org-ilm-attachment)
   (require 'org-ilm-queue)
@@ -45,6 +50,12 @@
                   ((org-ilm-element-p object)
                    (org-ilm-element--id object)))))
        (list 'queue (org-ilm-queue--collection org-ilm-queue) id)))))
+
+(cl-generic-define-context-rewriter ilm-location (var)
+  `((car (org-ilm--where-am-i)) (eql ,var)))
+
+(cl-generic-define-context-rewriter ilm-attachment (var)
+  `((nth 3 (org-ilm--attachment-data)) (eql ,var)))
 
 (defun org-ilm-midnight-shift-minutes ()
   "Midnight shift as number of minutes past (or before) midnight."
@@ -250,6 +261,10 @@ Direct copy from mm-decode.el"
              do (cl-rotatef (aref vec i)
                             (aref vec (random (1+ i)))))
     (append vec nil)))
+
+(defun org-ilm--pdf-mode-p ()
+  "Return non-nil if current major mode is `pdf-view-mode' or `pdf-virtual-view-mode'."
+  (when (member major-mode '(pdf-view-mode pdf-virtual-view-mode)) t))
 
 
 ;;;; Org
