@@ -39,6 +39,13 @@
 (require 'org-ilm-concept)
 (require 'ost)
 
+;;;; Variables
+
+(defvar org-ilm-element-delete-hook nil
+  "Hook run when an element has been deleted.
+
+Parameters passed: id, type, collection")
+
 ;;;; Element
 
 ;; TODO: Rather than storing data already stored in org-mem cache, load from it.
@@ -435,35 +442,39 @@ COLLECTION specifies in which queue to look at."
    (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
   (cl-assert (org-ilm-element-p element) nil "Not an ilm element")
 
-  (org-ilm--element-with-point-at element
-    (when (called-interactively-p)
-      (org-mark-subtree)
-      (unless (yes-or-no-p "Delete element?")
-        (pop-mark)
-        (user-error "Abort deletion")))
-    
-    (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
-      (cond-let*
-        ((org-entry-get nil "DIR")
-         (when (yes-or-no-p "Delete ENTIRE attachment directory?")
-           (org-attach-delete-all 'force)))
-        ([attachments
-          (apply #'append
-                 (mapcar
-                  (lambda (headline)
-                    (f-glob
-                     (file-name-concat
-                      (org-attach-dir)
-                      (concat (org-element-property :ID headline) "*"))))
-                  (org-ilm--element-query-children
-                   element :return-type 'headline :include-self t :all-descendants t)))]
-         (when (yes-or-no-p (format "Delete element %s attachtment(s)?" (length attachments)))
-           (dolist (file attachments)
-             (delete-file file))))))
-    
-    (org-ilm--org-delete-headline)
-    (org-ilm--pqueue-remove (org-ilm-element--id element)
-                            (org-ilm-element--collection element))))
+  (with-slots (id type collection) element
+    (org-ilm--element-with-point-at element
+      (when (called-interactively-p)
+        (org-mark-subtree)
+        (unless (yes-or-no-p "Delete element?")
+          (pop-mark)
+          (user-error "Abort deletion")))
+      
+      (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
+        (cond-let*
+          ((org-entry-get nil "DIR")
+           (when (yes-or-no-p "Delete ENTIRE attachment directory?")
+             (org-attach-delete-all 'force)))
+          ([attachments
+            (apply #'append
+                   (mapcar
+                    (lambda (headline)
+                      (f-glob
+                       (file-name-concat
+                        (org-attach-dir)
+                        (concat (org-element-property :ID headline) "*"))))
+                    (org-ilm--element-query-children
+                     element :return-type 'headline :include-self t :all-descendants t)))]
+           (when (yes-or-no-p (format "Delete element %s attachtment(s)?" (length attachments)))
+             (dolist (file attachments)
+               (delete-file file))))))
+      
+      (org-ilm--org-delete-headline)
+      (org-ilm--pqueue-remove id collection)
+
+      (run-hook-with-args
+       'org-ilm-element-delete-hook
+       id type collection))))
 
 ;;;; Transient
 

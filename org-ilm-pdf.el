@@ -822,42 +822,35 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; `pdf-view-display-region' to create the regions but it gets overwritten as
 ;; soon as the image needs to be generated again.
 (defun org-ilm--advice--pdf-view-create-page (page &optional window)
-  (let* ((highlights (or (ensure-list
-                          (org-ilm--pdf-interactive-capture-page-highlights page))
-                         (and (org-ilm--attachment-data)
-                              org-ilm-pdf-highlight-highlights-p
-                              (org-ilm--pdf-page-highlights))))
-         
-         ;; Replicate logic from pdf-view-display-region
-         (size (pdf-view-desired-image-size page window))
-         (width (car size))
-         (hotspots (append
-                    (org-ilm--pdf-create-highlight-hotspots highlights size)
-                    ;; Standard hotspots for eg PDF annotations
-                    (pdf-view-apply-hotspot-functions window page size)))
-         
-         ;; Call the low-level renderer with highlight data
-         (data (org-ilm--pdf-info-renderpage-highlights
-                page width highlights)))
+  (if (not (org-ilm--attachment-data))
+      (pdf-view-create-page page window) 
+    (let* ((highlights (or (ensure-list
+                            (org-ilm--pdf-interactive-capture-page-highlights page))
+                           (and (org-ilm--attachment-data)
+                                org-ilm-pdf-highlight-highlights-p
+                                (org-ilm--pdf-page-highlights))))
+           
+           ;; Replicate logic from pdf-view-display-region
+           (size (pdf-view-desired-image-size page window))
+           (width (car size))
+           (hotspots (append
+                      (org-ilm--pdf-create-highlight-hotspots highlights size)
+                      ;; Standard hotspots for eg PDF annotations
+                      (pdf-view-apply-hotspot-functions window page size)))
+           
+           ;; Call the low-level renderer with highlight data
+           (data (org-ilm--pdf-info-renderpage-highlights
+                  page width highlights)))
 
-    ;; This is just a small wrapper around emacs' `create-image'.
-    ;; The properties that are passed can be found in (C-x C-e):
-    ;;      (info "(elisp) Image Descriptors")
-    (pdf-view-create-image data
-      :width width
-      :rotation (or pdf-view--current-rotation 0)
-      :map hotspots
-      :pointer 'arrow)))
+      ;; This is just a small wrapper around emacs' `create-image'.
+      ;; The properties that are passed can be found in (C-x C-e):
+      ;;      (info "(elisp) Image Descriptors")
+      (pdf-view-create-image data
+        :width width
+        :rotation (or pdf-view--current-rotation 0)
+        :map hotspots
+        :pointer 'arrow))))
 
-(defun org-ilm--ilm-hook-pdf ()
-  (if org-ilm-global-minor-mode
-      (advice-add #'pdf-view-create-page
-                  :override #'org-ilm--advice--pdf-view-create-page)
-    (advice-remove #'pdf-view-create-page
-                   #'org-ilm--advice--pdf-view-create-page)))
-
-(add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--ilm-hook-pdf)
-  
 
 ;;;; Virtual
 
@@ -1084,8 +1077,8 @@ See also `org-ilm-pdf-convert-org-respect-area'."
    (t
     (org-ilm-pdf-section-extract
      (org-ilm--pdf-extract-prompt-for-output-type
-      'section "Extract section as: ")))
-   (org-ilm--pdf-highlights-refresh)))
+      'section "Extract section as: "))))
+  (org-ilm--pdf-highlights-refresh))
 
 (defun org-ilm-pdf-page-extract (output-type)
   "Turn PDF page into an extract."
@@ -1564,6 +1557,32 @@ With prefix arg, use mouse position as bottom cutoff point."
     (advice-remove 'keyboard-quit #'org-ilm--pdf-interactive-capture-reset))))
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-interactive-capure--hook)
+
+;;;; Setup
+
+(defun org-ilm--pdf-ilm-hook ()
+  (cond
+   (org-ilm-global-minor-mode
+    (advice-add #'pdf-view-create-page
+                :override #'org-ilm--advice--pdf-view-create-page))
+   (t
+    (advice-remove #'pdf-view-create-page
+                   #'org-ilm--advice--pdf-view-create-page))))
+
+(add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-ilm-hook)
+
+(defun org-ilm--pdf-ilm-after-attachment-setup-hook (buf)
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (org-ilm--pdf-mode-p)
+        (add-hook 'org-ilm-element-delete-hook
+                  (lambda (&rest r)
+                    (when (buffer-live-p buf)
+                      (with-current-buffer buf
+                        (org-ilm--pdf-highlights-refresh)))))))))
+
+(add-hook 'org-ilm-attachment-after-setup-hook
+          #'org-ilm--pdf-ilm-after-attachment-setup-hook)
     
 ;;; Footer
 

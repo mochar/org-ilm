@@ -11,7 +11,14 @@
 (require 'org-ilm-registry)
 (require 'org-ilm-core)
 
-;;;; Attachments
+;;;; Variables
+
+(defvar org-ilm-attachment-after-setup-hook nil
+  "Hook run when finished setting up attachment buffer.
+
+Functions are passed the current buffer as argument.")
+
+;;;; Functions
 
 ;; TODO I dont actually use this
 (defun org-ilm--attachment-dir ()
@@ -166,15 +173,15 @@ holding headline is an ilm element."
              :characters 0
              ))
 
-      (pcase major-mode
-        ('org-mode
+      (when (eq major-mode 'org-mode)
          (cursor-intangible-mode 1)
          (org-ilm-recreate-overlays))
-        ('pdf-virtual-view-mode
-         (setq-local default-directory "")
-         )
-        )
-      )))
+
+      ;; TODO What is this for???????????
+      (when (eq major-mode 'pdf-virtual-view-mode)
+        (setq-local default-directory ""))
+
+      (run-hook-with-args 'org-ilm-attachment-after-setup-hook (current-buffer)))))
 
 (defun org-ilm--attachment-ensure-data-object ()
   "Ensure `org-ilm--data' is initialized properly.
