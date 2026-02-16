@@ -30,25 +30,27 @@ Nil to do nothing, \'out to clock out on review, \'out-in to also clock back in.
           (const :tag "Clock out and back in when done" out-in))
   :group 'org-ilm-review)
 
-(cl-defstruct (org-ilm-review
-               (:conc-name org-ilm-review--))
-  "Review data."
-  element
-  id
-  buffer
-  start)
-
-(defvar org-ilm--review-data nil
-  "Info of the current element being reviewed.")
+(defvar org-ilm--review nil
+  "`org-ilm-review' object. Data of the current element being reviewed.")
 
 (defvar org-ilm--review-interrupted-clock-marker nil
   "Stores the `org-clock-marker' of the interrupted clock when review started.")
+
+(defvar org-ilm-review-prepare-hook nil
+  "Hook run during review setup of the element's attachment.
+ 
+The attachment's buffer is current.")
 
 (defvar org-ilm-review-next-hook nil
   "Hook run when new element has been setup for review.")
 
 (defvar org-ilm-review-reveal-hook nil
   "Hook run when card should be revealed.")
+
+(defvar org-ilm-review-clean-hook nil
+  "Hook run during cleanup of the element's attachment after its review.
+ 
+The attachment's buffer is current.")
 
 (defvar org-ilm-review-quit-hook nil
   "Hook run when review session stopped.")
@@ -63,31 +65,38 @@ Nil to do nothing, \'out to clock out on review, \'out-in to also clock back in.
 
 ;;;; Review logic
 
+(cl-defstruct (org-ilm-review
+               (:conc-name org-ilm-review--))
+  "Review data."
+  id type buffer start card-revealed rating)
+
+(defun org-ilm--review-element ()
+  (org-ilm--element-by-id (oref org-ilm--review id)))
+
+(defun org-ilm--review-card-p ()
+  (eq (oref org-ilm--review type) 'card))
+
 ;;;###autoload
 (define-minor-mode org-ilm-review-mode
   "Minor mode during review."
   :group 'org-ilm
   :global t
   :interactive nil ;; shouldnt be a command
-  (if org-ilm-review-mode
-      (if (null org-ilm-queue-active-buffer)
-          (progn
-            (error "No active queue buffer")
-            (org-ilm-review-mode -1))
+  (cond
+   (org-ilm-review-mode
+    (when (null org-ilm-queue-active-buffer)
+      (org-ilm-review-mode -1)
+      (error "No active queue buffer"))
 
-        ;;; Minor mode on
-        (with-current-buffer org-ilm-queue-active-buffer
-          ;; Add kill hook on queue buffer
-          (add-hook 'kill-buffer-hook
-                    #'org-ilm--review-confirm-quit nil t))
+    (with-current-buffer org-ilm-queue-active-buffer
+      ;; Add kill hook on queue buffer
+      (add-hook 'kill-buffer-hook
+                #'org-ilm--review-confirm-quit nil t))
 
-        ;; Quit review when the active queue changes
-        (add-hook 'org-ilm-queue-active-buffer-change-hook
-                  #'org-ilm-review-quit)
-        
-        )
-    
-    ;;; Minor mode off
+    ;; Quit review when the active queue changes
+    (add-hook 'org-ilm-queue-active-buffer-change-hook
+              #'org-ilm-review-quit))
+   (t ;; Minor mode off
     ;; Remove kill buffer hooks
     (when (and org-ilm-queue-active-buffer
                (buffer-live-p org-ilm-queue-active-buffer))
@@ -98,7 +107,8 @@ Nil to do nothing, \'out to clock out on review, \'out-in to also clock back in.
 
     (remove-hook 'org-ilm-queue-active-buffer-change-hook
                  #'org-ilm-review-quit)
-    ))
+
+    (setq org-ilm--review nil))))
 
 (defun org-ilm-reviewing-p ()
   "Return t when currently reviewing."
@@ -107,7 +117,7 @@ Nil to do nothing, \'out to clock out on review, \'out-in to also clock back in.
 (defun org-ilm-reviewing-id-p (id)
   "Return t when currently reviewing element with id ID."
   (when (org-ilm-reviewing-p)
-    (equal id (plist-get org-ilm--review-data :id))))
+    (equal id (oref org-ilm--review id))))
 
 (defun org-ilm--review-confirm-quit ()
   "Confirmation before killing the active attachment buffer or queue buffer
@@ -171,10 +181,9 @@ during review."
 (defun org-ilm--review-ensure ()
   "Make sure that everything is ready before hitting next.
 Return t if already ready."
-  (let ((was-ready t)
-        (element (plist-get org-ilm--review-data :element)))
-    (when (org-ilm-element--card-p element)
-      (unless (plist-get org-ilm--review-data :card-revealed)
+  (let ((was-ready t))
+    (when (org-ilm--review-card-p)
+      (unless (oref org-ilm--review card-revealed)
         (setq was-ready nil)
         (org-ilm-review-reveal)))
     was-ready))
@@ -195,17 +204,16 @@ Return t if already ready."
 
   ;; If card, make sure revealed and there is a rating
   (cl-assert (or (null rating) (member rating '(:good :easy :hard :again))))
-  (let ((element (plist-get org-ilm--review-data :element)))
-    (when (and (org-ilm-element--card-p element)
-               (not (plist-get org-ilm--review-data :rating)))
-      (setf (plist-get org-ilm--review-data :rating)
-            (or rating
-                (let ((ratings '(("Good" . :good)
-                                 ("Easy" . :easy)
-                                 ("Hard" . :hard)
-                                 ("Again" . :again))))
-                  (alist-get (completing-read "Rate:" ratings nil t)
-                             ratings nil nil #'equal))))))
+  (when (and (org-ilm--review-card-p)
+             (not (oref org-ilm--review rating)))
+    (setf (oref org-ilm--review rating)
+          (or rating
+              (let ((ratings '(("Good" . :good)
+                               ("Easy" . :easy)
+                               ("Hard" . :hard)
+                               ("Again" . :again))))
+                (alist-get (completing-read "Rate:" ratings nil t)
+                           ratings nil nil #'equal)))))
   
   (org-ilm--review-next))
 
@@ -228,24 +236,21 @@ Return t if already ready."
 (defvar org-ilm--review-update-schedule t)
 
 (defun org-ilm--review-next ()
-  (when org-ilm--review-data
+  (when org-ilm--review
     ;; Update priority and schedule
-    (cl-destructuring-bind
-        (&key buffer id element rating start &allow-other-keys)
-        org-ilm--review-data
+    (let* ((element (org-ilm--review-element))
+           duration)
       
       (when org-ilm--review-update-schedule
-        (let (duration)
-          (when start
-            (let* ((end (current-time))
-                   (diff (float-time (time-subtract end start)))
-                   (minutes (/ diff 60.0)))
-              (setq duration minutes)))
-          
-          (org-ilm--element-review
-           (org-ilm-element--type element)
-           element duration :rating rating)
-          )))
+        (when-let* ((start (oref org-ilm--review start))
+                    (end (current-time))
+                    (diff (float-time (time-subtract end start)))
+                    (minutes (/ diff 60.0)))
+          (setq duration minutes))
+        
+        (org-ilm--element-review
+         (org-ilm-element--type element)
+         element duration :rating (oref org-ilm--review rating))))
     
     (let ((element (org-ilm--queue-pop)))
       
@@ -268,105 +273,83 @@ Return t if already ready."
 (defun org-ilm-review-open-current ()
   "Open the attachment of the element currently being reviewed."
   (interactive)
-  (let ((buf (plist-get org-ilm--review-data :buffer)))
-    (if (and org-ilm--review-data (buffer-live-p buf))
+  (let ((buf (oref org-ilm--review buffer)))
+    (if-let* ((buf (and org-ilm--review (oref org-ilm--review buffer)))
+              (_ (buffer-live-p buf)))
         (switch-to-buffer buf)
-      ;; Setup current element again if that data somehow lost. Mainly for when the
-      ;; buffer is killed, it needs to be setup again. The setup function doesn't
-      ;; change the queue or anything, so its safe to call it again.
+      ;; Setup current element again if that data somehow lost. Mainly for when
+      ;; the buffer is killed, it needs to be setup again. The setup function
+      ;; doesn't change the queue or anything, so its safe to call it again.
       (org-ilm--review-setup-current-element)
       (org-ilm--review-open-current-element))))
 
 (defun org-ilm--review-setup-current-element ()
   "Setup the element about to be reviewed.
 
-The main job is to prepare the variable `org-ilm--review-data', which
+The main job is to prepare the variable `org-ilm--review', which
 needs the attachment buffer."
   (cl-assert (not (org-ilm--queue-empty-p)))
 
   (let* ((element (org-ilm--queue-head))
-         (id (org-ilm-element--id element))
-         attachment-buffer)
+         (id (org-ilm-element--id element)))
 
+    ;; Create this here already so that attachment buffers can use it when
+    ;; setting up for review.
+    (setq org-ilm--review
+          (make-org-ilm-review
+           :id (oref element id)
+           :type (oref element type)
+           :start (current-time)))
+    
     (org-ilm--org-with-point-at id
-      (setq attachment-buffer
-            ;; dont yet switch to the buffer, just return it so we can do some
+      (setf (oref org-ilm--review buffer)
+            ;; Don't yet switch to the buffer, just return it so we can do some
             ;; processing first.
             (save-window-excursion
               (org-ilm--attachment-open :no-error t))))
 
     ;; Prepare the attachment buffer if exists
-    (when attachment-buffer
-      (with-current-buffer attachment-buffer
+    (when (oref org-ilm--review buffer)
+      (with-current-buffer (oref org-ilm--review buffer)
 
         ;; Ask to end the review when killing the buffer
         (add-hook 'kill-buffer-hook
                   #'org-ilm--review-confirm-quit
                   nil t)
 
-        ;; We update the buffer-local `org-ilm--data' (see
-        ;; `org-ilm--attachment-prepare-buffer') with a start time. This is used
-        ;; to calculate the new priority.
-        ;; (org-ilm--attachment-ensure-data-object)
-        ;; (setf (plist-get org-ilm--data :start) (current-time))
-
-        ;; TODO Run hook here so that individual components can run their own
-        ;; preparation without doing it all here.
-
-        ;; If card, hide clozes
-        (when (org-ilm-element--card-p element)
-          (org-ilm--card-hide-clozes)
-
-          ;; PDF clozes
-          (when (org-ilm--pdf-mode-p)
-            (pdf-view-redisplay)
-            (add-hook 'org-ilm-review-reveal-hook
-                      (lambda ()
-                        ;; TODO Need a stupid wait here, fix
-                        (run-at-time .1 nil 'pdf-view-redisplay))
-                      nil 'local)))
-          ))
-
-    (setq org-ilm--review-data
-          (list :element element
-                :id (org-ilm-element--id element)
-                :buffer attachment-buffer
-                :start (current-time)))))
+        ;; Individual attachment types can run their preparation by attaching to
+        ;; this hook. Mainly for hiding clozes.
+        (run-hooks 'org-ilm-review-prepare-hook)))))
 
 (defun org-ilm-review-reveal ()
   "Reveal the cloze contents of the current element."
   (interactive)
   (run-hooks 'org-ilm-review-reveal-hook)
-  (setf (plist-get org-ilm--review-data :card-revealed) t
+  (setf (oref org-ilm--review card-revealed) t
         header-line-format (org-ilm--review-header-build)))
 
 (defun org-ilm--review-open-current-element ()
   "Open and prepare the attachment buffer of the element being reviewed."
-  (let ((buffer (plist-get org-ilm--review-data :buffer)))
-    (if buffer
-        (with-current-buffer (switch-to-buffer buffer)
-          (setq header-line-format
-                (org-ilm--review-header-build)))
-      ;; No attachment, simply go to the element in the collection
-      (org-ilm--org-goto-id (plist-get org-ilm--review-data :id))
-      (message "No attachment found for element"))))
+  (if-let ((buffer (oref org-ilm--review buffer)))
+      (with-current-buffer (switch-to-buffer buffer)
+        (setq header-line-format (org-ilm--review-header-build)))
+    
+    ;; No attachment, simply go to the element in the collection
+    (org-ilm--org-goto-id (oref org-ilm--review id))
+    (message "No attachment found for element")))
 
 (defun org-ilm--review-cleanup-current-element ()
   "Clean up the element being reviewed, in preparation for the next element."
-  (when-let ((buffer (plist-get org-ilm--review-data :buffer))
-             (element (plist-get org-ilm--review-data :element)))
+  (when-let ((buffer (and org-ilm--review (oref org-ilm--review buffer))))
     (with-current-buffer buffer
-      (when (org-ilm-element--card-p element)
-        ;; TODO Clean up card overlays
-        ;; (org-srs-item-cloze-remove-overlays (point-min) (point-max))
-        )
+      (run-hooks 'org-ilm-review-clean-hook)
       (setq header-line-format nil)
       (remove-hook 'kill-buffer-hook #'org-ilm--review-confirm-quit t))
     ;; I know it doesn't make sense to clean the buffer then kill it, but better
     ;; have the cleaning up code ready in case i want an option later to not
     ;; kill the buffer
     (kill-buffer buffer))
-  (setq org-ilm--review-data nil))
+  (setq org-ilm--review nil))
 
 ;;;; Buffer header 
 
@@ -383,9 +366,8 @@ needs the attachment buffer."
 
 (defun org-ilm--review-header-build ()
   "Build the header string of the attachment currently being reviewed."
-  (let* ((element (plist-get org-ilm--review-data :element))
-         (card-p (org-ilm-element--card-p element))
-         (card-revealed (plist-get org-ilm--review-data :card-revealed)))
+  (let ((card-p (org-ilm--review-card-p))
+        (card-revealed (oref org-ilm--review card-revealed)))
     (concat
      (propertize "Ilm Review" 'face '(:weight bold :height 1.0))
      "   "
@@ -432,8 +414,7 @@ needs the attachment buffer."
       (message "Minimum postpone date should be tomorrow")
       (sleep-for 1.))
     (org-ilm-element-set-schedule
-     (org-ilm--element-by-id (plist-get org-ilm--review-data :id))
-     date)
+     (org-ilm--review-element) date)
     (let ((org-ilm--review-update-schedule nil))
       (org-ilm--review-next))))
 
@@ -441,7 +422,7 @@ needs the attachment buffer."
   "Apply done on current element."
   (interactive)
   (cl-assert (org-ilm-reviewing-p))
-  (org-ilm--org-with-point-at (plist-get org-ilm--review-data :id)
+  (org-ilm--org-with-point-at (oref org-ilm--review id)
     ;; `org-ilm-element-done' already checks if we are reviewing this element,
     ;; and if so move on to the next element.
     (call-interactively #'org-ilm-element-done)))
@@ -449,12 +430,12 @@ needs the attachment buffer."
 (defun org-ilm-review-open-collection ()
   (interactive)
   (cl-assert (org-ilm-reviewing-p))
-  (org-ilm--org-goto-id (plist-get org-ilm--review-data :id)))
+  (org-ilm--org-goto-id (oref org-ilm--review id)))
 
 (defun org-ilm-review-open-attachment ()
   (interactive)
   (cl-assert (org-ilm-reviewing-p))
-  (if-let ((buf (plist-get org-ilm--review-data :buffer)))
+  (if-let ((buf (oref org-ilm--review buffer)))
       (switch-to-buffer buf)
     (user-error "Element has no buffer!")))
 
@@ -466,7 +447,7 @@ needs the attachment buffer."
    (:info*
    (lambda ()
      (propertize
-      (org-ilm-element--title (plist-get org-ilm--review-data :element))
+      (org-ilm-element--title (org-ilm--review-element))
       'face '(:slant italic))))]
 
   [

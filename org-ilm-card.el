@@ -144,8 +144,8 @@ concept properties."
               (fsrs-make-card
                :step        (org-ilm--card-step-from-log scheduler review-log)
                :state       (intern (org-entry-get nil org-ilm-property-card-state))
-               :stability   (string-to-number (org-entry-get nil org-ilm-property-card-stability))
-               :difficulty  (string-to-number (org-entry-get nil org-ilm-property-card-difficulty))
+               :stability   (-some-> (org-entry-get nil org-ilm-property-card-stability) string-to-number)
+               :difficulty  (-some-> (org-entry-get nil org-ilm-property-card-difficulty) string-to-number)
                :last-review (org-ilm-log-review--timestamp last-review)
                ;; Due date should be "artificial" one (potentially manually
                ;; edited), not the true date as scheduled in previous review, as

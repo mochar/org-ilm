@@ -871,7 +871,8 @@ buffer-local `pdf-view--hotspot-functions'."
            ((eq el-type 'card)
             (when (and self-p
                        (org-ilm-reviewing-p)
-                       (not (plist-get org-ilm--review-data :card-revealed)))
+                       org-ilm--review
+                       (not (oref org-ilm--review card-revealed)))
               (setq alpha 1))
             (setq color cloze-color))
            ((eq el-type 'material)
@@ -1529,6 +1530,7 @@ With prefix arg, use mouse position as bottom cutoff point."
 
 ;;;; Setup
 
+;; Setup on ilm minor mode 
 (defun org-ilm--pdf-ilm-hook ()
   (cond
    (org-ilm-global-minor-mode
@@ -1540,19 +1542,41 @@ With prefix arg, use mouse position as bottom cutoff point."
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-ilm-hook)
 
+;; Setup individual ilm pdf buffers
 (defun org-ilm--pdf-ilm-after-attachment-setup-hook (buf)
   (when (buffer-live-p buf)
     (with-current-buffer buf
+      ;; Refresh pdf highlights when an element has been deleted
       (letrec ((hook (lambda (&rest r)
                        (if (buffer-live-p buf)
                            (with-current-buffer buf
                              (org-ilm--pdf-highlights-refresh))
                          (remove-hook 'org-ilm-element-delete-hook hook)))))
         (when (org-ilm--pdf-mode-p)
-          (add-hook 'org-ilm-element-delete-hook hook))))))
+          (add-hook 'org-ilm-element-delete-hook hook)))
+
+      )))
 
 (add-hook 'org-ilm-attachment-after-setup-hook
           #'org-ilm--pdf-ilm-after-attachment-setup-hook)
+
+;; Hide clozes during review
+(defun org-ilm--pdf-review-prepare-hook ()
+  (when (and (org-ilm--pdf-mode-p) (org-ilm--review-card-p))
+    (run-at-time .1 nil #'pdf-view-redisplay)))
+
+(add-hook 'org-ilm-review-prepare-hook
+          #'org-ilm--pdf-review-prepare-hook)
+
+;; Show clozes after review rating
+(defun org-ilm--pdf-review-reveal-hook ()
+  (when (org-ilm--pdf-mode-p)
+  ;; TODO Need a stupid wait here, fix
+    (run-at-time .1 nil #'pdf-view-redisplay)))
+
+(add-hook 'org-ilm-review-reveal-hook
+          #'org-ilm--pdf-review-reveal-hook)
+
     
 ;;; Footer
 

@@ -405,7 +405,8 @@ COLLECTION specifies in which queue to look at."
         ;; When this is the element being reviewed, move on to review the next
         ;; element in the queue.
         (when (and (org-ilm-reviewing-p)
-                   (equal (plist-get org-ilm--review-data :id) (org-ilm-element--id element)))
+                   org-ilm--review
+                   (equal (oref org-ilm--review id) (org-ilm-element--id element)))
           (let ((org-ilm--review-update-schedule nil))
             (org-ilm--review-next)))
         ))))

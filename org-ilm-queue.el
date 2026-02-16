@@ -541,7 +541,8 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
 (cl-defun org-ilm--queue-pop (&key buffer)
   "Remove the top most element in the queue."
   (org-ilm-with-queue-buffer buffer
-    (org-ilm-queue--pop org-ilm-queue)))
+    (org-ilm-queue--pop org-ilm-queue)
+    (org-ilm-queue-revert)))
 
 ;;;; Queue building
 
