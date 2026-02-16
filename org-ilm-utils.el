@@ -201,7 +201,7 @@ The returned function can be used to call `remove-hook' if needed."
          (text (org-link-display-format text)) ;; Remove org links
          (text (replace-regexp-in-string org-footnote-re "" text)) ;; Remove footnotes (errors otherwise (from ox.el))
          (text (string-trim text))) ;; Trim whitespace
-    (substring text 0 (min 50 (length text)))))
+    (substring text 0 (min 70 (length text)))))
 
 (defun org-ilm--buffer-file-name ()
   "Like `buffer-file-name' but support indirect buffers."

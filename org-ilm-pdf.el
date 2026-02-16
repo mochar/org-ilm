@@ -55,22 +55,6 @@ This is done by converting the area to an image first. Note that this will likel
   :type 'number
   :group 'org-ilm-pdf)
 
-(defconst org-ilm--pdf-output-types
-  '((virtual . "PDF (virtual)")
-    (text . "Text")
-    (image . "Image")
-    (org . "Org (Marker)")))
-
-(defconst org-ilm--pdf-extract-options
-  '((page . "Page")
-    (region . "Region")
-    (section . "Section")))
-
-(defconst org-ilm--pdf-extract-option-to-types
-  '((page . (virtual text image org))
-    (region . (virtual text image org))
-    (section . (virtual text org))))
-
 ;;;; Utilities
 
 (defun org-ilm--pdf-mode-assert ()
@@ -428,9 +412,7 @@ PDF page."
            (push end pages)))))
     (let ((min (apply #'min pages))
           (max (apply #'max pages)))
-      (if (= min max)
-          (cons min nil)
-        (cons min max)))))
+      (cons min max))))
       
 (defun org-ilm--pdf-spec-is-valid-rect (rect)
   "Return non-nil if RECT is list of length 4, each values 0 <= x <= 1."
@@ -524,7 +506,13 @@ PDF page."
           
           (t
            (error "PDF spec contains invalid part: %s" part)))) ;; while
-      (make-org-ilm-pdf-spec :parts (reverse parts) :path pdf-path))))
+      (make-org-ilm-pdf-spec
+       :parts (reverse parts)
+       :single-page-p (and (= (length parts) 1)
+                           (or
+                            (org-ilm-pdf-page-p (car parts))
+                            (= (oref (car parts) begin) (oref (car parts) end))))
+       :path pdf-path))))
 
 (defun org-ilm--pdf-spec-to-string (spec)
   (cl-assert (org-ilm-pdf-spec-p spec))
@@ -576,6 +564,92 @@ PDF page."
   (-> (org-ilm--pdf-spec-parse '(- 2 (4 (0.1 0.2 0.3 0.4) ((.1 .1 .1 .1) (.2 .2 .2 .2)))))
       org-ilm--pdf-spec-to-string)
   )
+
+(defun org-ilm--pdf-spec-capture-text (spec)
+  "Return text within SPEC region."
+  (cl-assert (org-ilm-pdf-spec-p spec))
+  (let ((selections (seq-keep (lambda (p)
+                                (when (and (org-ilm-pdf-page-p p)
+                                           (oref p selections))
+                                  (cons (oref p number) (oref p selections))))
+                              (oref spec parts)))
+        (pdf-buf (current-buffer))
+        (first-page (org-ilm--pdf-page-normalized 1)))
+    (cond
+     (selections
+      (with-temp-buffer
+        (dolist (page-selections selections)
+          (dolist (selection (reverse (cdr page-selections)))
+            (insert
+             (with-current-buffer pdf-buf
+               (pdf-info-gettext
+                (1+ (- (car page-selections) first-page))
+                (org-ilm--pdf-region-denormalized selection))))))
+        (buffer-string)))
+     (t
+      (with-temp-buffer
+        (dolist (part (oref spec parts))
+          (cl-etypecase part
+            (org-ilm-pdf-page
+             (insert
+              (with-current-buffer pdf-buf
+                (pdf-info-gettext
+                 (1+ (- (oref part number) first-page))
+                 (org-ilm--pdf-region-denormalized
+                  (or (oref part area) '(0 0 1 1)))
+                 nil pdf-buf))))
+            (org-ilm-pdf-range
+             (dolist (page (number-sequence (oref part begin) (oref part end)))
+               (insert
+                (with-current-buffer pdf-buf
+                  (pdf-info-gettext
+                   (1+ (- page first-page))
+                   (org-ilm--pdf-region-denormalized
+                    '(0 0 1 1))
+                   nil pdf-buf)))))))
+        (buffer-string))))))
+
+(defun org-ilm--pdf-spec-capture-first-text (spec)
+  "Return text of first selection or page within SPEC region."
+  (cl-assert (org-ilm-pdf-spec-p spec))
+  (let ((page-with-selection (seq-find (lambda (p)
+                                         (and (org-ilm-pdf-page-p p)
+                                              (oref p selections)))
+                                       (oref spec parts)))
+        (pdf-buf (current-buffer))
+        (first-page (org-ilm--pdf-page-normalized 1)))
+    (cond
+     (page-with-selection
+      (with-temp-buffer
+        (insert
+         (with-current-buffer pdf-buf
+           (pdf-info-gettext
+            (1+ (- (oref page-with-selection number) first-page))
+            (org-ilm--pdf-region-denormalized
+             (car (last (oref page-with-selection selections)))))))
+        (buffer-string)))
+     (t
+      (with-temp-buffer
+        (let ((part (car (oref spec parts))))
+          (cl-etypecase part
+            (org-ilm-pdf-page
+             (insert
+              (with-current-buffer pdf-buf
+                (pdf-info-gettext
+                 (1+ (- (oref part number) first-page))
+                 (org-ilm--pdf-region-denormalized
+                  (or (oref part area) '(0 0 1 1)))
+                 nil pdf-buf))))
+            (org-ilm-pdf-range
+             (insert
+              (with-current-buffer pdf-buf
+                (pdf-info-gettext
+                 (1+ (- (oref part begin) first-page))
+                 (org-ilm--pdf-region-denormalized
+                  '(0 0 1 1))
+                 nil pdf-buf))))))
+        (buffer-string))))))
+
 
 ;;;; Commands
 
@@ -1051,242 +1125,155 @@ See also `org-ilm-pdf-convert-org-respect-area'."
             :on-success
             (lambda (proc buf id) (funcall on-success "org")))))))))
 
-;;;; Extract
+;;;; Capture
 
-(defun org-ilm--pdf-extract-prompt-for-output-type (extract-option &optional prompt)
-  "Prompt user to select output type given the extract option."
-  (let ((options (seq-filter
-                  (lambda (option)
-                    (member (cdr option)
-                            (assoc extract-option org-ilm--pdf-extract-option-to-types)))
-                  (org-ilm--invert-alist org-ilm--pdf-output-types))))
-    (if (= 1 (length options))
-        (cdr (car options))
-      (cdr (assoc (completing-read (or prompt "Extract as: ") options nil t) options)))))
+(defun org-ilm--pdf-capture-interactive (output-type &optional card-p)
+  (if (org-ilm--pdf-interactive-capture-p)
+      (org-ilm--pdf-capture-spec
+       output-type
+       (org-ilm--pdf-interactive-capture-spec)
+       card-p)
+    (error "No interactive capture active")))
 
-(cl-defmethod org-ilm--extract (&context (ilm-attachment pdf))
-  (cond
-   ((org-ilm--pdf-interactive-capture-p)
-    (org-ilm-pdf-section-extract
-     (org-ilm--pdf-extract-prompt-for-output-type
-      'section "Extract custom selection as: ")))
-   ((pdf-view-active-region-p)
-    (org-ilm-pdf-region-extract
-     (org-ilm--pdf-extract-prompt-for-output-type
-      'region "Extract region as: ")))
-   (t
-    (org-ilm-pdf-section-extract
-     (org-ilm--pdf-extract-prompt-for-output-type
-      'section "Extract section as: "))))
-  (org-ilm--pdf-highlights-refresh))
+(defun org-ilm--pdf-extract-outline-section (output-type)
+  (if-let ((section (org-ilm--pdf-outline-page-sections)))
+      (org-ilm--pdf-capture-spec
+       output-type
+       (alist-get 'spec section)
+       nil
+       (alist-get 'title section))
+    (error "No outline section available")))
 
-(defun org-ilm-pdf-page-extract (output-type)
-  "Turn PDF page into an extract."
-  (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'page)))
-  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
-    (let ((current-page (pdf-view-current-page))
-          (current-page-real (org-ilm--pdf-page-normalized))
-          (extract-id (org-id-new)))
-
-      (pcase output-type
-        ('virtual
-         (let ((excerpt (org-ilm--generate-text-snippet
-                         (pdf-info-gettext current-page '(0 0 1 1)))))
-           (org-ilm--capture-capture
-            'material
-            :parent id
-            :title (format "Page %s%s" current-page-real
-                           (if excerpt (concat ": " excerpt) ""))
-            :props (list :ILM_PDF current-page-real))))
-        ('text
-         (let* ((text (pdf-info-gettext current-page '(0 0 1 1) nil)))
-           (org-ilm--capture-capture
-            'material
-            :parent id
-            :content text
-            :props (list :ILM_PDF current-page-real)
-            :ext "org")))
-        ('image
-         (let* ((img-path (org-ilm--pdf-image-export extract-id)))
-           (org-ilm--capture-capture
-            'material
-            :parent id
-            :file img-path
-            :title (format "Page %s" current-page-real)
-            :id extract-id
-            :method 'mv
-            :ext t
-            :props (list :ILM_PDF current-page-real))))
-        ('org
-         (org-ilm--capture-capture
-          'material
-          :parent id
-          :title (format "Page %s" current-page-real)
-          :id extract-id
-          :ext "org"
-          :props (list :ILM_PDF current-page-real)
-          :on-success
-          (lambda (&rest _)
-            (org-ilm--pdf-convert-attachment-to-org
-             pdf-path
-             (1- current-page-real)
-             extract-id
-             :on-success
-             (lambda (proc buf id) (message "Conversion finished."))))))))))
-
-(defun org-ilm-pdf-region-extract (output-type &optional card-p)
-  "Turn selected PDF region into an extract."
-  (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'region)))
-  (cl-assert (pdf-view-active-region-p) nil "No active region")
-  (when (and card-p (not (eq output-type 'virtual)))
-    (error "Can only create virtual PDF card extracts"))
-  
-  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
-    (let* ((extract-id (org-id-new))
-           (current-page (pdf-view-current-page))
-           (current-page-real (org-ilm--pdf-page-normalized))
-           (region (org-ilm--pdf-active-region))
-           (region-normalized (org-ilm--pdf-region-normalized region))
-           (region-text (car (pdf-view-active-region-text)))
-           (pdf-buffer (current-buffer))
-           (title
-            (format "Page %s region%s"
-                    current-page-real
-                    (if region-text
-                        (concat ": " (org-ilm--generate-text-snippet region-text))
-                      "")))
-           (capture-data
-            (list
-             :title title
-             :parent id
-             :id extract-id
-             ;; Add PDF region so that it can be rendered in pdf page even
-             ;; when extracting as eg image
-             :props (list :ILM_PDF (list current-page-real region-normalized))))
-           capture-on-success)
-
-      (when (org-ilm--pdf-region-below-min-size-p current-page region-normalized)
-        (user-error "Region smaller than minimum size. Try extracting as text or image."))
-
-      (pcase output-type
-        ('virtual)
-        ('text
-         (setf (plist-get capture-data :content) region-text
-               (plist-get capture-data :ext) "org"))
-        ('image
-         (let ((file (org-ilm--pdf-image-export extract-id :region region)))
-           (setf (plist-get capture-data :file) file
-                 (plist-get capture-data :method) 'mv
-                 (plist-get capture-data :ext) t)))
-        ('org
-         (setf (plist-get capture-data :ext) "org")
-         (setq capture-on-success
-               (lambda ()
-                 (org-ilm--image-convert-attachment-to-org
-                  ;; TODO this shouldnt be the normalized region i think
-                  (org-ilm--pdf-image-export
-                   extract-id :region region-normalized :dir attach-dir)
-                  extract-id))))
-        (_ (error "Unrecognized output type")))
-
-      ;; Temporary disable `org-link-parameters' which is an overkill way to
-      ;; deal with the following problem. When org-pdftools is used,
-      ;; `org-pdftools-setup-link' is called, which adds a custom link in
-      ;; `org-link-parameters' that detects an org capture in a pdf buffer, and
-      ;; then creates a text underline highlight automatically. This is
-      ;; undesired, so this turns it off. The backtrace is:
-      ;;   org-pdftools-store-link()
-      ;;   org-link--try-link-store-functions(nil)
-      ;;   org-store-link(nil)
-      (let ((org-link-parameters nil))
-        (apply #'org-ilm--capture-capture
-               (if card-p 'card 'material)
-               :on-success
-               (lambda (&rest _)
-                 (when capture-on-success
-                   (funcall capture-on-success))
-                 (org-ilm--pdf-captures 'reparse)
-                 (pdf-view-deactivate-region)
-                 (pdf-view-redisplay)
-                 (when (eq major-mode 'pdf-virtual-view-mode)
-                   (org-ilm-pdf-virtual-refresh)))
-               capture-data)))))
-
-(defun org-ilm-pdf-section-extract (output-type &optional card-p)
-  "Extract current section of outline."
-  (interactive (list (org-ilm--pdf-extract-prompt-for-output-type 'section)))
-
+(defun org-ilm--pdf-capture-spec (output-type spec &optional card-p title)
   (when (and card-p (not (eq output-type 'virtual)))
     (error "Can only create virtual PDF clozes"))
 
   (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
     (let* ((extract-id (org-id-new))
-           (pdf-buffer (current-buffer))
-           title spec)
+           (pdf-buffer (current-buffer)))
 
-      (cond-let*
-        ((org-ilm--pdf-interactive-capture-p)
-         (setq spec (org-ilm--pdf-interactive-capture-spec)
-               title (read-string "Title: ")))
-        ([section (org-ilm--pdf-outline-page-sections)]
-         (setq spec (alist-get 'spec section)
-               title (alist-get 'title section)))
-        (t (user-error "No outline or section data available")))
-
-      ;; TODO When no title use page range
-      (setq title (concat "Section: " title))
+      (unless title
+        (let* ((first-text (org-ilm--pdf-spec-capture-first-text spec))
+               (default (org-ilm--generate-text-snippet first-text)))
+          (setq title (read-string "Title: " default))))
 
       (pcase output-type
         ('virtual
          (org-ilm--capture-capture
           (if card-p 'card 'material)
           :parent id
+          :id extract-id
           :title title
-          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec)))
-         (when (org-ilm--pdf-interactive-capture-p)
-           (org-ilm--pdf-highlights 'reparse)
-           (org-ilm--pdf-interactive-capture-reset)))
+          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))
         ('text
-         ;; TODO This currently extracts the actual PDF data lol
-         (with-temp-buffer
-           (if (= (length range) 2)
-               (insert (pdf-info-gettext (car range) (cdr range) nil pdf-buffer) "\n")
-             (let* ((range-begin (car range))
-                    (range-end (cdr range))
-                    (page-begin (car range-begin))
-                    (page-end (car range-end)))
-               (dolist (page (number-sequence page-begin page-end))
-                 (insert (pdf-info-gettext
-                          page
-                          (cond
-                           ((= page page-begin) (cdr range-begin))
-                           ((= page page-end) (cdr range-end))
-                           (t '(0 0 1 1)))
-                          'word pdf-buffer)
-                         "\n"))))
-
-           (org-ilm--capture-capture
-            'material
-            :parent id :content (buffer-string) :ext "org"
-            :title title)))
-        ('org
+         (org-ilm--capture-capture
+          (if card-p 'card 'material)
+          :parent id
+          :id extract-id
+          :title title
+          :content (org-ilm--pdf-spec-capture-text spec)
+          :ext "org"
+          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))
+        ('image
+         (let* ((page (car (oref spec parts))))
+           (when (or (> (length (oref spec parts)) 1)
+                     (not (org-ilm-pdf-page-p page)))
+             (user-error "Cannot extract multiple pages or selections to an image"))
+           (let* ((region (or (seq-reduce
+                               (lambda (box rect)
+                                 (list
+                                  (min (nth 0 box) (nth 0 rect))
+                                  (min (nth 1 box) (nth 1 rect))
+                                  (max (nth 2 box) (nth 2 rect))
+                                  (max (nth 3 box) (nth 3 rect))))
+                               (oref page selections)
+                               (car (oref page selections)))
+                              (oref page area)
+                              '(0 0 1 1)))
+                  (region (org-ilm--pdf-region-denormalized region))
+                  (file (org-ilm--pdf-image-export extract-id :region region)))
+             (org-ilm--capture-capture
+              'material
+              :parent id
+              :id extract-id
+              :title title
+              :file file
+              :method 'mv
+              :ext t
+              :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))))
+        ('marker
          (org-ilm--capture-capture
           'material
           :parent id
           :id extract-id
-          :ext "org"
           :title title
+          :ext "org"
+          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))
           :on-success
           (lambda (&rest _)
             (org-ilm--pdf-convert-attachment-to-org
-             pdf-path
-             (cons (1- (alist-get 'page section))
-                   (1- (alist-get 'next-page section)))
+             (org-ilm--pdf-path)
+             (pcase-let ((`(,beg . ,end) (org-ilm-pdf-spec--range spec)))
+               (if (= beg end)
+                   (1- beg)
+                 (cons (1- beg) (1- end))))
              extract-id
              :on-success
              (lambda (proc buf id) (message "Conversion finished.")))))))
 
       (org-ilm--pdf-interactive-capture-reset))))
+
+(defconst org-ilm--pdf-capture-output-formats
+  '((virtual . "PDF (virtual)")
+    (text    . "Text")
+    (image   . "Image")
+    (marker  . "Org (Marker)")))
+
+(defun org-ilm--pdf-capture-prompt-for-format (formats prompt)
+  "Prompt user to select output format given the extract option."
+  (let ((options (seq-map
+                  (lambda (format)
+                    (let ((c (assoc format org-ilm--pdf-capture-output-formats)))
+                      (cons (cdr c) (car c))))
+                  formats)))
+    (if (= 1 (length options))
+        (cdr (car options))
+      (cdr (assoc (completing-read prompt options nil t) options)))))
+
+(defun org-ilm--pdf-capture (&optional card-p)
+  (let ((action-str (if card-p "Cloze" "Extract")))
+    (cond
+     ((org-ilm--pdf-interactive-capture-p)
+      (org-ilm--pdf-capture-interactive
+       (if card-p
+           'virtual
+         (org-ilm--pdf-capture-prompt-for-format
+          '(virtual text image marker)
+          (concat action-str " custom selection as: ")))
+       card-p))
+     ((pdf-view-active-region-p)
+      (org-ilm-pdf-select-region 'no-redisplay)
+      (org-ilm--pdf-capture-interactive
+       (if card-p
+           'virtual
+         (org-ilm--pdf-capture-prompt-for-format
+          '(virtual text image marker)
+          (concat action-str " custom selection as: ")))
+       card-p))
+     (t
+      (when card-p
+        (user-error "Cannot cloze without selection"))
+      (org-ilm--pdf-extract-outline-section
+       (org-ilm--pdf-capture-prompt-for-format
+          '(virtual text image marker)
+        (concat action-str " custom outline section as: ")))))
+    (org-ilm--pdf-highlights-refresh)))
+
+(cl-defmethod org-ilm--extract (&context (ilm-attachment pdf))
+  (org-ilm--pdf-capture))
+
+(cl-defmethod org-ilm--cloze (&context (ilm-attachment pdf))
+  (org-ilm--pdf-capture 'card-p))
 
 
 ;;;; Split
@@ -1318,19 +1305,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
              :title (concat "Section: " (alist-get 'title section))
              :props (list :ILM_PDF (org-ilm--pdf-spec-to-string (alist-get 'spec section))))))))))
 
-;;;; Cloze
 
-(cl-defmethod org-ilm--cloze (&context (ilm-attachment pdf))
-  (cond
-   ((org-ilm--pdf-interactive-capture-p)
-    (org-ilm-pdf-section-extract 'virtual 'card-p))
-   ((pdf-view-active-region-p)
-    ;; (org-ilm-pdf-region-extract 'virtual 'card-p)
-    (org-ilm-pdf-select-region 'no-redisplay)
-    (org-ilm-pdf-section-extract 'virtual 'card-p))
-   (t
-    (user-error "Need a selection to cloze")))
-  (org-ilm--pdf-highlights-refresh))
 
 
 ;;;; Interactive capture
@@ -1338,12 +1313,6 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 ;; Interactive capture means user builds up interactively what page (regions)
 ;; they want to extract. In addtion, multiple selections can be added to this
 ;; capture.
-;; Keybindings:
-;; - '[' -> Select current page as begin page
-;;          Region active: Limit to region area
-;;          Prefix: Point location defines area upper bound
-;; - ']' -> Same as "[" but for end page
-;; - '"' -> Add current selection regions to active selections
 
 (defface org-ilm-pdf-interactive-capture-face
   '((t :background "grey"))
@@ -1574,12 +1543,13 @@ With prefix arg, use mouse position as bottom cutoff point."
 (defun org-ilm--pdf-ilm-after-attachment-setup-hook (buf)
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (when (org-ilm--pdf-mode-p)
-        (add-hook 'org-ilm-element-delete-hook
-                  (lambda (&rest r)
-                    (when (buffer-live-p buf)
-                      (with-current-buffer buf
-                        (org-ilm--pdf-highlights-refresh)))))))))
+      (letrec ((hook (lambda (&rest r)
+                       (if (buffer-live-p buf)
+                           (with-current-buffer buf
+                             (org-ilm--pdf-highlights-refresh))
+                         (remove-hook 'org-ilm-element-delete-hook hook)))))
+        (when (org-ilm--pdf-mode-p)
+          (add-hook 'org-ilm-element-delete-hook hook))))))
 
 (add-hook 'org-ilm-attachment-after-setup-hook
           #'org-ilm--pdf-ilm-after-attachment-setup-hook)
