@@ -157,6 +157,10 @@ Optional OFFSET is added to the true count."
     (cl-assert (>= size 0) nil "OFFSET may not lead to negative size.")
     size))
 
+(defun ost-tree-empty-p (tree)
+  "Return t if TREE is empty."
+  (= (ost-size queue) 0))
+
 (defun ost-tree--rank-to-quantile (tree rank &optional offset)
   "Return the quantile of RANK in TREE.
 Optional OFFSET is added to the ost size for calculation."

@@ -875,7 +875,8 @@ A cloze is made automatically of the element at point or active region."
 
 (defun org-ilm--org-cloze-latex-preview-update-hook (overlay)
   (save-excursion
-    (goto-char (ov-beg overlay))
+    ;; (ov-beg) gives me a not found error on startup!!
+    (goto-char (overlay-start overlay))
     (when (org-ilm--card-cloze-match-around-point)
       (overlay-put overlay 'face 'org-ilm-cloze-content-face))))
 

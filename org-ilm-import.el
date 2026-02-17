@@ -135,7 +135,7 @@
 
 ;; (defun org-ilm-import-queue ()
 ;;   (interactive)
-;;   (let* ((buf (org-ilm--queue-buffers-select))
+;;   (let* ((buf (org-ilm--bqueue-buffers-select))
 ;;          (queue (with-current-buffer buf org-ilm-queue))
 ;;          (title (org-ilm-queue--name queue))
 ;;          (id (org-id-new))

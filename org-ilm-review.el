@@ -12,7 +12,7 @@
 (require 'org-clock)
 
 (require 'org-ilm-utils)
-;; (require 'org-ilm-queue)
+;; (require 'org-ilm-bqueue)
 ;; (require 'org-ilm-element)
 ;; (require 'org-ilm-pdf)
 ;; (require 'org-ilm-card)

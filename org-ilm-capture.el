@@ -17,7 +17,7 @@
 (require 'org-ilm-pqueue)
 (require 'org-ilm-element)
 (require 'org-ilm-collection)
-(require 'org-ilm-queue-view)
+(require 'org-ilm-bqueue-view)
 (require 'org-ilm-priority)
 (require 'ost)
 
@@ -434,7 +434,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
    (:info
     (lambda ()
       (let ((rank (nth 1 (org-ilm--capture-transient-values))))
-        (org-ilm-ost--position-format (org-ilm--pqueue) rank))))
+        (org-ilm-queue--position-format (org-ilm--pqueue) rank))))
    ("s" "Scheduled" "--scheduled="
     :transient transient--do-call
     :reader

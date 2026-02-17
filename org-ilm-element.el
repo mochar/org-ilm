@@ -34,8 +34,8 @@
 (require 'org-ilm-collection)
 (require 'org-ilm-schedule)
 (require 'org-ilm-pqueue)
-(require 'org-ilm-queue-view)
-(require 'org-ilm-ost)
+(require 'org-ilm-bqueue-view)
+(require 'org-ilm-bqueue)
 (require 'org-ilm-concept)
 (require 'ost)
 
@@ -148,6 +148,12 @@ If we are in...
   `(org-ilm--org-with-point-at (org-ilm-element--registry ,element)
      ,@body))
 
+(defun org-ilm--element-id (element-or-id)
+  "Returns id if element, else return it."
+  (if (org-ilm-element-p element-or-id)
+      (org-ilm-element--id element-or-id)
+    element-or-id))
+
 ;;;; Collection
 
 (defun org-ilm-element--collection-move (element new-collection &optional new-priority)
@@ -170,7 +176,7 @@ To safely include the children in the migration, call
         ;; nothing if the element does not exist in that queue. We try this
         ;; regardless if the element is "done" or not, in case the element is
         ;; done but somehow hasn't been removed from the queue before.
-        (org-ilm-pqueue--remove (org-ilm-element--pqueue element) id)
+        (org-ilm-queue--remove (org-ilm-element--pqueue element) id)
 
         ;; Remove the property to match the current state.
         (org-entry-delete nil org-ilm-property-collection)
@@ -178,12 +184,12 @@ To safely include the children in the migration, call
         ;; Now attempt to move to new priority queue.
         (condition-case err
             (let* ((pqueue   (org-ilm--pqueue new-collection))
-                   (exists-p (ost-tree-contains-p pqueue id)))
+                   (exists-p (org-ilm-queue--contains-p pqueue id)))
 
               (if done-p
                   ;; If for some reason the element is done AND it exists in the
                   ;; new collection's priority queue, make sure to remove it.
-                  (when exists-p (org-ilm-pqueue--remove pqueue id))
+                  (when exists-p (org-ilm-queue--remove pqueue id))
 
                 ;; Add to new priority queue
                 (unless new-priority 
@@ -193,8 +199,8 @@ To safely include the children in the migration, call
                                       (cdr current-priority)
                                       new-collection)))
                 (if exists-p
-                    (org-ilm-pqueue--move pqueue id new-priority)
-                  (org-ilm-pqueue--insert pqueue id new-priority)))
+                    (org-ilm-queue--move pqueue id new-priority)
+                  (org-ilm-queue--insert pqueue new-priority id)))
               
               ;; If inherited collection property matches new, no need to set
               ;; the property.
@@ -212,8 +218,8 @@ To safely include the children in the migration, call
            ;; being done and still present in the pqueue is a bug but may still
            ;; happen.
            (when (and current-priority (not done-p))
-             (org-ilm-pqueue--insert
-              (org-ilm--pqueue current-collection) id current-priority))
+             (org-ilm-queue--insert
+              (org-ilm--pqueue current-collection) current-priority id))
            ;; Put back property if it was there when we found it.
            (when property-collection
              (org-entry-put nil org-ilm-property-collection property-collection))
@@ -264,7 +270,8 @@ ELEMENT may be nil, in which case try to read it from point.
 COLLECTION specifies in which queue to look at."
   (unless element (setq element (org-ilm--element-from-context)))
   (cl-assert (org-ilm-element-p element))
-  (unless collection (org-ilm-element--collection element))
+  (unless collection
+    (setq collection (org-ilm-element--collection element)))
   (org-ilm-pqueue--priority
    (org-ilm--pqueue collection)
    (org-ilm-element--id element)
@@ -280,7 +287,7 @@ COLLECTION specifies in which queue to look at."
   (cdr (org-ilm-element--priority element)))
 
 (defun org-ilm-element--priority-formatted (element)
-  (org-ilm-ost--position-format
+  (org-ilm-queue--position-format
    (org-ilm-element--pqueue element)
    (org-ilm-element--priority element)))
 
@@ -435,7 +442,7 @@ COLLECTION specifies in which queue to look at."
           (org-ilm--log-log (org-ilm-element--type element) collection priority due :undone)
           (org-ilm--schedule :timestamp due)
           (org-todo 'none)
-          (org-ilm-pqueue--insert pqueue (org-ilm-element--id element) priority))))))
+          (org-ilm-queue--insert pqueue priority element))))))
 
 (defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
@@ -745,15 +752,15 @@ COLLECTION specifies in which queue to look at."
        (let* ((element org-ilm--element-transient-element)
               (children (org-ilm--element-query-children
                          element :return-type 'headline :include-self t :all-descendants t))
-              (queue-buffer (org-ilm--queue-completing-read nil t)))
+              (queue-buffer (org-ilm--bqueue-completing-read nil t)))
          (with-current-buffer queue-buffer
            (dolist (el children)
              (when-let ((id (org-element-property :ID el)))
-               (when (org-ilm-queue--contains-p org-ilm-queue id)
-                 (push id org-ilm--queue-marked-objects))))
+               (when (org-ilm-queue--contains-p org-ilm-pqueue id)
+                 (push id org-ilm--pqueue-marked-objects))))
            (org-ilm-queue-revert))
          (switch-to-buffer queue-buffer)))
-     :inapt-if-not org-ilm--queue-buffers)
+     :inapt-if-not org-ilm--bqueue-buffers)
     ]
    ]
 

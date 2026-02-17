@@ -17,7 +17,8 @@
 
 ;;;; Variables
 
-(defcustom org-ilm-queries nil
+(defcustom org-ilm-queries
+  '((outstanding . org-ilm--queries-query-outstanding))
   "Alist mapping query name to a function that returns an org-ql query."
   :type '(alist :key-type symbol :value-type function)
   :group 'org-ilm)
@@ -46,6 +47,7 @@ With HASH-TABLE-P, place each element in a hash table with ID as key."
         (let ((h (make-hash-table :test #'equal)))
           (org-ql-select files query
             :action (lambda ()
+                      ;; TODO this should just do org-id-get
                       (when-let* ((el (org-ilm--element-at-point))
                                   (id (org-ilm-element--id el)))
                         (puthash id el h))))
@@ -54,10 +56,12 @@ With HASH-TABLE-P, place each element in a hash table with ID as key."
         query
         :action #'org-ilm--element-at-point))))
 
-(defun org-ilm-query-buffer (query buffer &optional narrow)
+(defun org-ilm-query-buffer (query collection buffer &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
+  (unless (functionp query)
+    (setq query (cdr (assoc query org-ilm-queries))))
   (org-ql-select buffer
-    (funcall (cdr (assoc query org-ilm-queries)))
+    (funcall query collection)
     :action #'org-ilm--element-at-point
     :narrow narrow))
 
@@ -82,6 +86,10 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive concept
          (property org-ilm-property-collection collection :inherit t)
          (or (cl-loop for type in (or types org-ilm-element-types)
                       collect `(property ,org-ilm-property-type ,(symbol-name type))))))
+
+;; (org-ql--normalize-query `(ilm-element))
+;; (org-ql--normalize-query `(ilm-element "test") ())
+;; (org-ql--normalize-query `(ilm-element "test" (material card)))
   
 (defun org-ilm--queries-concepts (collection)
   `(ilm-element ,collection (concept)))
