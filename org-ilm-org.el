@@ -910,10 +910,11 @@ A cloze is made automatically of the element at point or active region."
     (while-let ((cloze (org-ilm--card-cloze-match-forward)))
       (delete-region (car (org-ilm-cloze-pos cloze))
                      (cdr (org-ilm-cloze-pos cloze)))
-      (insert (org-ilm--card-cloze-format-latex
+      (insert (org-ilm--card-format-latex
                (if reveal-p
                    (concat "$" (org-ilm-cloze-content cloze) "$")
-                 (concat "[\\dots]" (when hint (concat "(" hint ")")))))))
+                 (concat "[\\dots]" (when hint (concat "(" hint ")"))))
+               'org-ilm-cloze-content-face)))
     (setq latex (buffer-string)))
   
   (org-latex-preview-clear-overlays begin end)
@@ -980,6 +981,9 @@ A cloze is made automatically of the element at point or active region."
   (org-latex-preview-clear-overlays)
   (call-interactively #'org-latex-preview))
 
+(defun org-ilm--card-reveal-clozes ()
+  (org-ilm--card-remove-overlays))
+
 
 ;;;; Setup
 
@@ -1015,7 +1019,7 @@ A cloze is made automatically of the element at point or active region."
 ;; Show clozes after review rating
 (defun org-ilm--org-review-reveal-hook ()
   (when (eq major-mode 'org-mode)
-    nil))
+    (org-ilm--card-reveal-clozes)))
 
 (add-hook 'org-ilm-review-reveal-hook
           #'org-ilm--org-review-reveal-hook)
