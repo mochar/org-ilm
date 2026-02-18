@@ -731,9 +731,9 @@ COLLECTION specifies in which queue to look at."
      (lambda ()
        (interactive)
        (let* ((element org-ilm--element-transient-element)
-              (queue-buffer (org-ilm--queue-completing-read
+              (queue-buffer (org-ilm--bqueue-completing-read
                              (org-ilm-element--title element))))
-         (org-ilm--queue-insert element :buffer queue-buffer :exists-ok t)
+         (org-ilm--bqueue-insert element :buffer queue-buffer :exists-ok t)
          (with-current-buffer (switch-to-buffer queue-buffer)
            (org-ilm-queue-revert)))))
     ("qa" "Add all"

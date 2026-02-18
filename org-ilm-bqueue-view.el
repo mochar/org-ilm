@@ -132,7 +132,7 @@
                 'face 'highlight))))
          (page-info
           (with-slots (page page-size) org-ilm-bqueue
-            (when page-size
+            (when (and page-size (not (zerop (ost-size org-ilm-bqueue))))
               (format "(%s/%s)" (1+ page) (1+ (org-ilm-bqueue--page-max org-ilm-bqueue))))))
          (page-info-len (length (or page-info ""))))
     (setq header-line-format

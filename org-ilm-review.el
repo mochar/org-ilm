@@ -84,28 +84,28 @@ The attachment's buffer is current.")
   :interactive nil ;; shouldnt be a command
   (cond
    (org-ilm-review-mode
-    (when (null org-ilm-queue-active-buffer)
+    (when (null org-ilm-bqueue-active-buffer)
       (org-ilm-review-mode -1)
       (error "No active queue buffer"))
 
-    (with-current-buffer org-ilm-queue-active-buffer
+    (with-current-buffer org-ilm-bqueue-active-buffer
       ;; Add kill hook on queue buffer
       (add-hook 'kill-buffer-hook
                 #'org-ilm--review-confirm-quit nil t))
 
     ;; Quit review when the active queue changes
-    (add-hook 'org-ilm-queue-active-buffer-change-hook
+    (add-hook 'org-ilm-bqueue-active-buffer-change-hook
               #'org-ilm-review-quit))
    (t ;; Minor mode off
     ;; Remove kill buffer hooks
-    (when (and org-ilm-queue-active-buffer
-               (buffer-live-p org-ilm-queue-active-buffer))
-      (with-current-buffer org-ilm-queue-active-buffer
+    (when (and org-ilm-bqueue-active-buffer
+               (buffer-live-p org-ilm-bqueue-active-buffer))
+      (with-current-buffer org-ilm-bqueue-active-buffer
         (remove-hook 'kill-buffer-hook
                      #'org-ilm--review-confirm-quit
                      t)))
 
-    (remove-hook 'org-ilm-queue-active-buffer-change-hook
+    (remove-hook 'org-ilm-bqueue-active-buffer-change-hook
                  #'org-ilm-review-quit)
 
     (setq org-ilm--review nil))))
@@ -137,16 +137,16 @@ during review."
     (cl-return-from org-ilm-review-start))
 
   (when queue-buffer
-    (org-ilm-queue--set-active-buffer queue-buffer))
+    (org-ilm--bqueue-set-active-buffer queue-buffer))
 
-  (unless (or org-ilm-queue-active-buffer
-              (org-ilm--queue-select-active-buffer))
+  (unless (or org-ilm-bqueue-active-buffer
+              (org-ilm--bqueue-select-active-buffer))
     ;; TODO let user choose inactive one and make it active
     (user-error "No active queue buffer!"))
 
   ;; Make sure queue is not empty
-  (with-current-buffer org-ilm-queue-active-buffer
-    (when (org-ilm--queue-empty-p)
+  (with-current-buffer org-ilm-bqueue-active-buffer
+    (when (org-ilm--bqueue-empty-p)
       (user-error "Queue is empty!")))
 
   (when (yes-or-no-p "Start reviewing?")
@@ -252,7 +252,7 @@ Return t if already ready."
          (org-ilm-element--type element)
          element duration :rating (oref org-ilm--review rating))))
     
-    (let ((element (org-ilm--queue-pop)))
+    (let ((element (org-ilm--bqueue-pop)))
       
       ;; TODO Card might already be due, eg when rating again. So need to check the
       ;; new review time and add it back to the queue. Set a minimum position in
@@ -261,11 +261,11 @@ Return t if already ready."
     
     (org-ilm--review-cleanup-current-element))
   
-  (if (org-ilm--queue-empty-p)
+  (if (org-ilm--bqueue-empty-p)
       (progn
         (message "Finished reviewing queue!")
         (org-ilm-review-quit)
-        (switch-to-buffer org-ilm-queue-active-buffer))
+        (switch-to-buffer org-ilm-bqueue-active-buffer))
     (org-ilm--review-setup-current-element)
     (run-hooks 'org-ilm-review-next-hook)
     (org-ilm--review-open-current-element)))
@@ -288,9 +288,9 @@ Return t if already ready."
 
 The main job is to prepare the variable `org-ilm--review', which
 needs the attachment buffer."
-  (cl-assert (not (org-ilm--queue-empty-p)))
+  (cl-assert (not (org-ilm--bqueue-empty-p)))
 
-  (let* ((element (org-ilm--queue-head))
+  (let* ((element (org-ilm--bqueue-head))
          (id (org-ilm-element--id element)))
 
     ;; Create this here already so that attachment buffers can use it when

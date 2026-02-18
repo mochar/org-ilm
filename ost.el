@@ -159,7 +159,7 @@ Optional OFFSET is added to the true count."
 
 (defun ost-tree-empty-p (tree)
   "Return t if TREE is empty."
-  (= (ost-size queue) 0))
+  (= (ost-size tree) 0))
 
 (defun ost-tree--rank-to-quantile (tree rank &optional offset)
   "Return the quantile of RANK in TREE.
