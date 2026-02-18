@@ -40,8 +40,8 @@
   :doc "Base map of ilm queue, regardless if empty or not."
   "n" #'org-ilm-queue-next-element
   "p" #'org-ilm-queue-previous-element
-  "b" #'backward-char
-  "f" #'forward-char
+  "f" #'org-ilm-queue-next-page
+  "b" #'org-ilm-queue-previous-page
   "q" #'quit-window
   ;; "k" (lambda ()
   ;;       (interactive)
@@ -56,7 +56,7 @@
   "M-p" #'org-ilm-queue-previous-marked
   "r" #'org-ilm-queue-review
   "e" #'org-ilm-element-actions
-  "v" #'org-ilm-queue-sort
+  "v" #'org-ilm-queue-settings
   "m" #'org-ilm-queue-element-mark
   "<backspace>" #'org-ilm-queue-element-unmark-backwards
   "RET" #'org-ilm-queue-open-element
@@ -113,17 +113,33 @@
   (org-ilm--bqueue-object-id
    (cdr (org-ilm--bqueue-vtable-get-object))))
 
-(defun org-ilm--bqueue-set-header ()
-  (setq header-line-format
-        (concat
-         (when (eq (current-buffer) org-ilm-bqueue-active-buffer)
-           (if (org-ilm-reviewing-p)
-               (propertize "[R] " 'face 'error)
-             (propertize "[A] " 'face 'bold)))
-         (org-ilm-bqueue--name org-ilm-bqueue)
-         " ("
-         (symbol-name (org-ilm-bqueue--collection org-ilm-bqueue))
-         ")")))
+(defun org-ilm--bqueue-set-header (&optional title)
+  (let* ((left-segment
+          (or title
+              (concat
+               (cond
+                ((not (eq (current-buffer) org-ilm-bqueue-active-buffer))
+                 (propertize "[Q]" 'face 'bold))
+                ((org-ilm-reviewing-p)
+                 (propertize "[R]" 'face 'error))
+                (t
+                 (propertize "[A]" 'face 'bold)))
+               " "
+               (org-ilm-bqueue--name org-ilm-bqueue)
+               " "
+               (propertize
+                (symbol-name (org-ilm-bqueue--collection org-ilm-bqueue))
+                'face 'highlight))))
+         (page-info
+          (with-slots (page page-size) org-ilm-bqueue
+            (when page-size
+              (format "(%s/%s)" (1+ page) (1+ (org-ilm-bqueue--page-max org-ilm-bqueue))))))
+         (page-info-len (length (or page-info ""))))
+    (setq header-line-format
+          (list left-segment
+                ;; Dynamic space to push page-info to the right
+                (propertize " " 'display `(space :align-to (- right ,page-info-len)))
+                page-info))))
 
 (defun org-ilm-queue-revert (&optional rebuild)
   "Revert/refresh the queue buffer. With REBUILD, reparse elements."
@@ -132,6 +148,7 @@
     (when rebuild
       (when (yes-or-no-p "Rebuild queue? This will parse the elements again. ")
         (org-ilm--bqueue-rebuild)))
+    ;; TODO This is slow and seems unnecessary
     (if (or (and was-empty (not (org-ilm--bqueue-empty-p)))
             (org-ilm--bqueue-empty-p)
             (not (vtable-current-table)))
@@ -157,15 +174,35 @@
 
 (defun org-ilm--bqueue-vtable-objects-func ()
   (unless (org-ilm--bqueue-empty-p)
-    (let (objects)
+    (let* ((range (org-ilm-bqueue--pagination-range org-ilm-bqueue))
+           (reversed (org-ilm-bqueue--reversed org-ilm-bqueue))
+           (size (ost-size org-ilm-bqueue))
+           (v-start (car range))
+           ;; Assuming 'range' returns inclusive end based on your (1+ ...) usage
+           ;; (v-end (1+ (cdr range)))
+           (v-end (cdr range))
+           
+           (objects nil)
+           ;; Default to visual bounds
+           (tree-start v-start)
+           (tree-end v-end))
+
+      ;; If reversed view, map visual range 0..10 to tree range (Size-10)..Size
+      (when reversed
+        (setq tree-start (max 0 (- size v-end)))
+        (setq tree-end (max 0 (- size v-start))))
+
       (ost-map-in-order
        (lambda (node rank)
-         (push 
-          (cons rank (gethash (ost-node-id node)
-                              (org-ilm-bqueue--elements org-ilm-bqueue)))
-          objects))
+         (let* ((element (gethash (ost-node-id node)
+                                  (org-ilm-bqueue--elements org-ilm-bqueue)))
+                (display-rank (if reversed (- size 1 rank) rank)))
+           (push (cons display-rank element) objects)))
        org-ilm-bqueue
-       (not (org-ilm-bqueue--reversed org-ilm-bqueue)))
+       (not reversed) 
+       tree-start
+       tree-end)
+      
       objects)))
   
 (cl-defun org-ilm--bqueue-make-vtable (&key keymap)
@@ -283,17 +320,20 @@
    :objects-function #'org-ilm--bqueue-vtable-objects-func
    :getter
    (lambda (row column vtable)
-     (let* ((rank (car row))
+     (let* (
+            (rank (car row))
             (object (cdr row))
             ;; See `org-ilm--pqueue-bqueue'. Missing elements are mapped back to id.
             ;; When nil, this is a placeholder element.
             (id (org-ilm--element-id object))
+            (priority (when id
+                        (org-ilm--pqueue-priority id nil nil
+                                                  (oref org-ilm-bqueue collection))))
             (marked (and id (member id org-ilm--bqueue-marked-objects))))
        (cond
         ((org-ilm-element-p object)
          (let* ((element object)
-                (concepts (org-ilm-element--concepts element))
-                (priority (org-ilm-element--priority element)))
+                (concepts (org-ilm-element--concepts element)))
            (pcase (vtable-column vtable column)
              ("Index" (list marked rank))
              ("Type" (list marked (org-ilm-element--type element)))
@@ -394,8 +434,6 @@ This does not fill the buffer with the queue elements! For this run
     (goto-char (point-min))
     (when switch-p
       (switch-to-buffer buffer))))
-
-(defvar org-ilm--bqueue-transient-buffer nil)
 
 ;;;; Actions
 
@@ -543,6 +581,47 @@ DAYS can be specified as numeric prefix arg."
         (goto-char point)
       (message "No marked element before this point"))))
 
+(defun org-ilm-queue-next-page ()
+  "View the elements of the next page."
+  (interactive)
+  (with-slots (page page-size) org-ilm-bqueue
+    (cond
+     ((null page-size)
+      (user-error "No pagination"))
+     ((>= page (org-ilm-bqueue--page-max org-ilm-bqueue))
+      (user-error "Already at last page"))
+     (t
+      (setf (oref org-ilm-bqueue page) (1+ page))
+      (org-ilm-queue-revert)))))
+
+(defun org-ilm-queue-previous-page ()
+  "View the elements of the previous page."
+  (interactive)
+  (with-slots (page page-size) org-ilm-bqueue
+    (cond
+     ((null page-size)
+      (user-error "No pagination"))
+     ((= page 0)
+      (user-error "Already at first page"))
+     (t
+      (setf (oref org-ilm-bqueue page) (min (org-ilm-bqueue--page-max org-ilm-bqueue)
+                                            (1- page)))
+      (org-ilm-queue-revert)))))
+
+(defun org-ilm-queue-jump (rank)
+  "Jump to element with position RANK in the queue."
+  (interactive
+   (list
+    (car (org-ilm-queue--position-read org-ilm-bqueue))))
+  (pcase-let ((`(,page . ,row) (org-ilm-bqueue--pos-location org-ilm-bqueue rank)))
+    (setf (oref org-ilm-bqueue page) page)
+    (org-ilm-queue-revert)
+    
+    (goto-line (1+ row))
+    (hl-line-highlight)
+    ;; (recenter-top-bottom)
+    ))
+
 (defun org-ilm-queue-save ()
   "Save queue to disk."
   (interactive)
@@ -580,7 +659,7 @@ DAYS can be specified as numeric prefix arg."
      org-ilm-bqueue
      (org-ilm-element--id (org-ilm--element-from-context))
      ;; TODO Pass current position as initial position
-     (car (org-ilm--bqueue-select-read org-ilm-bqueue)))
+     (car (org-ilm--bqueue-select-read (copy-org-ilm-bqueue org-ilm-bqueue))))
     (org-ilm-queue-revert)))
 
 (defun org-ilm-queue-element-schedule ()
@@ -669,54 +748,75 @@ DAYS can be specified as numeric prefix arg."
     (org-ilm--bqueue-unmark-objects ids)
     (org-ilm-queue-revert)))
 
-;;;; Sort transient
+;;;; Settings transient
 
-;; Transient to sort the elements by a different key, and optionally with some
-;; randomness.
+;; Transient to set various settings of the bqueue, such as what key to sort on,
+;; and pagination size.
 
-(transient-define-prefix org-ilm--bqueue-sort-transient ()
+(transient-define-prefix org-ilm--bqueue-settings-transient (bqueue-buffer)
   :refresh-suffixes t
   :value
   (lambda ()
-    (org-ilm--bqueue-with-buffer org-ilm--bqueue-transient-buffer
+    (org-ilm--bqueue-with-buffer (transient-scope)
       (append
-       (let ((key (org-ilm-bqueue--key org-ilm-bqueue)))
-         (pcase key
-           ("prank" '("--key=priority"))
-           ("sched" '("--key=schedule"))))
-       (when (org-ilm-bqueue--reversed org-ilm-bqueue)
+       (pcase (oref org-ilm-bqueue key)
+         ("prank" '("--key=priority"))
+         ("sched" '("--key=schedule")))
+       (when (oref org-ilm-bqueue reversed)
          '("--reversed"))
-       (when-let ((randomness (org-ilm-bqueue--randomness org-ilm-bqueue)))
+       (when-let ((randomness (oref org-ilm-bqueue randomness)))
          (list (format "--randomness=%s" (org-ilm--round-float randomness 3))))
+       (when-let ((page-size (oref org-ilm-bqueue page-size)))
+         (list (format "--page-size=%s" page-size)))
        )))
 
-  ["queue sort"
+  ["Settings"
    ("k" "Key" "--key=" :choices ("priority" "schedule") :always-read t :transient t)
    ("r" "Reversed" "--reversed" :transient t)
    ("m" "Randomness" "--randomness=" :always-read t :prompt "Randomness: " :transient t)
-   ("RET" "Sort"
+   ("p" "Page size" "--page-size="
+    :always-read t
+    :transient t
+    :prompt "Page size: "
+    :reader
+    (lambda (&rest _)
+      (let* ((queue-size (ost-size org-ilm-bqueue))
+             (choice (read-string (format "Page size (1-%s): " queue-size))))
+        (cond
+         ((string-empty-p choice) nil)
+         ((<= 1 (string-to-number choice) queue-size)
+          choice)
+         (t
+          (message "Invalid size")
+          "100")))))
+   (:info "")
+   ("RET" "Apply"
     (lambda ()
       (interactive)
       (let* ((args (transient-args transient-current-command))
              (reversed (transient-arg-value "--reversed" args))
              (key (transient-arg-value "--key=" args))
-             (randomness (string-to-number (transient-arg-value "--randomness=" args))))
-        (org-ilm--bqueue-with-buffer org-ilm--bqueue-transient-buffer
+             (randomness (string-to-number (transient-arg-value "--randomness=" args)))
+             (page-size (-some-> (transient-arg-value "--page-size=" args)
+                          string-to-number)))
+        (org-ilm--bqueue-with-buffer (transient-scope)
+          (setf (oref org-ilm-bqueue page-size) page-size)
           (pcase key
             ("priority" (org-ilm--bqueue-sort "prank" reversed randomness))
-            ("schedule" (org-ilm--bqueue-sort "sched" reversed randomness))
-            (_ (user-error "Invalid key: %s" key)))
+            ("schedule" (org-ilm--bqueue-sort "sched" reversed randomness)))
           (org-ilm-queue-revert))))
-    :inapt-if-not
-    (lambda ()
-      (transient-arg-value "--key=" (transient-get-value))))
+    ;; :inapt-if-not
+    ;; (lambda ()
+    ;;   (transient-arg-value "--key=" (transient-get-value)))
+    )
    ]
-  )
 
-(defun org-ilm-queue-sort ()
   (interactive)
-  (setq org-ilm--bqueue-transient-buffer (current-buffer))
-  (org-ilm--bqueue-sort-transient))
+  (transient-setup 'org-ilm--bqueue-settings-transient nil nil :scope bqueue-buffer))
+
+(defun org-ilm-queue-settings ()
+  (interactive)
+  (org-ilm--bqueue-settings-transient (current-buffer)))
 
 ;;;; Priority and position spread transient
 
@@ -744,7 +844,7 @@ DAYS can be specified as numeric prefix arg."
          (rank-this (car (org-ilm--bqueue-select-read
                           (if (org-ilm-pqueue-p queue)
                               (org-ilm-pqueue--queue queue)
-                            queue))))
+                            (copy-org-ilm-queue queue)))))
          (rank-other (transient-arg-value
                       (concat "--" (if minimum-p "max" "min") "=")
                       (transient-args transient-current-command)))
@@ -835,7 +935,6 @@ that bqueue is changed."
 (defun org-ilm--bqueue-spread-position (&optional priority-queue-p)
   (unless org-ilm--bqueue-marked-objects
     (user-error "No elements marked!"))
-  (setq org-ilm--bqueue-transient-buffer (current-buffer))
   (org-ilm--bqueue-pspread-transient
    (if priority-queue-p
        (org-ilm--pqueue (org-ilm-bqueue--collection org-ilm-bqueue))
@@ -855,13 +954,26 @@ that bqueue is changed."
 
 (defvar-keymap org-ilm-queue-select-map
   :doc "Keymap of queue select buffer."
+  :parent org-ilm-queue-base-map
+  "q" nil
+  "g" nil
+  "G" nil
   "n" (lambda ()
         (interactive)
-        (forward-line)
-        (when (eobp) (forward-line -1)))
-  "p" #'previous-line
-  "b" #'backward-char
-  "f" #'forward-char
+        (org-ilm-queue-next-element)
+        (org-ilm--bqueue-select-update-minibuffer))
+  "p" (lambda ()
+        (interactive)
+        (org-ilm-queue-previous-element)
+        (org-ilm--bqueue-select-update-minibuffer))
+  "f" (lambda ()
+        (interactive)
+        (org-ilm-queue-next-page)
+        (org-ilm--bqueue-select-update-minibuffer))
+  "b" (lambda ()
+        (interactive)
+        (org-ilm-queue-previous-page)
+        (org-ilm--bqueue-select-update-minibuffer))
   "RET" (lambda ()
           (interactive)
           (org-ilm--bqueue-select-accept-minibuffer)))
@@ -871,20 +983,22 @@ that bqueue is changed."
   (when (and pos (buffer-live-p org-ilm--bqueue-select-buffer))
     (with-current-buffer org-ilm--bqueue-select-buffer
       (setq pos (ost-tree-position org-ilm-bqueue pos numnew))
-      (setq header-line-format
-            (concat (or prompt "Select position: ")
-                    (org-ilm-queue--position-format org-ilm-bqueue (car pos))))
+      
       (with-selected-window (get-buffer-window)
-        (goto-line (1+ (car pos)))
-        (hl-line-highlight)
-        (recenter-top-bottom)))))
+        (org-ilm-queue-jump (car pos))
+        (recenter-top-bottom))
+
+      (org-ilm--bqueue-set-header
+       (concat (or prompt "Select position: ")
+               (org-ilm-queue--position-format org-ilm-bqueue (car pos)))))))
 
 (defun org-ilm--bqueue-select-update-minibuffer ()
+  "Sets the rank of object at point as the minibuffer value."
   (with-current-buffer org-ilm--bqueue-select-buffer
     (when (and org-ilm--bqueue-select-minibuffer-window
                (window-live-p org-ilm--bqueue-select-minibuffer-window))
-      (when-let* ((element (cdr (org-ilm--bqueue-vtable-get-object)))
-                  (rank (ost-rank org-ilm-bqueue (org-ilm-element--id element))))
+      (when-let* ((object (org-ilm--bqueue-vtable-get-object))
+                  (rank (car object)))
         (with-selected-window org-ilm--bqueue-select-minibuffer-window
           (delete-minibuffer-contents)
           (insert (number-to-string (1+ rank))))))))
@@ -908,6 +1022,9 @@ that bqueue is changed."
           (progn
             (setq init-position (ost-tree-position bqueue init-position))
 
+            ;; When NUMNEW specified, add NUMNEW placeholder elements in the
+            ;; queue. These are removed in the unwindow forms of this
+            ;; unwind-protect.
             (when (and numnew (>= numnew 0))
               (let* ((largest-node (ost-select bqueue (1- (ost-size bqueue))))
                      (largest-key (ost-node-key largest-node)))
@@ -929,6 +1046,7 @@ that bqueue is changed."
             (with-current-buffer org-ilm--bqueue-select-buffer
               (add-hook 'post-command-hook
                         (lambda ()
+                          ;; TODO This can be row number instead of point.
                           (when (not (= (point) org-ilm--bqueue-select-point))
                             (setq org-ilm--bqueue-select-point (point))
                             (org-ilm--bqueue-select-update-minibuffer)))

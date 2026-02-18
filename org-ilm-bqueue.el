@@ -82,28 +82,33 @@ The OST remains the same, but operations will instead adjust their calculations.
   (randomness
    0
    :documentation
-   "Value between 0-1 that indicates how much randomness to add to the sort."))
+   "Value between 0-1 that indicates how much randomness to add to the sort.")
+  ;; Pagination
+  (page 0)
+  (page-size 100))
 
 (cl-defmethod ost-serialize ((bqueue org-ilm-bqueue))
   ;; Don't serialize elements, instead get IDs from ost and parse them again
   ;; when deserializing.
-  (with-slots (query type key reversed randomness) bqueue
+  (with-slots (query type key reversed randomness page-size) bqueue
     (append (cl-call-next-method)
             (list :query query
                   :type type
                   :key key
                   :reversed reversed
-                  :randomness randomness))))
+                  :randomness randomness
+                  :page-size page-size))))
 
 (cl-defmethod ost-deserialize ((bqueue org-ilm-bqueue) data)
   (cl-call-next-method)
 
-  (map-let (:query :type :key :reversed :randomness) data
+  (map-let (:query :type :key :reversed :randomness :page-size) data
     (setf (org-ilm-bqueue--query bqueue) query
           (org-ilm-bqueue--type bqueue) type
           (org-ilm-bqueue--key bqueue) key
           (org-ilm-bqueue--reversed bqueue) reversed
-          (org-ilm-bqueue--randomness bqueue) randomness))
+          (org-ilm-bqueue--randomness bqueue) randomness
+          (org-ilm-bqueue--page-size bqueue) page-size))
 
   ;; Reconstruct the elements hash table
   (let ((elements (make-hash-table :test #'equal)))
@@ -113,6 +118,31 @@ The OST remains the same, but operations will instead adjust their calculations.
       (let ((element (or (org-ilm--element-by-id id) id)))
         (puthash id element elements)))
     (setf (org-ilm-bqueue--elements bqueue) elements)))
+
+(defun org-ilm-bqueue--pagination-range (bqueue)
+  "Return (start . end) indices of the elements in the current page.
+The end index is exclusive to match `ost-map-in-order'."
+  (with-slots (page page-size) bqueue
+    (if (null page-size)
+        (cons 0 (ost-size bqueue))
+      (let* ((beg (* page page-size)))
+        (cons beg (+ beg page-size))))))
+
+(defun org-ilm-bqueue--pos-location (bqueue pos)
+  "Return (page . page-index) of element with position POS."
+  (when-let* ((page-size (oref bqueue page-size))
+              (rank (ost-tree-rank bqueue pos)))
+    (cons
+     (floor rank page-size)
+     (mod rank page-size))))
+
+(defun org-ilm-bqueue--pos-page (bqueue pos)
+  "Return the page where the element with position POS is."
+  (car (org-ilm-bqueue--pos-location bqueue pos)))
+
+(defun org-ilm-bqueue--page-max (bqueue)
+  "Return the hightes 0-based page index based on the queue- and page size."
+  (org-ilm-bqueue--pos-page bqueue (1- (ost-size bqueue))))
 
 (defun org-ilm-bqueue--element-value (bqueue element &optional no-key)
   "Return the value of ELEMENT by which it is sorted in BQUEUE."

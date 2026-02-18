@@ -564,30 +564,46 @@ starting from 0. Requires NODE to be a node within TREE."
   (let ((rank (ost-rank tree node-or-id)))
     (cdr (ost-tree-position tree rank))))
 
-(defun ost-map-in-order (func tree &optional reverse)
+(defun ost-map-in-order (func tree &optional reverse start end)
   "Apply FUNC to each node in TREE in rank order.
 FUNC is called with two arguments: (NODE RANK).
+
+Optional arguments START and END specify the range of ranks (0-based) to
+include. Defaults are 0 and size of tree respectively.
+
+If REVERSE is non-nil, iterate in descending order.
+
 This is O(N), whereas calling `ost-select' in a loop is O(N log N)."
-  (let ((rank (if reverse 
-                  (1- (ost-size tree)) ;; Start at max rank (N-1)
-                0)))                    ;; Start at min rank (0)
-    (cl-labels ((traverse (node)
-                  (when node
-                    ;; 1. First Subtree (Left for normal, Right for reverse)
-                    (traverse (if reverse 
-                                  (ost-node-right node)
-                                (ost-node-left node)))
-                    
-                    ;; 2. Visit Node
-                    (funcall func node rank)
-                    ;; Update rank: decrement if reverse, increment otherwise
-                    (setq rank (if reverse (1- rank) (1+ rank)))
-                    
-                    ;; 3. Second Subtree (Right for normal, Left for reverse)
-                    (traverse (if reverse 
-                                  (ost-node-left node)
-                                (ost-node-right node))))))
-      (traverse (ost-tree-root tree)))))
+  (let* ((total-size (ost-size tree))
+         (start (or start 0))
+         (end (-> (or end total-size) (min total-size))))
+    (cl-assert (>= start 0))
+    (cl-assert (<= end total-size))
+
+    (when (< start end)
+      (cl-labels ((traverse (node offset)
+                    (when node
+                      (let* ((left-size (ost--node-size (ost-node-left node)))
+                             (node-rank (+ offset left-size))
+                             (subtree-size (ost-node-size node))
+                             (subtree-end (+ offset subtree-size)))
+                        
+                        ;; Check if subtree overlaps with requested range [start, end)
+                        (when (and (< offset end) (> subtree-end start))
+                          (if reverse
+                              ;; Reverse traversal: Right -> Node -> Left
+                              (progn
+                                (traverse (ost-node-right node) (1+ node-rank))
+                                (when (and (>= node-rank start) (< node-rank end))
+                                  (funcall func node node-rank))
+                                (traverse (ost-node-left node) offset))
+                            ;; Normal traversal: Left -> Node -> Right
+                            (progn
+                              (traverse (ost-node-left node) offset)
+                              (when (and (>= node-rank start) (< node-rank end))
+                                (funcall func node node-rank))
+                              (traverse (ost-node-right node) (1+ node-rank)))))))))
+        (traverse (ost-tree-root tree) 0)))))
 
 ;;;; Insert
 
