@@ -114,7 +114,7 @@ The OST remains the same, but operations will instead adjust their calculations.
   (let ((elements (make-hash-table :test #'equal)))
     (dolist (id (hash-table-keys (org-ilm-bqueue--nodes bqueue)))
       ;; Try to fetch the full element object. If not found, store ID as
-      ;; fallback (Matches `org-ilm-pqueue--queue').
+      ;; fallback (Matches `org-ilm-pqueue--bqueue').
       (let ((element (or (org-ilm--element-by-id id) id)))
         (puthash id element elements)))
     (setf (org-ilm-bqueue--elements bqueue) elements)))

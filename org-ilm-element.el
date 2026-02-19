@@ -362,9 +362,9 @@ COLLECTION specifies in which queue to look at."
               ;; TODO Ideally the queue select thing should allow for selecting
               ;; in a queue that will is about to have additional elements.
               (setq priorities (number-sequence 0 (1- descendancy-size)))
-            (let* ((queue          (org-ilm-pqueue--queue pqueue))
-                   (priority-start (org-ilm--queue-select-read queue nil "Start priority: "))
-                   (priority-end   (org-ilm--queue-select-read queue nil "End priority: ")))
+            (let* ((queue          (org-ilm-pqueue--bqueue pqueue))
+                   (priority-start (org-ilm--bqueue-select-read queue nil "Start priority: "))
+                   (priority-end   (org-ilm--bqueue-select-read queue nil "End priority: ")))
               (setq priorities (org-ilm--spread descendancy-size
                                                 (car priority-start)
                                                 (car priority-end)
@@ -430,7 +430,7 @@ COLLECTION specifies in which queue to look at."
              (collection (org-ilm-element--collection element))
              (pqueue (org-ilm--pqueue collection))
              (priority (org-ilm--queue-select-read
-                        (org-ilm-pqueue--queue pqueue)
+                        (org-ilm-pqueue--bqueue pqueue)
                         (when priority (/ (car priority) (float (cdr priority))))
                         nil 1))
              ;; TODO Handle this being nil

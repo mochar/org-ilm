@@ -843,7 +843,7 @@ DAYS can be specified as numeric prefix arg."
          (queue (transient-scope))
          (rank-this (car (org-ilm--bqueue-select-read
                           (if (org-ilm-pqueue-p queue)
-                              (org-ilm-pqueue--queue queue)
+                              (org-ilm-pqueue--bqueue queue)
                             (copy-org-ilm-queue queue)))))
          (rank-other (transient-arg-value
                       (concat "--" (if minimum-p "max" "min") "=")

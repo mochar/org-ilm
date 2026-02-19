@@ -127,7 +127,7 @@ The callback ON-ABORT is called when capture is cancelled."
       (setq priority
             (if priority
                 (ost-tree-position pqueue priority)
-              (org-ilm--queue-select-read (org-ilm-pqueue--queue pqueue) nil nil 1))))
+              (org-ilm--bqueue-select-read (org-ilm-pqueue--bqueue pqueue) nil nil 1))))
 
     ;; Schedule date. Always needed.
     (setq scheduled
