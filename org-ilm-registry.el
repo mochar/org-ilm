@@ -692,53 +692,71 @@ environment (multiline), paste it in headline body."
 
 (defun org-ilm-registry--type-org-preview (entry ov link)
   "Transclude Org mode content with org-transclusion."
-  (save-excursion
-    (goto-char (overlay-end ov))
-    (let ((insert-pos (point)))
-      (insert (format "\n#+transclude: [[id:%s]] :only-contents" (org-mem-entry-id entry)))
-      (goto-char (1+ insert-pos))
-      (org-transclusion-add)
-      (overlay-put ov 'org-ilm-registry-marker (point-marker))))
-  
-  ;; (overlay-put ov 'invisible t)
-  
-  (overlay-put ov 'display (org-mem-entry-title entry))
-  ;; TODO fgiure out how to not inherit org-link properties
-  (overlay-put ov 'face 'org-ilm-registry-org-header-face)
-  t)
+  (let (line-end-pos) 
+    (save-excursion
+      (goto-char (overlay-end ov))
+      (setq line-end-pos (line-end-position))
+      (insert (format "\n#+transclude: [[id:%s]] :only-contents"
+                      (org-mem-entry-id entry)))
+      (beginning-of-line)
+      (overlay-put ov 'org-ilm-registry-marker (point-marker))
+      (org-transclusion-add))
+
+    (let ((hide-ov (make-overlay (overlay-start ov) (1+ line-end-pos))))
+      ;; (overlay-put hide-ov 'org-ilm-registry-hideov t)
+      (overlay-put hide-ov 'invisible t)
+      (overlay-put ov 'org-ilm-registry-hideov hide-ov))
+
+    ;; (overlay-put ov 'invisible t)
+    
+    ;; (overlay-put ov 'display (org-mem-entry-title entry))
+    ;; ;; TODO fgiure out how to not inherit org-link properties
+    ;; (overlay-put ov 'face 'org-ilm-registry-org-header-face)
+    
+    t))
+
+(defun org-ilm-registry--type-org-transclusion-cleanup (buf beg end)
+  (when-let* ((transclusion (org-transclusion-at-point))
+              (location (plist-get transclusion :location)))
+    (save-excursion
+      (goto-char (car location))
+      (forward-line -1)
+      (dolist (ov (overlays-at (point)))
+        (when (string= (overlay-get ov 'org-ilm-registry-type) "org")
+          ;; Need a delay, otherwise infinite loop:
+          ;; 1. This hook deletes the overlay
+          ;; 2. Ov deletion advice calls org-ilm-registry--type-org-teardown
+          ;; 3. Removes org transclusion
+          ;; 4. This hook is called again
+          (run-at-time .1 nil (lambda () (delete-overlay ov)))
+          )))))
+
+(add-hook 'org-transclusion-after-remove-functions
+          #'org-ilm-registry--type-org-transclusion-cleanup)
 
 (defun org-ilm-registry--type-org-teardown (ov)
   (let ((marker (overlay-get ov 'org-ilm-registry-marker)))
     (when (and marker (marker-position marker))
       (save-excursion
         (goto-char marker)
+        (cond
+         ;; Check if the transclusion is still active.
+         ((org-transclusion-within-transclusion-p)
+          (let ((keyword-beg (org-transclusion-remove)))
+            ;; `org-transclusion-remove` deletes the transcluded text and
+            ;; re-inserts the original `#+transclude` keyword. It returns the
+            ;; start position (`beg`) of the re-inserted keyword.
+            (goto-char keyword-beg)
+            (org-transclusion-keyword-remove)))
+         
+         ;; Fallback: if `org-transclusion-add` previously failed or the
+         ;; transclusion was manually detached, just delete the keyword line if
+         ;; we see it.
+         (t
+          (org-transclusion-keyword-remove))))))
 
-        ;; Check if the transclusion is still active here
-        (if (org-transclusion-within-transclusion-p)
-            (let ((keyword-beg (org-transclusion-remove)))
-              ;; `org-transclusion-remove` deletes the transcluded text and
-              ;; re-inserts the original `#+transclude` keyword. It returns the
-              ;; start position (`beg`) of the re-inserted keyword.
-              (goto-char keyword-beg)
-              
-              ;; `org-transclusion` appends a newline to the keyword when
-              ;; re-inserting it.  We also prepended a newline
-              ;; (`\n#+transclude...`) on creation.  We must clean up both to
-              ;; avoid accumulating blank lines.
-              (let ((del-start (if (eq (char-before keyword-beg) ?\n) 
-                                   (1- keyword-beg) 
-                                 keyword-beg))
-                    (del-end (1+ (line-end-position))))
-                (delete-region del-start del-end)))
-          
-          ;; Fallback: if `org-transclusion-add` previously failed or the
-          ;; transclusion was manually detached, just delete the keyword line if
-          ;; we see it.
-          (org-transclusion-keyword-remove)))
-      
-      ;; Cleanup the marker
-      (set-marker marker nil)
-      (overlay-put ov 'org-ilm-registry-marker nil))))
+  (when-let ((hide-ov (overlay-get ov 'org-ilm-registry-hideov)))
+    (delete-overlay hide-ov)))
 
 (defun org-ilm-registry--type-org-paste (entry)
   (insert (org-ilm-registry--entry-contents entry)))
