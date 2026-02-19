@@ -1,8 +1,18 @@
-;;; org-ilm-registry.el --- Registry in Org mode -*- lexical-binding: t; -*-
+;;; org-ilm-registry.el --- Registry -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; This package needs some commentary...
+;; The registry system allows one to store "things" as org nodes, for ease of
+;; reference and reuse. Currently "things" can be images, latex code, org mode
+;; text.
+
+;; A custom Org link [[registry:id]] will be rendered as the contents of the
+;; registry entry with that id. For example, latex entries will display a latex
+;; overlay, images in an image overlay, and org mode using org-transclusion.
+
+;; As registry entries such as images can refer to files, org-attach is used in
+;; a way similar to org-ilm-elements. However the convention is to store all
+;; registry files within one folder, rather than a folder per entry.
 
 ;;; Code:
 
@@ -138,7 +148,7 @@ This helps share functionality of a type while being able to filter on a more gr
     (advice-remove 'delete-overlay
                    #'org-ilm--registry-delete-overlay-advice))))
 
-(add-hook 'org-ilm-global-minor-mode #'org-ilm--registry-setup)
+(add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--registry-setup)
 
 ;;;; Commands
 
@@ -148,7 +158,7 @@ This helps share functionality of a type while being able to filter on a more gr
   "f" #'org-ilm-registry-find
   "i" #'org-ilm-registry-insert
   "p" #'org-ilm-registry-paste
-  "r" #'org-ilm-registry-register-dwim
+  "g" #'org-ilm-registry-register-dwim
   "a" #'org-ilm-registry-attachments)
 
 ;;;###autoload
@@ -317,14 +327,6 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
     (org-ilm--org-with-point-at
      (org-mem-entry-id entry)
      (org-ilm-registry--org-get-contents))))
-
-(defun org-ilm-registry--plist-keys (plist)
-  "Return a list of keys in PLIST."
-  (let (keys)
-    (while plist
-      (push (car plist) keys)
-      (setq plist (cddr plist)))
-    (nreverse keys)))
 
 (defun org-ilm-registry--link-target ()
   (if (and (eq major-mode 'org-mode) (org-id-get))
@@ -586,9 +588,11 @@ environment (multiline), paste it in headline body."
  )
 
 
-;;;;; File type
+;;;;; Image type
 
-(defun org-ilm-registry--type-file-preview (entry ov link)
+;; Relies on var `image-file-name-extensions' to determine image files.
+
+(defun org-ilm-registry--type-image-preview (entry ov link)
   (org-link-preview-file
    ov
    (with-current-buffer (find-file-noselect (org-mem-entry-file entry))
@@ -598,85 +602,86 @@ environment (multiline), paste it in headline body."
                          (org-attach-dir)))))
    link))
 
-(defun org-ilm-registry--type-file-paste (entry)
+(defun org-ilm-registry--type-image-paste (entry)
   (let ((path (org-mem-entry-property "PATH" entry)))
     (insert (org-link-make-string
              (concat "file:" path)
              (file-name-base path)))))
 
-(defun org-ilm-registry--type-file-from-path (path &optional title)
-  "Return data for registry entry of type file from PATH."
+(defun org-ilm-registry--type-image-from-path (path &optional title)
+  "Return data for registry entry of type image from PATH."
   (when (and (stringp path) (file-exists-p path))
     (let* ((ext (file-name-extension path))
-           (title (or title (file-name-base path)))
-           (type (cond
-                  ((member ext image-file-name-extensions) "image")
-                  (t "file"))))
-      (list :title title :path path :type type))))
+           (title (or title (file-name-base path))))
+      (when (member ext image-file-name-extensions)
+        (list :title title :path path)))))
 
-(defun org-ilm-registry--type-file-parse ()
-  (if-let* ((el (when (eq major-mode 'org-mode) (org-element-context)))
-            (_ (and (eq (org-element-type el) 'link)
-                    (string= (org-element-property :type el) "file"))))
-      (org-combine-plists
-       (org-ilm-registry--type-file-from-path
-        (expand-file-name (org-element-property :path (org-element-context)))
-        (car (flatten-list (org-element-property :caption (org-element-at-point)))))
-       (list :begin (org-element-property :begin el)
-             :end (org-element-property :end el)))
-    (when-let ((data (org-ilm-registry--type-file-from-path
-                      (buffer-file-name (buffer-base-buffer)))))
-      ;; We only dwim if its a non-generic file
-      (unless (string= (plist-get data :type) "file") data))))
-
+(defun org-ilm-registry--type-image-parse ()
+  "Return info of image from context."
+  (cond-let*
+    ;; In org-mode, check if point on file link that points to an image.
+    ([el (when (eq major-mode 'org-mode) (org-element-context))]
+     (when (and (eq (org-element-type el) 'link)
+                (string= (org-element-property :type el) "file"))
+       (when-let ((data (org-ilm-registry--type-image-from-path
+                         (expand-file-name (org-element-property :path el))
+                         (car (flatten-list
+                               (org-element-property :caption el))))))
+         (org-combine-plists
+          data
+          (list :begin (org-element-property :begin el)
+                :end (org-element-property :end el))))))
+    ;; Current buffer is image.
+    ([data (org-ilm-registry--type-image-from-path
+            (buffer-file-name (buffer-base-buffer)))]
+     data)))
+     
 ;; TODO Deprecated for register function
-(defun org-ilm-registry--type-file-create (&optional args)
-  (unless args
-    (setq args (org-ilm-registry--type-file-from-path (read-file-name "File: "))))
-  (cl-destructuring-bind (&key title path type begin end) args
+(defun org-ilm-registry--type-image-create (&optional data)
+  (unless data
+    (setq data (org-ilm-registry--type-image-from-path
+                (read-file-name "File: "))))
+  (map-let (:title :path :begin :end) data
     ;; TODO Debating on whether to batch query-replace this link in all org,
     ;; org-mem files, current dir files or not. Alternative would be to view
     ;; normal org links to this path same as registry link. Currently prefer
     ;; latter.
-    (list :title title :type type :props (list :PATH path))))
+    (list :title title :props (list :PATH path))))
 
-(defun org-ilm-registry--type-file-register (&optional args)
-  (cl-destructuring-bind (&key title path type begin end)
-      (or args (org-ilm-registry--type-file-from-path (read-file-name "File: ")))
-    (let ((registry (org-ilm--collection-registry-path))
-          (id (org-id-new))
-          attach-dir)
-      (with-current-buffer (find-file-noselect registry)
-        (save-excursion
-          (goto-char (point-min))
-          (setq attach-dir (expand-file-name (org-attach-dir-get-create)))))
-      
+(defun org-ilm-registry--type-image-register (&optional data)
+  (unless data
+    (setq data (org-ilm-registry--type-image-from-path
+                (read-file-name "File: "))))
+  (map-let (:title :path :begin :end) data
+    (let* ((registry (org-ilm--collection-registry-path))
+           (id (org-id-new))
+           (attach-dir (with-current-buffer (find-file-noselect registry)
+                         (save-excursion
+                           (goto-char (point-min))
+                           (expand-file-name (org-attach-dir-get-create))))))
       (org-ilm-registry--register
-       "file"
+       "image"
        (list
         :title title
         :id id
-        :type type
         :region (when (and begin end) (list begin end))
         :on-success
         (lambda (&rest _)
-          (copy-file path (expand-file-name (concat id "." (file-name-extension path))
-                                            attach-dir))
+          (copy-file path
+                     (expand-file-name
+                      (concat id "." (file-name-extension path))
+                      attach-dir))
           (run-hook-with-args 'org-attach-after-change-hook attach-dir)
-          (org-attach-tag)
-
-          )
-        )))))
+          (org-attach-tag)))))))
 
 (org-ilm-registry-set-type
- "file"
- :key ?f
- :aliases '("image" "video" "audio")
- :preview #'org-ilm-registry--type-file-preview
- :paste #'org-ilm-registry--type-file-paste
- :parse #'org-ilm-registry--type-file-parse
- ;; :create #'org-ilm-registry--type-file-create
- :register #'org-ilm-registry--type-file-register
+ "image"
+ :key ?i
+ :preview #'org-ilm-registry--type-image-preview
+ :paste #'org-ilm-registry--type-image-paste
+ :parse #'org-ilm-registry--type-image-parse
+ ;; :create #'org-ilm-registry--type-image-create
+ :register #'org-ilm-registry--type-image-register
  )
 
 ;;;;; Org type
@@ -687,30 +692,53 @@ environment (multiline), paste it in headline body."
 
 (defun org-ilm-registry--type-org-preview (entry ov link)
   "Transclude Org mode content with org-transclusion."
-  (let ((begin (overlay-start ov))
-        (end (overlay-end ov)))
-    (goto-char end)
-    (insert (format "\n#+transclude: [[id:%s]] :only-contents" (org-mem-entry-id entry)))
-    (org-transclusion-add)
-    (overlay-put ov 'display (org-mem-entry-title entry))
-    ;; TODO fgiure out how to not inherit org-link properties
-    (overlay-put ov 'face 'org-ilm-registry-org-header-face)
-    t))
-
-(defun org-ilm-registry--type-org-teardown (ov)
   (save-excursion
     (goto-char (overlay-end ov))
-    ;; TODO might be better to keep checking until non-emtpy line
-    (forward-line)
-    (cond
-     ((org-transclusion-within-transclusion-p)
-        (progn
-          (org-transclusion-remove)
-          (delete-line)))
-     ((org-transclusion-check-add)
-      (delete-line))
-     (t
-      (message "Cannot find transclusion to clean up")))))
+    (let ((insert-pos (point)))
+      (insert (format "\n#+transclude: [[id:%s]] :only-contents" (org-mem-entry-id entry)))
+      (goto-char (1+ insert-pos))
+      (org-transclusion-add)
+      (overlay-put ov 'org-ilm-registry-marker (point-marker))))
+  
+  ;; (overlay-put ov 'invisible t)
+  
+  (overlay-put ov 'display (org-mem-entry-title entry))
+  ;; TODO fgiure out how to not inherit org-link properties
+  (overlay-put ov 'face 'org-ilm-registry-org-header-face)
+  t)
+
+(defun org-ilm-registry--type-org-teardown (ov)
+  (let ((marker (overlay-get ov 'org-ilm-registry-marker)))
+    (when (and marker (marker-position marker))
+      (save-excursion
+        (goto-char marker)
+
+        ;; Check if the transclusion is still active here
+        (if (org-transclusion-within-transclusion-p)
+            (let ((keyword-beg (org-transclusion-remove)))
+              ;; `org-transclusion-remove` deletes the transcluded text and
+              ;; re-inserts the original `#+transclude` keyword. It returns the
+              ;; start position (`beg`) of the re-inserted keyword.
+              (goto-char keyword-beg)
+              
+              ;; `org-transclusion` appends a newline to the keyword when
+              ;; re-inserting it.  We also prepended a newline
+              ;; (`\n#+transclude...`) on creation.  We must clean up both to
+              ;; avoid accumulating blank lines.
+              (let ((del-start (if (eq (char-before keyword-beg) ?\n) 
+                                   (1- keyword-beg) 
+                                 keyword-beg))
+                    (del-end (1+ (line-end-position))))
+                (delete-region del-start del-end)))
+          
+          ;; Fallback: if `org-transclusion-add` previously failed or the
+          ;; transclusion was manually detached, just delete the keyword line if
+          ;; we see it.
+          (org-transclusion-keyword-remove)))
+      
+      ;; Cleanup the marker
+      (set-marker marker nil)
+      (overlay-put ov 'org-ilm-registry-marker nil))))
 
 (defun org-ilm-registry--type-org-paste (entry)
   (insert (org-ilm-registry--entry-contents entry)))
@@ -735,298 +763,7 @@ environment (multiline), paste it in headline body."
  :create #'org-ilm-registry--type-org-create
  )
 
-;;;;; Resource type
-
-;; TODO All of this has been copied over to org-ilm import resource. Still not
-;; sure if it should be in org-ilm-registry as well.
-
-;; Generic object with citation that contains zero or more attachments. Think of:
-;; - Website article / blog post
-;; - Youtube video (media)
-;; - Paper from arxiv link or doi (paper)
-;; - Paper from local pdf file
-
-(defcustom org-ilm-registry--type-resource-fields nil
-  "List of field names to include in the entry.
-See `parsebib-read-entry'."
-  :type '(repeat string)
-  :group 'org-ilm-registry)
-
-(defvar org-ilm-registry--type-resource-data nil)
-
-(defun org-ilm-registry--type-resource-transient-args (&optional args)
-  (setq args (or args (transient-args 'org-ilm-registry--type-resource-transient)))
-  (list :source (transient-arg-value "--source=" args)
-        :source-type (plist-get org-ilm-registry--type-resource-data :source-type)
-        :type (transient-arg-value "--type=" args)
-        :bibtex (plist-get org-ilm-registry--type-resource-data :bibtex)
-        :key (plist-get org-ilm-registry--type-resource-data :key)
-
-        :paper-download (transient-arg-value "--paper-download" args)
-
-        ;; Webpage Download
-        :webpage-download (transient-arg-value "--webpage-download" args)
-        :webpage-simplify
-        (cond
-         ((transient-arg-value "--webpage-simplify-to-webpage" args)
-          "webpage")
-         ((transient-arg-value "--webpage-simplify-to-markdown" args)
-          "markdown"))
-        :webpage-orgify (transient-arg-value "--webpage-orgify" args)
-
-        ;; Media download
-        :media-download (transient-arg-value "--media-download" args)
-        :media-template (transient-arg-value "--media-template=" args)
-        :media-audio-only (transient-arg-value "--media-audio" args)
-        :media-sub-langs (cdr (assoc "--media-subs=" args))
-
-        ))
-
-(defun org-ilm-registry--type-resource-process-source (&optional source bibtex)
-  (unless source
-    ;; TODO Support for path to pdf -> recover bibtex data (zotero-like)
-    ;; (setq source (ffap-read-file-or-url "URL/path/DOI: " nil))
-    (setq source (read-string "URL or ID: ")))
-  
-  (let ((type "resource")
-        source-type title key)
-    
-    (cond
-     ((or (null source) (string-empty-p source)))
-
-     ;; Source is a url (assuming web)
-     ((org-url-p source)
-      (setq source-type 'url)
-
-      ;; Figure out what type 
-      (cond
-       ((org-ilm-convert--transient-media-url-is-media-p source)
-        (setq type "media"))
-       (t (setq type "website"))))
-
-     ;; Source is a file
-     ((file-exists-p source)
-      (setq source-type 'file
-            title (file-name-base source)))
-     
-     (t
-      (setq source-type 'id
-            title source)))
-
-    ;; Bibtex
-    (when (and (null bibtex) (member source-type '(url id)))
-      (when-let ((bibtex-string (zotra-get-entry source "bibtex")))
-        (with-temp-buffer
-          (insert (s-trim bibtex-string))
-          (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
-                                      :fields org-ilm-registry--type-resource-fields
-                                      :expand-strings t
-                                      :inheritance t
-                                      :replace-TeX t)))
-                      (key (car (hash-table-keys bibtexes))))
-            (setq bibtex (gethash key bibtexes))))))
-    (when bibtex
-      (setq title (or (cdr (assoc "title" bibtex)) title)
-            key (cdr (assoc "=key=" bibtex))))
-
-    (when (and (null title) (eq source-type 'url))
-      (setq title (org-ilm--get-page-title source)))
-
-    (list :source source :source-type source-type :title title
-          :bibtex bibtex :key key :type type)))
-
-(transient-define-infix org-ilm-registry--type-resource-transient-source ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :key "s"
-  :description "Source"
-  :argument "--source="
-  :always-read t
-  :allow-empty nil
-  :prompt "URL/path/DOI: "
-  :reader
-  (lambda (prompt initial-input history)
-    (let ((source-data (org-ilm-registry--type-resource-process-source)))
-      (setq org-ilm-registry--type-resource-data source-data)
-      (org-ilm--transient-set-target-value "t" (plist-get source-data :type))
-      (org-ilm--transient-set-target-value "k" (plist-get source-data :key))
-      (plist-get source-data :source))))
-
-(transient-define-infix org-ilm-registry--type-resource-transient-key ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :key "k"
-  :description
-  (lambda ()
-    (concat
-     "Key"
-     (when-let* ((key (plist-get org-ilm-registry--type-resource-data :key))
-                 (entry (org-mem-entry-by-roam-ref (concat "@" key))))
-       (propertize " DUPLICATE" 'face 'error))))
-  :argument "--key="
-  :always-read t
-  :allow-empty nil
-  :inapt-if
-  (lambda () (null (plist-get org-ilm-registry--type-resource-data :bibtex)))
-  :reader
-  (lambda (prompt initial-input history)
-    (let ((key (read-string "Key (empty to auto-generate): ")))
-      (when (string-empty-p key)
-        (with-temp-buffer
-          (insert (org-ilm--format-bibtex-entry
-                   (plist-get org-ilm-registry--type-resource-data :bibtex)
-                   (plist-get org-ilm-registry--type-resource-data :key)))
-          (goto-char (point-min))
-          (setq key (ignore-errors (bibtex-generate-autokey)))
-          (when (string-empty-p key) (setq key nil))))
-      (setf (plist-get org-ilm-registry--type-resource-data :key) key))))
-
-(transient-define-prefix org-ilm-registry--type-resource-transient ()
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (append
-     '("--webpage-simplify-to-markdown" "--webpage-orgify")
-     (let ((source (plist-get org-ilm-registry--type-resource-data :source)))
-       (unless source
-         (setq org-ilm-registry--type-resource-data
-               (org-ilm-registry--type-resource-process-source))
-         (setq source (plist-get org-ilm-registry--type-resource-data :source)))
-       (list (concat "--source=" source)
-             (concat "--key=" (plist-get org-ilm-registry--type-resource-data :key))
-             (concat "--type=" (plist-get org-ilm-registry--type-resource-data :type))))))
-
-  ["Resource"
-   (org-ilm-registry--type-resource-transient-source)
-   (:info
-    (lambda ()
-      (let ((title (plist-get org-ilm-registry--type-resource-data :title)))
-          (propertize title 'face 'italic)))
-    :if (lambda () (plist-get org-ilm-registry--type-resource-data :title)))
-   (org-ilm-registry--type-resource-transient-key)
-   ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
-      :always-read t :allow-empty nil)
-   ("P" "Paper PDF download" "--paper-download" :transient transient--do-call
-    :if (lambda ()
-          (when-let ((args (org-ilm-registry--type-resource-transient-args (transient-get-value))))
-            (and (string= "paper" (plist-get args :type))
-                 (member (plist-get args :source-type) '(url id))))))
-   ]
-
-  ["Webpage download"
-   :hide
-   (lambda ()
-     (when-let ((args (org-ilm-registry--type-resource-transient-args (transient-get-value))))
-       (not (member (plist-get args :source-type) '(url)))))
-   :setup-children
-   (lambda (_)
-     (org-ilm-convert--transient-webpage-build t t))]
-
-  ["Media download"
-   :if
-   (lambda ()
-     (when-let ((args (org-ilm-registry--type-resource-transient-args (transient-get-value))))
-       (and (string= (plist-get args :type) "media")
-            (eq (plist-get args :source-type) 'url))))
-   :setup-children
-   (lambda (_)
-     (org-ilm-convert--transient-media-build))
-   ]
-
-  ["Actions"
-   ("RET" "Register"
-    (lambda ()
-      (interactive)
-      (cl-destructuring-bind
-          (&key source source-type type bibtex key title
-                paper-download
-                webpage-download webpage-simplify webpage-orgify
-                media-download media-template media-audio-only media-sub-langs)
-          (org-ilm-registry--type-resource-transient-args)
-
-        (when (and (null title) bibtex)
-          (setq title
-                (or (cdr (assoc "title" bibtex))
-                    key
-                    (cdr (assoc "url" bibtex))
-                    source)))
-
-        (let* ((transient-args (transient-args 'org-ilm-registry--type-resource-transient))
-               (id (org-id-new))
-               (registry (org-ilm--collection-registry-path))
-               ;; Determine attach dir from within registry in case the dir is set
-               ;; buffer or dir local
-               (attach-dir (with-current-buffer (find-file-noselect registry)
-                             (org-attach-dir-from-id id))))
-
-          (org-ilm-registry--register
-           "resource"
-           (list
-            :title title
-            :id id
-            :type type
-            :props
-            (append
-             (when key (list :KEY key))
-             (org-ilm--alist-to-plist bibtex :upcase t :remove '("=key=" "=type="))
-             (list :ROAM_REFS (if key (concat source " @" key) source)))
-            :on-success
-            (lambda (_)
-              (when (or webpage-download media-download paper-download)
-                (make-directory attach-dir)
-
-                (when paper-download
-                  (ignore-errors
-                    (zotra-download-attachment
-                     source nil
-                     (expand-file-name (concat (org-ilm--slugify-title title) ".pdf")
-                                       attach-dir))
-                    (org-ilm--org-with-point-at id
-                      (org-attach-sync))))
-
-                (when webpage-download
-                  (org-ilm-convert--transient-webpage-run
-                   source title attach-dir id transient-args))
-
-                (when (or media-download media-sub-langs)
-                  (org-ilm-convert--transient-media-run
-                   source attach-dir id transient-args))
-                ))
-            ))))))
-   ]
-  )
-
-(defun org-ilm-registry--type-resource-parse ()
-  (cond-let*
-    ([bibtex (ignore-errors
-               ;; TODO Only works if point at start of bibtex entry
-               (parsebib-read-entry
-                org-ilm-registry--type-resource-fields
-                (make-hash-table :test #'equal)
-                t))]
-     (let ((url (or (cdr (assoc "url" bibtex)) (cdr (assoc "doi" bibtex)))))
-       (list :source url :bibtex bibtex)))
-    ([url (thing-at-point 'url)]
-     (list :source url))))
-
-(defun org-ilm-registry--type-resource-register (&optional args)
-  (setq org-ilm-registry--type-resource-data
-        (org-ilm-registry--type-resource-process-source
-         (plist-get args :source)
-         (plist-get args :bibtex)))
-  (org-ilm--add-hook-once
-       'transient-post-exit-hook
-       (lambda () (setq org-ilm-registry--type-resource-data nil)))
-  (org-ilm-registry--type-resource-transient))
-
-(org-ilm-registry-set-type
- "resource"
- :key ?r
- :parse #'org-ilm-registry--type-resource-parse
- :register #'org-ilm-registry--type-resource-register
- )
-
-;;;; Footer
+;;; Footer
 
 (provide 'org-ilm-registry)
 

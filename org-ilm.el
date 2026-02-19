@@ -86,11 +86,11 @@
   "t" #'org-ilm-attachment-transclude
   ";" org-ilm-context-map
   "n" org-ilm-concept-map
+  "g" org-ilm-registry-prefix-map
   "k" #'org-ilm-element-delete
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim
-  "g" #'org-ilm-registry
   "b" #'org-ilm-bibliography)
 
 ;;;; Minor mode
@@ -255,11 +255,6 @@
        ((org-ilm--pdf-mode-p)
         (call-interactively #'org-ilm-pdf-split)))
     (user-error "Splitting can only be done from within an attachment")))
-
-(defun org-ilm-registry ()
-  "Open collection registry."
-  (interactive)
-  (org-ilm-registry-open))
 
   
 ;;;; Footer
