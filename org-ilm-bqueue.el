@@ -262,7 +262,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
     (org-ilm-bqueue--shuffle bqueue randomness)
     bqueue))
 
-(defun org-ilm--bqueue-build (&optional collection query &rest args)
+(defun org-ilm--bqueue-build (&optional collection query name &rest args)
   "Build a bqueue by a QUERY on COLLECTION, and return it."
   (let* ((collection (or collection
                          (org-ilm--collection-from-context)
@@ -271,7 +271,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
          (elements (org-ilm-query-collection query collection)))
     (apply #'org-ilm--bqueue-create
            collection
-           :name (format "%s (%s)" query collection)
+           :name (or name (format "%s" query))
            :elements elements
            :query query
            args)))
@@ -281,7 +281,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
   (org-ilm--bqueue-build
    collection
    'outstanding
-   :name (format "Outstanding queue (%s)" collection)
+   "Outstanding queue"
    :type 'outstanding
    :randomness org-ilm-outstanding-randomness))
 
@@ -307,7 +307,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
                      (propertize "Outstanding queue"
                                  :desc "Due elements"
                                  :action (lambda ()
-                                           (org-ilm--queue-build-outstanding
+                                           (org-ilm--bqueue-build-outstanding
                                             collection))))
                     )
                    (list
