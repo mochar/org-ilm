@@ -87,8 +87,6 @@
      :inapt-if org-ilm--import-transient-parent-el)
     ("m" "Media" org-ilm--import-media-transient
      :inapt-if org-ilm--import-transient-parent-el)
-    ("g" "Registry" org-ilm--import-registry-transient
-     :inapt-if org-ilm--import-transient-parent-el)
     ]
    ["New"
     ("o" "Org"
