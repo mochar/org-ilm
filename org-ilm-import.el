@@ -14,120 +14,124 @@
 (require 'htmlfontify)
 
 (require 'org-ilm-utils)
+(require 'org-ilm-transient)
 (require 'org-ilm-collection)
-(require 'org-ilm-bib)
 (require 'org-ilm-capture)
 (require 'org-ilm-element)
 (require 'org-ilm-registry)
 (require 'org-ilm-convert)
 
-;;;; Import
+;;;; Data
 
-(transient-define-infix org-ilm--import-transient-collection ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :allow-empty nil
-  :always-read t
-  :argument "--collection="
-  :reader
-  (lambda (&rest _)
-    (let* ((choices (map-apply
-                     (lambda (collection data)
-                       (cons
-                        (format
-                         "%s %s"
-                         (propertize (symbol-name collection) 'face 'bold)
-                         (plist-get data :path))
-                        collection))
-                     (org-ilm-collections)))
-           (choice (completing-read "Collection: " choices))
-           (collection (map-elt choices choice)))
-      (cond
-       (collection (symbol-name collection))
-       ((not (string-empty-p choice))
-        (setq collection choice)
-        (org-ilm-new-collection
-         (intern collection)
-         (org-ilm--collection-property (org-ilm--active-collection) :path))
-        collection)))))
+(cl-defstruct (org-ilm-import
+               (:conc-name org-ilm-import--))
+  ""
+  (id
+   (org-id-new)
+   :documentation "Org-id")
+  (source
+   nil
+   :documentation "User input (file/url/doi)")
+  (ref
+   nil
+   :documentation "Global identifier (url/doi)")
+  (type
+   nil
+   :documentation "One of: plain, buffer, file, media, webpage, org, card")
+  (bibtex
+   nil
+   :documentation "Cons (key . bibtex entry)")
+  (info
+   nil
+   :documentation "Info from zotero translation server
+See `org-ilm--citation-get-zotero'")
+  )
 
-(transient-define-prefix org-ilm--import-transient (scope)
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (list (format "--collection=%s" (org-ilm--active-collection))))
-  
-  ["Ilm"
-   ("C" "Collection" org-ilm--import-transient-collection)
-   ("." "As child" "--child"
-    :inapt-if-not (lambda () (transient-scope)))
-   (:info
-    (lambda ()
-      (let ((element (transient-scope))
-            (as-child (transient-arg-value "--child" (transient-get-value))))
-        (propertize (org-ilm-element--title element)
-                    'face (if as-child 'transient-value 'Info-quoted))))
-    :if (lambda () (and (transient-scope)
-                        (transient-arg-value "--child" (transient-get-value)))))
-   ]
+(defun org-ilm-import--zotero-type (data)
+  (alist-get 'itemType (oref data info)))
 
+(defun org-ilm-import--zotero-category (data)
+  (when-let ((zotero-type (org-ilm-import--zotero-type data)))
+    (pcase zotero-type
+      ((or "preprint" "conferencePaper" "document" "journalArticle" "manuscript")
+       'paper)
+      ((or "videoRecording" "audioRecording")
+       'media)
+      (_
+       'other))))
+
+;;;; Dispatcher transient
+
+;; Transient to let user select what type to import.
+
+(transient-define-prefix org-ilm--import-dispatch-transient ()
   [
    ["Import"
-    ("r" "Resource"
-     (lambda ()
-       (interactive)
-       (let ((args (org-ilm--import-transient-args)))
-         (org-ilm--import-resource-transient args)))
-     :inapt-if org-ilm--import-transient-parent-el
-     )
-    ("f" "File"
-     (lambda ()
-       (interactive)
-       (org-ilm--import-file-transient (transient-scope)))
-     :inapt-if org-ilm--import-transient-parent-el)
-    ("m" "Media" org-ilm--import-media-transient
-     :inapt-if org-ilm--import-transient-parent-el)
-    ]
+    ("w" "Webpage" org-ilm-import-webpage)
+    ("f" "File" org-ilm-import-file)
+    ("m" "Media" org-ilm-import-media)]
+   [""
+    ("u" "URL" org-ilm-import-url)
+    ("b" "Buffer" org-ilm-import-buffer)]
    ["New"
-    ("o" "Org"
-     (lambda ()
-       (interactive)
-       (let ((args (org-ilm--import-transient-args)))
-         (org-ilm-org-new-material (plist-get args :collection) (plist-get args :parent)))))
-    ("b" "Buffer" org-ilm-import-buffer)
-    ("c" "Card"
-     (lambda ()
-       (interactive)
-       (let ((args (org-ilm--import-transient-args)))
-         (org-ilm-org-new-card (plist-get args :collection) (plist-get args :parent)))))
-    ]
+   ("o" "Org" org-ilm-org-new-material)
+   ("c" "Card" org-ilm-org-new-card)]
    ]
-
-  (interactive "P")
-  (transient-setup 'org-ilm--import-transient nil nil :scope scope))
-
-(defun org-ilm--import-transient-args ()
-  (let* ((args (if transient-current-command
-                   (transient-args transient-current-command)
-                 (transient-get-value)))
-         (as-child (transient-arg-value "--child" args))
-         (collection (intern (transient-arg-value "--collection=" args))))
-    (list :parent (when as-child (transient-scope))
-          :collection collection)))
-
-(defun org-ilm--import-transient-parent-el ()
-  "Return parent ilm element if chosen to save element as its child."
-  (when-let ((parent-el (transient-scope))
-             (as-child (transient-arg-value
-                        "--child"
-                        (transient-get-value))))
-                        ;; (transient-args 'org-ilm--import-transient))))
-    parent-el))
+  )
 
 (defun org-ilm-import ()
   "Import an element into your ilm collection."
   (interactive)
-  (org-ilm--import-transient (ignore-errors (org-ilm--element-from-context))))
+  (org-ilm--import-dispatch-transient))
+
+(defun org-ilm-import-file (path)
+  "Import a file to your collection."
+  (interactive "fFile: ")
+  (unless (file-exists-p path)
+    (user-error "File %s does not exist" path))
+  (let* ((ext (file-name-extension path))
+         ref)
+    ;; (cond
+    ;;  ((string= "pdf" ext)
+    ;;   (setq ref (org-ilm--pdf2doi (expand-file-name path)))))
+    (org-ilm--import-transient
+     (make-org-ilm-import :source path :ref ref :type 'file))))
+
+(defun org-ilm-import-media ()
+  "Import a audio or video to your collection."
+  (interactive)
+  (let ((source (ffap-read-file-or-url
+                 "URL or file: "
+                 (or (thing-at-point 'url)
+                     ;; Works in dired!
+                     (thing-at-point 'existing-filename)))))
+    (cond
+     ((file-exists-p source)
+      (unless (org-ilm--media-file-p source)
+        (user-error "File %s not video or audio" source))
+      (org-ilm-import-file (expand-file-name source)))
+     ((org-url-p source)
+      (org-ilm--import-transient
+       (make-org-ilm-import :source source :ref source :type 'media)))
+     (t
+      (user-error "Not a file or URL: %s" source)))))
+
+(defun org-ilm-import-url (url)
+  "Import something from a URL to your collection."
+  (interactive (list (read-string "URL: " (thing-at-point 'url))))
+  (unless (org-url-p url)
+    (user-error "Not a valid URL: %s" url))
+  (org-ilm--import-transient
+   (make-org-ilm-import :source url :ref url :type 'url)))
+
+(defun org-ilm-import-webpage (url)
+  "Import a webpage to your collection."
+  (interactive (list (read-string "URL: " (thing-at-point 'url))))
+  (unless (org-url-p url)
+    (user-error "Not a valid URL: %s" url))
+  (org-ilm--import-transient
+   (make-org-ilm-import :source url :ref url :type 'webpage)))
+
 
 ;;;; Queue
 
@@ -221,468 +225,485 @@
                 (org-attach-sync))))))
        ))))
 
-;;;; File
+;;;; Import transient
 
-(defun org-ilm--import-file-transient-args ()
-  (let* ((args (if transient-current-command
-                   (transient-args transient-current-command)
-                 (transient-get-value)))
-         (file (transient-arg-value "--file=" args))
-         (method (transient-arg-value "--method=" args)))
-    (append
-     (org-ilm--import-transient-args)
-     (list :file file :method method))))
+;; Main import transient. The transient is passed a `org-ilm-import' struct
+;; object, which is used to determine which suffixes/infixes to present to the
+;; user.
 
-(transient-define-infix org-ilm--import-file-transient-file ()
-  :class 'transient-option
-  :transient t
-  :argument "--file="
-  :allow-empty nil
-  :prompt "File: "
-  :reader
-  (lambda (prompt initial-input history)
-    (read-file-name prompt nil initial-input t)))
+(defun org-ilm--import-transient-parse ()
+  (let ((args (if transient-current-command
+                  (transient-args transient-current-command)
+                (transient-get-value))))
+    (with-slots (id source ref type bibtex info) (transient-scope)
+      (append
+       args
+       `((source . ,source)
+         (id . ,id)
+         (ref . ,ref)
+         (type . ,type)
+         (bibtex . ,bibtex)
+         (info . ,info))))))
 
-(transient-define-prefix org-ilm--import-file-transient (scope)
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (append
-     '("--method=cp")
-     (when buffer-file-name
-       (list (concat "--file=" buffer-file-name)))))
-  
-  ["File import"
-   ("f" "File" org-ilm--import-file-transient-file)
-   ("m" "Method of attachment" "--method="
-    :allow-empty nil
-    :choices (mv cp ln lns) :prompt "Method of attachment: ")
-   ("RET" "Import"
-    (lambda ()
-      (interactive)
-      (let ((args (org-ilm--import-file-transient-args)))
-        (org-ilm--capture-capture
-         'material
-         :parent (when-let ((el (transient-scope)))
-                   (org-ilm-element--id el))
-         :collection (org-ilm--active-collection)
-         :file (plist-get args :file)
-         :method (intern (plist-get args :method))
-         :ext t)))
-    :inapt-if-not
-    (lambda ()
-      (let ((args (org-ilm--import-file-transient-args)))
-        (not
-         (and (plist-get args :file)
-              (plist-get args :method)
-              (plist-get args :collection))))))
-   ]
-  
-  (interactive "P")
-  (transient-setup 'org-ilm--import-file-transient nil nil :scope scope))
-
-;;;; Media
-
-;; TODO Can this go?
-;; Remote videos: Resource import
-;; Local videos: File import
-
-(defun org-ilm--import-media-transient-args (&optional args)
-  (setq args (or args (transient-args 'org-ilm--import-media-transient)))
-  (list :source (transient-arg-value "--source=" args)
-        :title (transient-arg-value "--title=" args)
-        :collection org-ilm--active-collection))
-
-(defun org-ilm--import-media-read-source ()
-  (when-let* ((source (ffap-read-file-or-url "File or URL: " nil))
-              (title source))
-    (setq title (if (org-url-p source)
-                    (org-ilm-convert--ytdlp-title-from-url source)
-                  (file-name-base source)))
-    (org-ilm--transient-set-target-value "t" title)
-    (list source title)))
-
-(transient-define-infix org-ilm--import-media-transient-source ()
-  :class 'transient-option
+(transient-define-infix org-ilm--import-transient-collection ()
+  :class 'org-ilm-transient-cons-option
   :transient 'transient--do-call
-  :argument "--source="
-  :allow-empty nil
-  :always-read t
-  :reader
-  (lambda (prompt initial-input history)
-    (car (org-ilm--import-media-read-source))))
-
-(transient-define-prefix org-ilm--import-media-transient ()
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (append
-     (when-let ((source (org-ilm--import-media-read-source)))
-       (list (concat "--source=" (car source))
-             (concat "--title=" (cadr source))))))
-
-  ["Media import"
-   ("s" "Source" org-ilm--import-media-transient-source)
-   ("t" "Title" "--title=" :prompt "Title: " :always-read t :transient transient--do-call)
-   ("RET" "Import"
-    (lambda ()
-      (interactive)
-      (cl-destructuring-bind (&key source title collection &allow-other-keys)
-          (org-ilm--import-media-transient-args)
-        (org-ilm--capture-capture
-         'material :collection collection
-         :title title :content ""
-         :props (list :ILM_MEDIA source))))
-    :inapt-if-not
-    (lambda ()
-      (cl-destructuring-bind (&key source &allow-other-keys)
-          (org-ilm--import-media-transient-args (transient-get-value))
-        source)))])
-
-;;;; Resource
-
-;; Generic object with citation that contains zero or more attachments. Think of:
-;; - Website article / blog post
-;; - Youtube video (media)
-;; - Paper from arxiv link or doi (paper)
-;; - Paper from local pdf file
-
-(defcustom org-ilm-pdf2doi-path (executable-find "pdf2doi")
-  "Path to the pdf2doi executable."
-  :type 'file
-  :group 'org-ilm-import)
-
-(defun org-ilm--pdf2doi (path)
-  "Use pd2doi to attempt extraction of doi from pdf in PATH."
-  (cl-assert (f-absolute-p path))
-  (when org-ilm-pdf2doi-path
-    ;; pdf2doi returns table, one line per file. we only pass one file so only
-    ;; fetch the first line.
-    (when-let* ((output (car (process-lines org-ilm-pdf2doi-path path)))
-                (doi (string-trim (nth 1 (string-split output)))))
-      (when (and doi (not (string-empty-p doi)) (not (string= doi "n.a.")))
-        doi))))
-
-(defun org-ilm--import-resource-process-source (&optional data)
-  (unless (plist-get data :source)
-    (setf (plist-get data :source)
-          (ffap-read-file-or-url
-           "URL/DOI/PDF path: "
-           (or (thing-at-point 'url)
-               ;; Works in dired!
-               (thing-at-point 'existing-filename)))))
-
-  (map-let (:source) data 
-    (when (and source (not (string-empty-p source)))
-
-      (let ((type "resource")
-            (title source)
-            source-type info)
-        
-        (cond
-         ((file-exists-p source)
-          (setq source (expand-file-name source)
-                source-type 'file)
-          (when-let ((doi (org-ilm--pdf2doi source)))
-            (setq info (org-ilm--citation-get-zotero doi))))
-         (t
-          (setq info (org-ilm--citation-get-zotero source)
-                source-type (if (org-url-p source) 'url 'id))))
-
-        (when info
-          (setq title (or (alist-get 'title info)
-                          (alist-get 'shortTitle info)
-                          (when (eq source-type 'url)
-                            (org-ilm--get-page-title source))
-                          source))
-
-          (pcase (alist-get 'itemType info)
-            ((or "preprint" "conferencePaper" "document" "journalArticle" "manuscript")
-             (setq type "paper"))
-            ((or "videoRecording" "audioRecording")
-             (setq type "media"))
-            (_ (setq type "website"))))
-
-        (map-put! data :source source)
-        (map-put! data :source-type source-type)
-        (map-put! data :title title)
-        (map-put! data :type type)
-        (map-put! data :info info)
-
-        data))))
-
-(defun org-ilm--import-resource-transient-args (&optional args)
-  (setq args (if transient-current-command
-                 (transient-args transient-current-command)
-               (transient-get-value)))
-  (map-let (:collection :source-type :bibtex :id :key :title) (transient-scope)
-    (list :source (transient-arg-value "--source=" args)
-          :source-type source-type
-          :type (transient-arg-value "--type=" args)
-          :bibtex bibtex
-          :key key
-          :id id
-          :collection collection
-          :title title
-
-          :as-child (transient-arg-value "--child" args)
-          
-          :file-method (intern (or (transient-arg-value "--file-method" args) "cp"))
-
-          :html-download (transient-arg-value "--html-download" args)
-
-          :paper-download (transient-arg-value "--paper-download" args)
-
-          ;; Webpage Download
-          :webpage-download (transient-arg-value "--webpage-download" args)
-          :webpage-simplify
-          (cond
-           ((transient-arg-value "--webpage-simplify-to-html" args)
-            "html")
-           ((transient-arg-value "--webpage-simplify-to-markdown" args)
-            "markdown"))
-          :webpage-orgify (transient-arg-value "--webpage-orgify" args)
-
-          ;; Media download
-          :media-download (transient-arg-value "--media-download" args)
-          :media-template (transient-arg-value "--media-template=" args)
-          :media-audio-only (transient-arg-value "--media-audio" args)
-          :media-sub-langs (cdr (assoc "--media-subs=" args)))))
-
-(transient-define-infix org-ilm--import-resource-transient-source ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :key "s"
-  :description "Source"
-  :argument "--source="
   :always-read t
   :allow-empty nil
+  :key "c"
+  :description "Collection"
+  :argument 'collection
   :reader
   (lambda (&rest _)
-    (let ((data (org-ilm--import-resource-process-source (transient-scope))))
-      ;; (setf (transient-scope) data)
-      (org-ilm--transient-set-target-value "t" (plist-get data :type))
-      (plist-get data :source))))
+    (let* ((cur-collection (alist-get 'collection (org-ilm--import-transient-parse)))
+           (choices (map-apply
+                     (lambda (collection data)
+                       (cons
+                        (format
+                         "%s %s"
+                         (propertize (symbol-name collection) 'face 'bold)
+                         (plist-get data :path))
+                        collection))
+                     (org-ilm-collections)))
+           (choice (completing-read "Collection: " choices))
+           (collection (map-elt choices choice)))
+      (when (and (null collection) (not (string-empty-p choice)))
+        (setq collection (intern choice))
+        (org-ilm-new-collection
+         collection
+         (org-ilm--collection-property (org-ilm--active-collection) :path)))
+      (unless (eq collection cur-collection)
+        (org-ilm--transient-set-target-value "p" nil)
+        (org-ilm--transient-set-target-value "s" nil))
+      collection)))
 
-(transient-define-infix org-ilm--import-resource-transient-key ()
-  :class 'transient-option
+(transient-define-infix org-ilm--import-transient-schedule ()
+  :class 'org-ilm-transient-cons-option
   :transient 'transient--do-call
-  :key "ck"
+  :always-read t
+  :allow-empty nil
+  :key "s"
+  :description "Schedule"
+  :argument 'schedule
+  :reader
+  (lambda (&rest _)
+    (org-read-date 'with-time nil nil "Schedule: ")))
+
+(transient-define-infix org-ilm--import-transient-priority ()
+  :class 'org-ilm-transient-cons-option
+  :transient 'transient--do-call
+  :always-read t
+  :allow-empty nil
+  :key "p"
+  :format " %k %d"
+  :description
+  (lambda ()
+    (concat
+     "Priority: "
+     (map-let (priority collection) (org-ilm--import-transient-parse)
+       (cond
+        (priority
+         (propertize 
+          (org-ilm-queue--position-format (org-ilm--pqueue collection) priority 1)
+          'face 'transient-value))
+        (t
+         (propertize "nil" 'face 'transient-inactive-value))))))
+  :argument 'priority
+  :reader
+  (lambda (&rest _)
+    (let* ((collection (alist-get 'collection (org-ilm--import-transient-parse))) 
+           (priority (org-ilm--bqueue-select-read
+                      (org-ilm--pqueue-bqueue collection)
+                      nil ;; init
+                      "Priority: "
+                      1))
+           (sched (org-ilm--initial-schedule-from-priority (cdr priority))))
+      (org-ilm--transient-set-target-value "s" (ts-format "%Y-%m-%d" sched))
+      priority)))
+
+(transient-define-infix org-ilm--import-transient-key ()
+  :class 'org-ilm-transient-cons-option
+  :transient 'transient--do-call
+  :always-read t
+  :allow-empty nil
+  :key "k"
+  :argument 'key
   :description
   (lambda ()
     (concat
      "Key"
-     (when-let* ((key (plist-get (transient-scope) :key))
+     (when-let* ((key (car (oref (transient-scope) bibtex)))
                  (entry (or (org-mem-entry-by-roam-ref (concat "@" key))
                             (citar-get-entry key))))
        (propertize " DUPLICATE" 'face 'error))))
-  :argument "--key="
-  :always-read t
-  :allow-empty nil
   :inapt-if-not
-  (lambda () (plist-get (transient-scope) :bibtex))
+  (lambda () (cdr (oref (transient-scope) bibtex)))
   :reader
   (lambda (&rest _)
     (let ((key (read-string "Key (empty to auto-generate): "))
-          (bibtex (plist-get (transient-scope) :bibtex)))
+          (bibtex (cdr (oref (transient-scope) bibtex))))
       (unless (and key (not (string-empty-p key)))
         (with-temp-buffer
           (insert (org-ilm--format-bibtex-entry
                    bibtex
-                   (plist-get (transient-scope) :key)))
+                   (car (oref (transient-scope) bibtex))))
           (goto-char (point-min))
           (setq key (ignore-errors (bibtex-generate-autokey)))
           (unless (and key (not (string-empty-p key)))
             (setq key (upcase (substring (org-id-uuid) 0 8))))))
-      (setf (plist-get (transient-scope) :key) key
+      (setf (oref (transient-scope) bibtex) (cons key bibtex)
             (alist-get "=key=" bibtex nil nil #'string=) key)
-      (org-ilm--transient-set-target-value "ck" key))))
+      key)))
 
-(transient-define-prefix org-ilm--import-resource-transient (data)
+(transient-define-prefix org-ilm--import-transient (data)
   :refresh-suffixes t
+  :incompatible '((html-download webpage-download)) 
   
-  ["Import Resource"
-   ;; ("x" "X" (lambda () (interactive) (message "%s" (transient-scope))) :transient t)
-   (org-ilm--import-resource-transient-source)
-   (:info
+  [""
+   :description (lambda () (format "Import %s" (oref (transient-scope) type)))
+   ("x" "X"
     (lambda ()
-      (propertize (plist-get (transient-scope) :title) 'face 'italic))
-    :if (lambda () (plist-get (transient-scope) :title)))
-   ("t" "Type" "--type=" :choices ("website" "media" "paper" "resource")
-    :always-read t :allow-empty nil)
+      (interactive)
+      (setq x (org-ilm--import-transient-parse))
+      (message "%s" (org-ilm--import-transient-parse)))
+    :transient t)
+   (org-ilm--import-transient-collection)
+   (org-ilm--import-transient-priority)
+   (org-ilm--import-transient-schedule)
+   ;; TODO Parent element
+   ("t" "Title"
+    :cons 'title
+    :class org-ilm-transient-cons-option
+    :prompt "Title: "
+    :always-read t :allow-empty nil :transient t)
    ]
 
   ["File"
-   :hide (lambda () (not (eq (plist-get (transient-scope) :source-type) 'file)))
-   ("fm" "Method of attachment" "--file-method="
-    :allow-empty nil
-    :always-read t
-    :choices (mv cp ln lns) :prompt "Method of attachment: ")
+   :if (lambda () (eq (oref (transient-scope) type) 'file))
+   ("a" "Method of attachment"
+    :cons 'file-method
+    :class org-ilm-transient-cons-switches
+    :choices (cp mv ln lns)
+    :allow-empty t)
+   (:info
+    (lambda ()
+      (let ((method (alist-get 'file-method (org-ilm--import-transient-parse))))
+        (propertize 
+         (pcase method
+           ('cp "Copy")
+           ('mv "Move")
+           ('ln "Hard link")
+           ('lns "Symbolic link")
+           (_ "Don't attach, add to ref"))
+         'face 'Info-quoted)))
+    :transient t)
    ]
-  
 
   ["HTML -> org download"
-   :if (lambda () (not (eq (plist-get (transient-scope) :source-type) 'file)))
-   ("hd" "Download" "--html-download")
+   :if (lambda () (member (oref (transient-scope) type) '(webpage url)))
+   (:info* (lambda () "Convert HTML to Org"))
+   ("hd" "Download"
+    :cons 'html-download
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call)
    ]
 
   ["Webpage download"
-   :hide
-   (lambda ()
-     (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
-       (or (not (eq (plist-get args :source-type) 'url))
-           (string= (plist-get args :type) "media")
-           (plist-get args :html-download))))
-   :setup-children
-   (lambda (_)
-     (org-ilm-convert--transient-webpage-build t t))]
-
+   :if (lambda () (member (oref (transient-scope) type) '(webpage url)))
+   (:info* (lambda () "Download a full snapshot of the webpage"))
+   ("wd" "Download"
+    :cons 'webpage-download
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call)
+   ("ws" "Simplify"
+    :cons 'webpage-simplify
+    :class org-ilm-transient-cons-switches
+    :transient transient--do-call
+    :choices ("markdown" "html")
+    :allow-empty t
+    :if (lambda () (alist-get 'webpage-download (org-ilm--import-transient-parse))))
+   ("wo" "Orgify"
+    :cons 'webpage-orgify
+    :class org-ilm-transient-cons-switch
+    :summary "Convert to Org mode with Pandoc"
+    :transient transient--do-call
+    :if (lambda () (alist-get 'webpage-download (org-ilm--import-transient-parse))))
+   ]
+  
   ["Media download"
    :if
    (lambda ()
-     (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
-       (and (string= (plist-get args :type) "media")
-            (eq (plist-get args :source-type) 'url))))
-   :setup-children
-   (lambda (_)
-     (org-ilm-convert--transient-media-build))
+     (eq 'media (oref (transient-scope) type)))
+   ("md" "Download"
+    :cons 'media-download
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call)
+   ("mt" "Template"
+    :cons 'media-template
+    :class org-ilm-transient-cons-option
+    :prompt "Template: "
+    :transient transient--do-call
+    :inapt-if (lambda () (not (alist-get 'media-download (org-ilm--import-transient-parse)))))
+   ("ma" "Audio only"
+    :cons 'media-audio
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call
+    :inapt-if (lambda () (not (alist-get 'media-download (org-ilm--import-transient-parse)))))
+   ("ms" "Subtitles download"
+    :cons 'media-subs
+    :class org-ilm-transient-cons-option
+    :transient transient--do-call
+    :multi-value rest
+    :choices
+    (lambda ()
+      (let* ((url (oref (transient-scope) source))
+             (subs (org-ilm-convert--ytdlp-subtitles-from-url url)))
+        (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
    ]
 
-  ["Paper download"
-   :if
-   (lambda ()
-     (when-let ((args (org-ilm--import-resource-transient-args (transient-get-value))))
-       (and (string= (plist-get args :type) "paper")
-            (not (eq (plist-get args :source-type) 'file)))))
-   ("pd" "Download" "--paper-download" :transient transient--do-call)
+  ["Website attachment"
+   :if (lambda () (eq 'url (oref (transient-scope) type)))
+   ("ad" "Download"
+    :cons 'webattach-download
+    :class org-ilm-transient-cons-option
+    :transient t
+    :reader
+    (lambda (&rest _)
+      (with-slots (source) (transient-scope)
+        (if-let ((attachments (ignore-errors (zotra-get-attachment source 'all))))
+            (if (= (length attachments) 1)
+                (car attachments)
+              (completing-read "Select attachment: " attachments nil t))
+          (message "No attachments were found")
+          nil))))
+   ("am" "Main attachment"
+    :cons 'webattach-main
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call
+    :if
+    (lambda ()
+      (map-let (webattach-download webpage-download html-download) (org-ilm--import-transient-parse)
+        (and webattach-download
+             (or webpage-download html-download))))
+    )
    ]
 
   ["Citation"
-   ("cc" "Add citation"
+   ("C" "Add citation"
     (lambda ()
       (interactive)
       ;; TODO We already save the zotero data in :data, write a function to
       ;; transform it into bibtex
-      (let* ((data (transient-scope))
-             (args (org-ilm--import-resource-transient-args))
-             (source (plist-get args :source)))
-        (if-let* ((bibtex (org-ilm--citation-get-bibtex source 'as-alist))
-                  (key (cdr (assoc "=key=" bibtex))))
-            (progn
-              (setf (plist-get data :bibtex) bibtex
-                    (plist-get data :key) key)
-              (org-ilm--transient-set-target-value "ck" key))
-          (message "Bibtex could not be found"))))
+      (let ((ref (oref (transient-scope) ref)))
+
+        (unless ref
+          (let ((option (read-string "URL or DOI (empty for manual entry): ")))
+            (unless (string-empty-p option)
+              (setq ref option))))
+
+        (when ref
+          (if-let* ((bibtex (org-ilm--citation-get-bibtex ref 'as-alist))
+                    (key (cdr (assoc "=key=" bibtex))))
+              (progn
+                (oset (transient-scope) bibtex (cons key bibtex))
+                (org-ilm--transient-set-target-value "k" key))
+            (message "Bibtex could not be found")))
+        
+        ))
     :transient transient--do-call)
-   (org-ilm--import-resource-transient-key)
+   (org-ilm--import-transient-key)
    ]
 
   ["Actions"
+   ("<tab>" "Auto retrieve info"
+    (lambda ()
+      (interactive)
+      (with-slots (source type ref) (transient-scope)
+        (unless ref
+          (cond
+           ((and (eq type 'file) (string= (file-name-extension source) "pdf"))
+            (setq ref (org-ilm--pdf2doi (expand-file-name source))))))
+
+        (unless ref
+          (setq ref (read-string "URL or identifier: ")))
+
+        (let* ((t-info (make-thread
+                        (lambda ()
+                          (org-ilm--citation-get-zotero ref))))
+               (t-bib (make-thread
+                       (lambda ()
+                         (org-ilm--citation-get-bibtex ref 'as-alist))))
+               (t-attachs (make-thread
+                           (lambda ()
+                             (zotra-get-attachment ref 'all))))
+               (info (thread-join t-info))
+               (bib (thread-join t-bib))
+               (attachments (thread-join t-attachs))
+               (title (or (alist-get 'title info)
+                          (alist-get 'shortTitle info)
+                          (pcase type
+                            ('webpage
+                             (org-ilm--get-page-title source))
+                            ('media
+                             (org-ilm-convert--ytdlp-title-from-url source)))))
+               (key (cdr (assoc "=key=" bib))))
+          (when info
+            (oset (transient-scope) info info))
+          (when title
+            (org-ilm--transient-set-target-value "t" title))
+          (when bib
+            (oset (transient-scope) bibtex (cons key bib))
+            (org-ilm--transient-set-target-value "k" key))
+          (when attachments
+            (org-ilm--transient-set-target-value "ad" (car attachments))))))
+    :transient transient--do-call)
    ("RET" "Import"
     (lambda ()
       (interactive)
-      (cl-destructuring-bind
-          (&key source source-type type bibtex key title id collection as-child
-                file-method
-                html-download
-                paper-download
-                webpage-download webpage-simplify webpage-orgify
-                media-download media-template media-audio-only media-sub-langs)
-          (org-ilm--import-resource-transient-args)
-        (let ((transient-args (transient-args 'org-ilm--import-resource-transient))
-              (media-no-download (and (string= type "media") (not media-download)))
-              (file-p (eq source-type 'file))
+      (map-let
+          (source type bibtex title id collection priority schedule
+                  file-method
+                  webattach-download webattach-main
+                  html-download
+                  webpage-download webpage-simplify webpage-orgify
+                  media-download media-template media-audio media-subs)
+          (org-ilm--import-transient-parse)
+        (let ((media-no-download (and (eq type 'media) (not media-download)))
+              (file-media-p (and (eq type 'file) (org-ilm--media-file-p source)))
+              (file-p (eq type 'file))
+              props
               content)
 
           (setq content
                 (cond
                  (html-download
                   (org-ilm--get-website-as-org source))
-                 (media-no-download
+                 ((or media-no-download file-media-p)
                   ;; Create an org attachment for note taking when importing media
                   ;; without downloading. When downloading, set in on-success
                   ;; callback. HTML download is inactive when type is media, so no
                   ;; clash with org file generated by it.
                   "")))
+
+          ;; Property: ROAM_REFS
+          (let (roam-refs)
+            (when (or (and (eq type 'file) (null file-method))
+                      (member type '(media webpage)))
+              (push source roam-refs))
+
+            (when (car bibtex)
+              (push (concat "@" (car bibtex)) roam-refs))
+            
+            (when roam-refs
+              (setf (plist-get props :ROAM_REFS) (string-join roam-refs " "))))
+
+          ;; Property: ILM_MEDIA
+          (let (media)
+            (cond
+             ((or media-no-download file-media-p)
+              (if file-method
+                  (setq media (concat id "." (file-name-extension source)))
+                (setq media source)))
+             ((and (eq type 'media) media-download)
+              (setq media (org-ilm-convert--ytdlp-filename-from-url source media-template 'restrict))))
+
+            (when media
+              (setf (plist-get props :ILM_MEDIA) media)))
           
           (org-ilm--capture-capture
            'material
            :collection collection
            :title title
            :id id
-           :bibtex bibtex
+           :priority priority
+           :scheduled schedule
+           :bibtex (cdr bibtex)
            :content content
            :file (when file-p source)
            :method (when file-p file-method)
-           :ext (when file-p t)
-           :props
-           (append
-            (unless file-p (list :ROAM_REFS (if key (concat source " @" key) source)))
-            ;; Media URL as media prop when we are not downloading. When
-            ;; downloading, the source file is determined by ytdlp and set later
-            ;; on.
-            (when media-no-download (list :ILM_MEDIA source)))
+           :ext (cond
+                 ;; For media elements, make sure the org file is seen as the
+                 ;; element attachment, rather than the media file. The actual
+                 ;; org file itself is created in the on-success callback.
+                 ((or (eq type 'media) file-media-p)
+                  "org")
+                 ;; Otherwise, if there is a file attachment, let
+                 ;; org-ilm-capture figure out extension by passed t.
+                 (file-p
+                  t))
+           :props props
            :on-success
            (lambda (id attach-dir collection)
-             (when (or html-download webpage-download media-download paper-download)
-               (make-directory attach-dir t)
+             (when (or html-download webpage-download media-download webattach-download)
+               (make-directory attach-dir t))
 
-               (when paper-download
-                 (condition-case nil
-                     (progn
-                       (zotra-download-attachment
-                        source nil
-                        (expand-file-name (concat id ".pdf") attach-dir))
-                       (org-ilm--org-with-point-at id
-                         (org-attach-sync)
-                         (org-entry-put nil org-ilm-property-ext "pdf")))
-                   (error (message "Failed to download paper for %s" title))))
+             ;; For media elements, make sure there is an empty org file for
+             ;; annotations.
+             (when (or file-media-p (eq type 'media))
+               (let ((f (expand-file-name (concat id ".org") attach-dir)))
+                 (unless (file-exists-p f)
+                   (make-empty-file f))))
 
-               (when webpage-download
-                 (org-ilm-convert--transient-webpage-run
-                  source id attach-dir id transient-args))
+             (when webattach-download
+               (make-thread
+                (lambda ()
+                  (condition-case nil
+                      (progn
+                        (url-copy-file
+                         webattach-download
+                         (expand-file-name (concat id ".pdf") attach-dir)
+                         'ok-if-exists)
+                        (org-ilm--org-with-point-at id
+                          (org-attach-sync)
+                          (when (or webattach-main (and (not webpage-download) (not html-download)))
+                            (org-entry-put nil org-ilm-property-ext "pdf"))))
+                    (error (message "Failed to download paper for %s" title))))))
 
-               (when (or media-download media-sub-langs)
-                 (org-ilm-convert--transient-media-run
-                  source attach-dir id transient-args
-                  (lambda (id output-path)
-                    (org-entry-put nil org-ilm-property-media (file-name-nondirectory output-path))
-                    ;; Create org file for annotations
-                    (let ((f (expand-file-name (concat id ".org")
-                                               (file-name-directory output-path))))
-                      (unless (file-exists-p f)
-                        (make-empty-file f))))))
-               ))
+             (when webpage-download
+               (org-ilm-convert--transient-webpage-run
+                source id attach-dir id))
+
+             (when (or media-download media-subs)
+               (org-ilm-convert--convert-with-ytdlp
+                :process-id id
+                :url source
+                :output-dir attach-dir
+                :filename-template media-template
+                :audio-only-p media-audio
+                :sub-langs media-subs
+                :no-download (not media-download)
+                :on-success
+                (lambda (proc buf id output-path)
+                  (message "[Org-Ilm-Convert] Media download completed: %s" source)
+                  (org-ilm--org-with-point-at id
+                    (org-attach-sync)))))
+
+             )
+             
            )))))
    ]
 
   (interactive "P")
-  (unless (plist-get data :id)
-    (setf (plist-get data :id) (org-id-new)))
-  ;; Eventhough it sets the data value inplace, i need to set it to data again
-  ;; here, otherwise the results are weird.
-  (setq data (org-ilm--import-resource-process-source data))
+  
   (transient-setup
-   'org-ilm--import-resource-transient
-   nil nil
+   'org-ilm--import-transient nil nil
    :scope data
    :value
    (lambda ()
-     (map-let (:source :key :type :id) data
-       (append
-        '("--webpage-simplify-to-markdown" "--webpage-orgify"
-          "--media-template=%(title)s.%(ext)s"
-          "--file-method=cp")
-        (list (concat "--source=" source)
-              (concat "--key=" key)
-              (concat "--type=" type)
-              ;; Don't want media filename to be org-id as I rely on ILM_MEDIA
-              ;; prop to point to media. The dedicated attachment is the org file
-              ;; in media elements
-              ;; (concat "--media-template=" id ".%(ext)s")
-              )
-        (when (string= "website" type)
-          (list "--html-download")))))))
+     (with-slots (type source) data
+       `((file-method . cp)
+         (webpage-simplify . "markdown")
+         (webpage-orgify . t)
+         (html-download . ,(eq type 'webpage))
+         ;; Don't want media filename to be org-id as I rely on ILM_MEDIA prop
+         ;; to point to media. The dedicated attachment is the org file in
+         ;; media elements.
+         ;; (media-template . " id ".%(ext)s")
+         (media-template . "%(title)s.%(ext)s")
+         (title . ,(pcase type
+                     ('file (file-name-base source))))
+         (collection . ,(org-ilm--active-collection)))))))
+
 
 ;;; Footer
 

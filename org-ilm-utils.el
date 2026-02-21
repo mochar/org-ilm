@@ -17,6 +17,8 @@
 (require 'consult)
 (require 'ts)
 (require 'url)
+(require 'zotra)
+(require 'parsebib)
 
 (require 'org-ilm-core)
 
@@ -360,7 +362,7 @@ save-excursion."
     ;; If id is that of headline at point, dont jump, for performance but also
     ;; so that org-mem is not required to have parsed the headline (useful in
     ;; capture).
-    ((or (null ,thing) (string= ,thing (org-id-get)))
+    ((or (null ,thing) (and (eq major-mode 'org-mode) (string= ,thing (org-id-get))))
      ;; Reveal entry contents, otherwise run into problems parsing the metadata,
      ;; such as with org-srs drawer.
      (org-ilm--org-with-headline-contents-visible ,@body))
@@ -681,6 +683,12 @@ to parse the headline."
 
 ;;;; Bibtex
 
+(defcustom org-ilm-bibtex-fields nil
+  "List of field names to include in the bibtex entry.
+See `parsebib-read-entry'."
+  :type '(repeat string)
+  :group 'org-ilm)
+
 (defun org-ilm--format-bibtex-entry (entry &optional key)
   "Format a parsebib ENTRY alist or hash entry as a BibTeX string.
 ENTRY may be an alist or association list with keys like \"=type=\", \"=key=\" and field names.
@@ -706,6 +714,38 @@ KEY may be the key to use instead of =key=."
              ",\n")
             "\n}\n")))
 
+(defun org-ilm--citation-get-bibtex (source &optional as-alist)
+  "Return the bibtex entry as string from SOURCE."
+  ;; Much better results with citoid backend compared to zotra
+  (let ((zotra-backend 'citoid)
+        bibtex-string)
+    (setq bibtex-string (-some-> (zotra-get-entry source "bibtex")
+                          s-trim))
+    (if (and bibtex-string as-alist)
+        (org-ilm--citation-parse-bibtex bibtex-string)
+      bibtex-string)))
+
+(defun org-ilm--citation-parse-bibtex (bibtex-string)
+  "Parses BIBTEX-STRING as alist."
+  (with-temp-buffer
+    (insert bibtex-string)
+    (when-let* ((bibtexes (car (parsebib-parse-bib-buffer
+                                :fields org-ilm-bibtex-fields
+                                :expand-strings t
+                                :inheritance t
+                                :replace-TeX t)))
+                (key (car (hash-table-keys bibtexes))))
+      (gethash key bibtexes))))
+
+(defun org-ilm--citation-get-zotero (source)
+  "Return the zotero reference of SOURCE as an alist."
+  (ignore-errors  ;; TODO Only ignore zotra citaion not found
+    (when-let* ((zotra-backend 'citoid)
+                (json-string (zotra-get-entry source "zotero")))
+      (with-temp-buffer
+        (insert json-string)
+        (goto-char (point-min))
+        (aref (json-read) 0)))))
 
 ;;;; Consult
 
@@ -845,20 +885,6 @@ If SEED is provided, sets the random seed first for reproducible results."
         (beta (cdr beta)))
     (/ (- alpha 1) (+ alpha beta -2))))
 
-;;;; Transient
-
-(defun org-ilm--transient-set-target-value (target-key new-value)
-  "Finds the target argument by its key and sets its internal value slot."
-  (let* (;; Get the list of currently displayed suffix objects (internal variable)
-         (all-suffixes transient--suffixes)
-         ;; Find the target object by its key
-         (target-obj (cl-find target-key all-suffixes
-                             :key (lambda (s) (oref s key))
-                             :test #'equal)))
-    ;; Check if it's a valid object and manually set the 'value' slot (internal slot)
-    (when (cl-typep target-obj 'transient-infix)
-      (oset target-obj value new-value))))
-
 ;;;; Web
 
 (defun org-ilm--slugify-title (title)
@@ -923,6 +949,25 @@ Uses various utilities from `url.el'."
                            "--wrap=preserve")
       (buffer-string))))
 
+
+;;;; Tools
+
+(defcustom org-ilm-pdf2doi-path (executable-find "pdf2doi")
+  "Path to the pdf2doi executable."
+  :type 'file
+  :group 'org-ilm)
+
+(defun org-ilm--pdf2doi (path)
+  "Use pd2doi to attempt extraction of doi from pdf in PATH."
+  (cl-assert (f-absolute-p path))
+  (setq path (expand-file-name path))
+  (when org-ilm-pdf2doi-path
+    ;; pdf2doi returns table, one line per file. we only pass one file so only
+    ;; fetch the first line.
+    (when-let* ((output (car (process-lines org-ilm-pdf2doi-path path)))
+                (doi (string-trim (nth 1 (string-split output)))))
+      (when (and doi (not (string-empty-p doi)) (not (string= doi "n.a.")))
+        doi))))
 
 ;;; Footer
 

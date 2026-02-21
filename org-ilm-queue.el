@@ -149,7 +149,7 @@ NEW-POS-ALIST is an alist of (ID . NEW-POS) pairs."
     (let ((rank (car position))
           (quantile (cdr position)))
       (format "#%s/%s (%.2f%s)"
-              (1+ rank) (ost-size queue) (* 100 quantile) "%"))))
+              (1+ rank) (+ (ost-size queue) (or offset 0)) (* 100 quantile) "%"))))
 
 ;;; Footer
 

@@ -148,6 +148,12 @@ is then passed as a file move capture."
       (org-ilm-org-extract)
     (org-ilm-mark-mode 1)))
 
+(cl-defmethod org-ilm--extract (&context (ilm-attachment media))
+  "Extract text in Org mode attachments by cycling through regions."
+  (if (region-active-p)
+      (org-ilm-org-extract)
+    (org-ilm-mark-mode 1)))
+
 (defun org-ilm-org-extract (&optional title)
   "Extract region text in Org mode attachments."
   (interactive)
@@ -434,6 +440,9 @@ A cloze is made automatically of the element at point or active region."
          (org-ilm-recreate-overlays))))))
 
 (cl-defmethod org-ilm--cloze (&context (ilm-attachment org))
+  (org-ilm-org-cloze))
+
+(cl-defmethod org-ilm--cloze (&context (ilm-attachment media))
   (org-ilm-org-cloze))
 
 ;;;; Split

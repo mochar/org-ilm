@@ -2,7 +2,18 @@
 
 ;;; Commentary:
 
-;; Media attachments are actually just org attachmnets with a ILM_MEDIA property.
+;; Media attachments are actually just org attachments with an ILM_MEDIA
+;; property. This property consists of a source, and optional start and end
+;; timestamps. The source can be a URL, a path, or simply a filename in which
+;; case the media file has to be within the element's attachment directory.
+
+;; A custom "ilmmedia" org link type is used to jump to the timestamp/range
+;; using MPV. Only the timestamp(s) are stored in the url parameters: the source
+;; is determined from the ILM_MEDIA property.
+
+;; Much of the functionality relies on org-media-note, but the plan is to
+;; implement them myself. Mostly because I need to advice and hack around
+;; org-media-note a lot.
 
 ;;; Code:
 
@@ -14,17 +25,43 @@
 (require 'org-media-note)
 (require 'org-node)
 (require 'mpv)
+(require 'url)
 
 (require 'org-ilm-utils)
 (require 'org-ilm-attachment)
+(require 'org-ilm-convert)
+(require 'org-ilm-transient)
 
 ;;;; Variables
 
 (defconst org-ilm-property-media "ILM_MEDIA")
 (defconst org-ilm-property-media+ "ILM_MEDIA+")
 (defconst org-ilm-media-link "ilmmedia")
+(defvar org-ilm-media-audio-extensions '("flac" "mp3" "wav" "m4a" "aac" "opus"))
+(defvar org-ilm-media-video-extensions '("avi" "rmvb" "ogg" "ogv" "mp4" "mkv" "mov" "webm" "flv" "ts" "mpg"))
 
 ;;;; Functions
+
+(defun org-ilm--media-file-p (path)
+  "Return t if PATH is a video or audio file."
+  (when (and (file-exists-p path)
+             (or
+              (member (file-name-extension path) org-ilm-media-audio-extensions)
+              (member (file-name-extension path) org-ilm-media-video-extensions)))
+    t))
+
+(defun org-ilm--media-url-p (url)
+  ;; Determine if media type by attempting to extract filename from url
+  ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
+  ;; not media type.
+  ;; NOTE Quite slow (~3 sec)
+  ;; (condition-case err
+  ;;     (or (org-ilm-convert--ytdlp-filename-from-url url) t)
+  ;;   (error nil))
+
+  ;; Instead just check if its a youtube link for now
+  (member (url-domain (url-generic-parse-url url))
+          '("youtube.com" "youtu.be")))
 
 (defun org-ilm--source-recover (source element-id &optional registry-id)
   "Return path to media attachment or its url."
@@ -171,7 +208,7 @@ the ytdlp flags which I don't care to do atm."
           (insert "- [[ilmmedia:" range "][" range "]] " title "\n")))
     (message "No chapter data available")))
 
-;;;;; Custom link
+;;;; Custom link
 
 ;; Will get the media file name from ILM_MEDIA property so that we only have to
 ;; store the timestamps in the link.
@@ -193,7 +230,7 @@ the ytdlp flags which I don't care to do atm."
  :follow #'org-ilm--media-link-folow
  )
 
-;;;;; Org-media-note advice
+;;;; Org-media-note advice
 
 ;; Advice org-media-note to use our link type when inserting
 
@@ -230,6 +267,83 @@ the ytdlp flags which I don't care to do atm."
                    #'org-ilm--advice--org-media-note--link)))
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--ilm-hook-media)
+
+;;;; Conversion transient
+
+;; TODO Decide what to do here. The idea is to have reusable transient for media
+;; conversion but it ends up messy due to contexts being to different (different
+;; object in transient-scope, etc).
+
+;; (defun org-ilm-convert--transient-media-build (&optional no-template)
+;;   (let ((inapt-if
+;;          (lambda ()
+;;            (null (transient-arg-value "--media-download" (transient-get-value)))))
+;;         suffixes)
+        
+;;     (push org-ilm-convert--transient-media-subs-suffix suffixes)
+;;     (push (append
+;;            org-ilm-convert--transient-media-audio-suffix
+;;            (list :inapt-if inapt-if)) suffixes)
+;;     (push (append
+;;            org-ilm-convert--transient-media-template-suffix
+;;            (if no-template
+;;                (list :inapt-if-nil nil)
+;;            (list :inapt-if inapt-if)))
+;;           suffixes)
+;;     (push org-ilm-convert--transient-media-download-suffix suffixes)
+    
+;;     (mapcar
+;;      (lambda (suffix)
+;;        (transient-parse-suffix 'transient--prefix suffix))
+;;      suffixes)))
+
+;; (transient-define-group org-ilm--media-convert-group
+;;   ""
+;;   ["Media"
+;;    ("md" "Download"
+;;     :cons 'media-download
+;;     :class org-ilm-transient-cons-switch
+;;     :transient transient--do-call)
+;;    ("mt" "Template"
+;;     :cons 'media-template
+;;     :class org-ilm-transient-cons-option
+;;     :prompt "Template: "
+;;     :transient transient--do-call)
+;;    ("ma" "Audio only"
+;;     :cons 'media-audio
+;;     :class org-ilm-transient-cons-switch
+;;     :transient transient--do-call)
+;;    ("ms" "Subtitles download"
+;;     :cons 'media-subs
+;;     :class org-ilm-transient-cons-option
+;;     :transient transient--do-call
+;;     :multi-value rest
+;;     :choices
+;;     (lambda ()
+;;       (let* ((url (transient-arg-value "--source=" (transient-args transient-current-command)))
+;;              (subs (org-ilm-convert--ytdlp-subtitles-from-url url)))
+;;         (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
+;;    ])
+
+;; (defun org-ilm--media-convert-transient-run (url output-dir id transient-args &optional on-success)
+;;   "Convert a media URL to a local video file."
+;;   (map-let (media-download media-template media-audio media-subs sub-langs)
+;;       transient-args
+;;     (org-ilm-convert--convert-with-ytdlp
+;;      :process-id id
+;;      :url url
+;;      :output-dir output-dir
+;;      :filename-template template
+;;      :audio-only-p audio-only
+;;      :sub-langs sub-langs
+;;      :no-download (not download)
+;;      :on-success
+;;      (lambda (proc buf id output-path)
+;;        (message "[Org-Ilm-Convert] Media conversion completed: %s" url)
+;;        (org-ilm--org-with-point-at id
+;;          (org-attach-sync)
+;;          (when on-success
+;;            (funcall on-success id output-path)))))))
 
 ;;; Footer
 

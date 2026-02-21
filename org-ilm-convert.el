@@ -507,7 +507,9 @@ does not have an option for this so it is done here.
   :group 'org-ilm-convert-ytdlp)
 
 ;; https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
-(defcustom org-ilm-convert-ytdlp-args '("--cookies-from-browser" "firefox")
+(defcustom org-ilm-convert-ytdlp-args
+  '("--cookies-from-browser" "firefox"
+    "--remote-components" "ejs:github")
   "Arguments to always pass to yt-dlp."
   :type '(repeat string)
   :group 'org-ilm-convert-ytdlp)
@@ -630,6 +632,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
          (when on-success
            (funcall on-success proc buf id output-path)))
        )))))
+
 
 
 ;;;; Conversions view
@@ -773,115 +776,116 @@ SUB-LANGS may also be 'all' to download all subtitles."
 ;;;; Org headings
 
 ;; Convert using metadata in Org heading properties and attachments.
+;; TODO This needs a redo. And placed somewhere else to avoid circular dependnecy.
 
-(defvar org-ilm-convert--org-data nil)
+;; (defvar org-ilm-convert--org-data nil)
 
-(defun org-ilm-convert-org-convert ()
-  (interactive)
-  (let* ((attach-dir (org-attach-dir))
-         (attachments (when attach-dir (org-attach-file-list attach-dir)))
-         (entry (org-node-at-point))
-         (refs (org-ilm--org-mem-refs entry)))
-    (when-let ((url (org-entry-get nil "URL")))
-      (cl-pushnew url refs :test #'equal))
-    (setq refs (seq-filter #'org-url-p refs))
+;; (defun org-ilm-convert-org-convert ()
+;;   (interactive)
+;;   (let* ((attach-dir (org-attach-dir))
+;;          (attachments (when attach-dir (org-attach-file-list attach-dir)))
+;;          (entry (org-node-at-point))
+;;          (refs (org-ilm--org-mem-refs entry)))
+;;     (when-let ((url (org-entry-get nil "URL")))
+;;       (cl-pushnew url refs :test #'equal))
+;;     (setq refs (seq-filter #'org-url-p refs))
     
-    (let* ((choice (consult--multi
-                    (list
-                     (list
-                      :name "Refs"
-                      :narrow ?r
-                      :items refs
-                      :action #'message)
-                     (list
-                      :name "Attachments"
-                      :narrow ?a
-                      :items attachments
-                      :action #'message))
-                    :require-match t
-                    :prompt "Convert: " ))
-           (source (car choice))
-           (type (if (string= (plist-get (cdr choice) :name) "Attachments")
-                   'attachment 'url)))
-      (setq org-ilm-convert--org-data
-            (list :title (org-mem-entry-title entry) :source source :type type))
-      (org-ilm--add-hook-once
-       'transient-post-exit-hook
-       (lambda () (setq org-ilm-convert--org-data nil)))
-      (org-ilm-convert--org-transient))))
+;;     (let* ((choice (consult--multi
+;;                     (list
+;;                      (list
+;;                       :name "Refs"
+;;                       :narrow ?r
+;;                       :items refs
+;;                       :action #'message)
+;;                      (list
+;;                       :name "Attachments"
+;;                       :narrow ?a
+;;                       :items attachments
+;;                       :action #'message))
+;;                     :require-match t
+;;                     :prompt "Convert: " ))
+;;            (source (car choice))
+;;            (type (if (string= (plist-get (cdr choice) :name) "Attachments")
+;;                    'attachment 'url)))
+;;       (setq org-ilm-convert--org-data
+;;             (list :title (org-mem-entry-title entry) :source source :type type))
+;;       (org-ilm--add-hook-once
+;;        'transient-post-exit-hook
+;;        (lambda () (setq org-ilm-convert--org-data nil)))
+;;       (org-ilm-convert--org-transient))))
 
-(transient-define-prefix org-ilm-convert--org-transient ()
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (list (concat "--source=" (plist-get org-ilm-convert--org-data :source))))
+;; (transient-define-prefix org-ilm-convert--org-transient ()
+;;   :refresh-suffixes t
+;;   :value
+;;   (lambda ()
+;;     (list (concat "--source=" (plist-get org-ilm-convert--org-data :source))))
 
-  ["Convtool"
-   (:info*
-    (lambda ()
-      (propertize (plist-get org-ilm-convert--org-data :title) 'face 'italic))
-    :if (lambda () (plist-get org-ilm-convert--org-data :title)))
-   (:info*
-    (lambda ()
-      (propertize (plist-get org-ilm-convert--org-data :source) 'face 'transient-value))
-    :if (lambda () (plist-get org-ilm-convert--org-data :source)))
-   ]
+;;   ["Convtool"
+;;    (:info*
+;;     (lambda ()
+;;       (propertize (plist-get org-ilm-convert--org-data :title) 'face 'italic))
+;;     :if (lambda () (plist-get org-ilm-convert--org-data :title)))
+;;    (:info*
+;;     (lambda ()
+;;       (propertize (plist-get org-ilm-convert--org-data :source) 'face 'transient-value))
+;;     :if (lambda () (plist-get org-ilm-convert--org-data :source)))
+;;    ]
 
-  [:hide (lambda () t) ("s" "Source" "--source=")]
+;;   [:hide (lambda () t) ("s" "Source" "--source=")]
 
-  ["Webpage"
-   :if
-   (lambda ()
-     (or (eq (plist-get org-ilm-convert--org-data :type) 'url)
-         (string= (file-name-extension (plist-get org-ilm-convert--org-data :source)) "webpage")))
-   :setup-children
-   (lambda (_)
-     (org-ilm-convert--transient-webpage-build
-      (eq (plist-get org-ilm-convert--org-data :type) 'url)))
-   ]
+;;   ["Webpage"
+;;    :if
+;;    (lambda ()
+;;      (or (eq (plist-get org-ilm-convert--org-data :type) 'url)
+;;          (string= (file-name-extension (plist-get org-ilm-convert--org-data :source)) "webpage")))
+;;    :setup-children
+;;    (lambda (_)
+;;      (org-ilm-convert--transient-webpage-build
+;;       (eq (plist-get org-ilm-convert--org-data :type) 'url)))
+;;    ]
 
-  ["Media"
-   :if
-   (lambda ()
-     (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
-          (org-ilm-convert--transient-media-url-is-media-p
-           (plist-get org-ilm-convert--org-data :source))))
-   :setup-children
-   (lambda (_)
-     (org-ilm-convert--transient-media-build))
-   ]
+;;   ["Media"
+;;    :if
+;;    (lambda ()
+;;      (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
+;;           (org-ilm-convert--transient-media-url-is-media-p
+;;            (plist-get org-ilm-convert--org-data :source))))
+;;    :setup-children
+;;    (lambda (_)
+;;      (org-ilm-convert--transient-media-build))
+;;    ]
 
-  ["Actions"
-   ("RET" "Convert"
-    (lambda ()
-      (interactive)
-      (when-let* ((args (transient-args 'org-ilm-convert--org-transient))
-                  (source (plist-get org-ilm-convert--org-data :source))
-                  (type (plist-get org-ilm-convert--org-data :type))
-                  (org-id (org-id-get))
-                  (attach-dir (org-attach-dir-get-create)))
+;;   ["Actions"
+;;    ("RET" "Convert"
+;;     (lambda ()
+;;       (interactive)
+;;       (when-let* ((args (transient-args 'org-ilm-convert--org-transient))
+;;                   (source (plist-get org-ilm-convert--org-data :source))
+;;                   (type (plist-get org-ilm-convert--org-data :type))
+;;                   (org-id (org-id-get))
+;;                   (attach-dir (org-attach-dir-get-create)))
 
-        ;; Webpage
-        (when-let ((_ (transient-arg-value "--webpage-download" args))
-                   (title (if (eq type 'url)
-                              (if-let ((title (org-ilm--get-page-title source)))
-                                  (org-ilm--slugify-title title)
-                                org-id)
-                            (file-name-base source))))
-          (org-ilm-convert--transient-webpage-run source title attach-dir org-id args))
+;;         ;; Webpage
+;;         (when-let ((_ (transient-arg-value "--webpage-download" args))
+;;                    (title (if (eq type 'url)
+;;                               (if-let ((title (org-ilm--get-page-title source)))
+;;                                   (org-ilm--slugify-title title)
+;;                                 org-id)
+;;                             (file-name-base source))))
+;;           (org-ilm-convert--transient-webpage-run source title attach-dir org-id args))
 
-        ;; Media
-        (when (or (transient-arg-value "--media-download" args)
-                  (cdr (assoc "--media-subs=" args)))
-          (org-ilm-convert--transient-media-run source attach-dir org-id args))))
-    :inapt-if
-    (lambda ()
-      (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
-           (not (transient-arg-value "--webpage-download" (transient-get-value)))
-           (not (transient-arg-value "--media-download" (transient-get-value)))
-           (not (cdr (assoc "--media-subs=" (transient-get-value)))))))
-   ]
-  )
+;;         ;; Media
+;;         (when (or (transient-arg-value "--media-download" args)
+;;                   (cdr (assoc "--media-subs=" args)))
+;;           (org-ilm-convert--transient-media-run source attach-dir org-id args))))
+;;     :inapt-if
+;;     (lambda ()
+;;       (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
+;;            (not (transient-arg-value "--webpage-download" (transient-get-value)))
+;;            (not (transient-arg-value "--media-download" (transient-get-value)))
+;;            (not (cdr (assoc "--media-subs=" (transient-get-value)))))))
+;;    ]
+;;   )
 
 ;;;;; Webpage
 
@@ -918,14 +922,13 @@ SUB-LANGS may also be 'all' to download all subtitles."
        (list org-ilm-convert--transient-webpage-simplify-suffix
              org-ilm-convert--transient-webpage-orgify-suffix))))))
 
-(defun org-ilm-convert--transient-webpage-run (source title output-dir id transient-args)
-  (let* ((download (transient-arg-value "--webpage-download" transient-args))
-         (simplify (cond
-                    ((transient-arg-value "--webpage-simplify-to-html" transient-args)
-                     "html")
-                    ((transient-arg-value "--webpage-simplify-to-markdown" transient-args)
-                     "markdown")))
-         (orgify (transient-arg-value "--webpage-orgify" transient-args))
+(defun org-ilm-convert--transient-webpage-run (source title output-dir id)
+  (let* ((transient-args (if transient-current-command
+                             (transient-args transient-current-command)
+                           (transient-get-value)))
+         (download (alist-get 'webpage-download transient-args))
+         (simplify (alist-get 'webpage-simplify transient-args))
+         (orgify (alist-get 'webpage-orgify transient-args))
          (html-path (expand-file-name (concat title ".html") output-dir))
          (on-success
           (lambda (proc buf id)
@@ -968,90 +971,6 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :converters converters
      :on-error nil
      :on-final-success on-success)))
-
-;;;;; Media
-
-(defun org-ilm-convert--transient-media-url-is-media-p (url)
-  ;; Determine if media type by attempting to extract filename from url
-  ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
-  ;; not media type.
-  ;; NOTE Quite slow (~3 sec)
-  ;; (condition-case err
-  ;;     (or (org-ilm-convert--ytdlp-filename-from-url url) t)
-  ;;   (error nil))
-
-  ;; Instead just check if its a youtube link for now
-  (member (url-domain (url-generic-parse-url url))
-          '("youtube.com" "youtu.be")))
-
-(defvar org-ilm-convert--transient-media-download-suffix
-  '("md" "Download" "--media-download" :transient transient--do-call))
-
-(defvar org-ilm-convert--transient-media-template-suffix
-  '("mt" "Template" "--media-template="
-    :prompt "Template: " :transient transient--do-call))
-
-(defvar org-ilm-convert--transient-media-audio-suffix
-  '("ma" "Audio only" "--media-audio" :transient transient--do-call))
-
-(defvar org-ilm-convert--transient-media-subs-suffix
-  '("ms" "Subtitles download" "--media-subs="
-    :class transient-option
-    :transient transient--do-call
-    :multi-value rest
-    :choices
-    (lambda ()
-      (let* ((url (transient-arg-value "--source=" (transient-args transient-current-command)))
-             (subs (org-ilm-convert--ytdlp-subtitles-from-url url)))
-        (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs))))))
-
-(defun org-ilm-convert--transient-media-build (&optional no-template)
-  (let ((inapt-if
-         (lambda ()
-           (null (transient-arg-value "--media-download" (transient-get-value)))))
-        suffixes)
-        
-    (push org-ilm-convert--transient-media-subs-suffix suffixes)
-    (push (append
-           org-ilm-convert--transient-media-audio-suffix
-           (list :inapt-if inapt-if)) suffixes)
-    (push (append
-           org-ilm-convert--transient-media-template-suffix
-           (if no-template
-               (list :inapt-if-nil nil)
-           (list :inapt-if inapt-if)))
-          suffixes)
-    (push org-ilm-convert--transient-media-download-suffix suffixes)
-    
-    (mapcar
-     (lambda (suffix)
-       (transient-parse-suffix 'transient--prefix suffix))
-     suffixes)))
-
-(defun org-ilm-convert--transient-media-run (url output-dir id transient-args &optional on-success)
-  "Convert a media URL to a local video file."
-  (let* ((download (transient-arg-value "--media-download" transient-args))
-         (template (transient-arg-value "--media-template=" transient-args))
-         (audio-only (transient-arg-value "--media-audio" transient-args))
-         (sub-langs (cdr (assoc "--media-subs=" transient-args))))
-
-    (org-ilm-convert--convert-with-ytdlp
-     :process-id id
-     :url url
-     :output-dir output-dir
-     :filename-template template
-     :audio-only-p audio-only
-     :sub-langs sub-langs
-     :no-download (not download)
-     :on-success
-     (lambda (proc buf id output-path)
-       (message "[Org-Ilm-Convert] Media conversion completed: %s" url)
-       (org-ilm--org-with-point-at id
-         (org-attach-sync)
-         (when on-success
-           (funcall on-success id output-path)))))))
-
-        
 
 ;;;; Footer
 
