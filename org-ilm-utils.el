@@ -618,11 +618,12 @@ PROPERTIES is an optional plist of extra behavior (e.g., '(:prepend t))."
 If not found in the org-mem cache, this function will then try to force org-mem
 to parse the headline."
   ;; TODO https://github.com/meedstrom/org-mem/issues/31
-  (or (if id (org-mem-entry-by-id id) (org-node-at-point))
-      (progn
-        (org-ilm--org-with-point-at id
-          (org-mem-updater-ensure-id-node-at-point-known))
-        (org-mem-entry-by-id id))))
+  (when (eq major-mode 'org-mode)
+    (or (if id (org-mem-entry-by-id id) (org-node-at-point))
+        (progn
+          (org-ilm--org-with-point-at id
+            (org-mem-updater-ensure-id-node-at-point-known))
+          (org-mem-entry-by-id id)))))
 
 ;; TODO this doesnt properly take care of inherited properties
 ;; https://github.com/meedstrom/org-mem/issues/31

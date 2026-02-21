@@ -38,6 +38,9 @@
   (type
    nil
    :documentation "One of: plain, buffer, file, media, webpage, org, card")
+  (parent
+   (org-ilm--element-from-context)
+   :documentation "Parent element")
   (bibtex
    nil
    :documentation "Cons (key . bibtex entry)")
@@ -235,7 +238,7 @@ See `org-ilm--citation-get-zotero'")
   (let ((args (if transient-current-command
                   (transient-args transient-current-command)
                 (transient-get-value))))
-    (with-slots (id source ref type bibtex info) (transient-scope)
+    (with-slots (id source ref type bibtex info parent) (transient-scope)
       (append
        args
        `((source . ,source)
@@ -243,7 +246,8 @@ See `org-ilm--citation-get-zotero'")
          (ref . ,ref)
          (type . ,type)
          (bibtex . ,bibtex)
-         (info . ,info))))))
+         (info . ,info)
+         (parent . ,parent))))))
 
 (transient-define-infix org-ilm--import-transient-collection ()
   :class 'org-ilm-transient-cons-option
@@ -368,9 +372,19 @@ See `org-ilm--citation-get-zotero'")
       (message "%s" (org-ilm--import-transient-parse)))
     :transient t)
    (org-ilm--import-transient-collection)
+   ("v" "As child"
+    :cons 'as-child
+    :class org-ilm-transient-cons-switch
+    :inapt-if-not (lambda () (org-ilm-element-p (oref (transient-scope) parent)))
+    )
+   (:info
+    (lambda ()
+      (propertize
+       (org-ilm-element--title (oref (transient-scope) parent))
+       'face 'Info-quoted))
+    :if (lambda () (alist-get 'as-child (org-ilm--import-transient-parse))))
    (org-ilm--import-transient-priority)
    (org-ilm--import-transient-schedule)
-   ;; TODO Parent element
    ("t" "Title"
     :cons 'title
     :class org-ilm-transient-cons-option
@@ -561,7 +575,7 @@ See `org-ilm--citation-get-zotero'")
     (lambda ()
       (interactive)
       (map-let
-          (source type bibtex title id collection priority schedule
+          (source type bibtex title id collection priority schedule as-child parent
                   file-method
                   webattach-download webattach-main
                   html-download
@@ -617,6 +631,7 @@ See `org-ilm--citation-get-zotero'")
            :id id
            :priority priority
            :scheduled schedule
+           :parent (when (and as-child (org-ilm-element-p parent)) (oref parent id)) 
            :bibtex (cdr bibtex)
            :content content
            :file (when file-p source)
