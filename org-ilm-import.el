@@ -135,98 +135,12 @@ See `org-ilm--citation-get-zotero'")
   (org-ilm--import-transient
    (make-org-ilm-import :source url :ref url :type 'webpage)))
 
-
-;;;; Queue
-
-;; (defun org-ilm-import-queue ()
-;;   (interactive)
-;;   (let* ((buf (org-ilm--bqueue-buffers-select))
-;;          (queue (with-current-buffer buf org-ilm-queue))
-;;          (title (org-ilm-queue--name queue))
-;;          (id (org-id-new))
-;;          (parent-el (org-ilm--import-transient-parent-el)))
-;;     (org-ilm--capture-capture
-;;      'queue
-;;      :id id
-;;      :parent (when parent-el (org-ilm-element--id parent-el))
-;;      :collection (org-ilm--active-collection)
-;;      :title title
-;;      :props props
-;;      )))    
-
-;;;; Buffer
-
 (defun org-ilm-import-buffer ()
+  "Import an emacs buffer to your collection."
   (interactive)
-  (pcase-let* (((map :parent parent-el :collection collection) (org-ilm--import-transient-args))
-               ;;(buf (read-buffer "Buffer: " (current-buffer) 'require-match))
-               (buf (org-ilm--consult-buffer-select))
-               (title (buffer-name buf))
-               (id (org-id-new))
-               (props)
-               (file))
-
-    (with-current-buffer buf
-      ;; Process buffer
-      (pcase major-mode
-        ('gptel-mode
-         (require 'gptel)
-         (gptel-org--save-state))
-        (_
-         ;; Link roam ref
-         (when-let ((link (org-store-link '(4))))
-           (setq props (list :ROAM_REFS link))
-           (when-let* ((m (string-match org-link-bracket-re link))
-                       (desc (match-string 2 link)))
-             (setq title desc)))
-
-         ;; Convert to html 
-         (when-let ((html-buf (ignore-errors (hfy-fontify-buffer)))
-                    (tmp-file (make-temp-file nil)))
-           (with-current-buffer html-buf
-             (write-region nil nil tmp-file))
-           (setq file tmp-file)
-           (kill-buffer html-buf))
-         ))
-
-      ;; Capture
-      (org-ilm--capture-capture
-       'material
-       :id id
-       :parent (-some-> parent-el org-ilm-element--id)
-       :collection collection
-       :content (unless file (buffer-string))
-       :title title
-       :props props
-       :capture-kwargs '(:immediate-finish nil)
-       :on-success
-       (lambda (id attach-dir collection)
-         (when file
-           (org-ilm-convert--convert-multi
-            :process-name "buffer"
-            :process-id id
-            :converters
-            (list
-             (cons #'org-ilm-convert--convert-with-marker
-                   (list
-                    :input-path file
-                    :format "markdown"
-                    :output-dir attach-dir
-                    :move-content-out t
-                    :flags '("--disable_ocr")))
-             (cons #'org-ilm-convert--convert-with-pandoc
-                   (list
-                    :input-path (expand-file-name (concat (file-name-base file) ".md") attach-dir)
-                    :input-format "markdown"
-                    :output-name id))
-             )
-            :on-error nil
-            :on-final-success
-            (lambda (proc buf id)
-              (message "[Org-Ilm-Convert] Buffer conversion completed")
-              (org-ilm--org-with-point-at id
-                (org-attach-sync))))))
-       ))))
+  (let ((buf (org-ilm--consult-buffer-select)))
+    (org-ilm--import-transient
+     (make-org-ilm-import :source buf :type 'buffer))))
 
 ;;;; Import transient
 
@@ -502,7 +416,23 @@ See `org-ilm--citation-get-zotero'")
     )
    ]
 
+  ["Buffer"
+   ("bd" "Download"
+    :cons 'buffer-download
+    :class org-ilm-transient-cons-switch
+    ;; :inapt-if-not
+    ;; (lambda ()
+    ;;   (with-current-buffer (oref (transient-scope) source)
+    ;;     (org-store-link nil)))
+    )
+   ("bo" "Orgify"
+    :cons 'buffer-orgify
+    :class org-ilm-transient-cons-switch
+    :if (lambda () (alist-get 'buffer-download (org-ilm--import-transient-parse))))
+   ]
+
   ["Citation"
+   :if (lambda () (not (eq 'buffer (oref (transient-scope) type))))
    ("C" "Add citation"
     (lambda ()
       (interactive)
@@ -570,7 +500,8 @@ See `org-ilm--citation-get-zotero'")
             (org-ilm--transient-set-target-value "k" key))
           (when attachments
             (org-ilm--transient-set-target-value "ad" (car attachments))))))
-    :transient transient--do-call)
+    :transient transient--do-call
+    :if (lambda () (not (eq 'buffer (oref (transient-scope) type)))))
    ("RET" "Import"
     (lambda ()
       (interactive)
@@ -579,6 +510,7 @@ See `org-ilm--citation-get-zotero'")
                   file-method
                   webattach-download webattach-main
                   html-download
+                  buffer-download buffer-orgify
                   webpage-download webpage-simplify webpage-orgify
                   media-download media-template media-audio media-subs)
           (org-ilm--import-transient-parse)
@@ -597,7 +529,16 @@ See `org-ilm--citation-get-zotero'")
                   ;; without downloading. When downloading, set in on-success
                   ;; callback. HTML download is inactive when type is media, so no
                   ;; clash with org file generated by it.
-                  "")))
+                  "")
+                 ((and (eq type 'buffer) buffer-download (not buffer-orgify))
+                  (with-current-buffer source
+                    (pcase major-mode
+                      ('gptel-mode
+                       (require 'gptel)
+                       (gptel-org--save-state))
+                      (_
+                       ))
+                    (buffer-string)))))
 
           ;; Property: ROAM_REFS
           (let (roam-refs)
@@ -607,6 +548,11 @@ See `org-ilm--citation-get-zotero'")
 
             (when (car bibtex)
               (push (concat "@" (car bibtex)) roam-refs))
+
+            (when (eq type 'buffer)
+              (with-current-buffer source
+                (when-let ((link (org-store-link '(4))))
+                  (push link roam-refs))))
             
             (when roam-refs
               (setf (plist-get props :ROAM_REFS) (string-join roam-refs " "))))
@@ -649,7 +595,7 @@ See `org-ilm--citation-get-zotero'")
            :props props
            :on-success
            (lambda (id attach-dir collection)
-             (when (or html-download webpage-download media-download webattach-download)
+             (when (or html-download webpage-download media-download webattach-download buffer-download)
                (make-directory attach-dir t))
 
              ;; For media elements, make sure there is an empty org file for
@@ -693,6 +639,39 @@ See `org-ilm--citation-get-zotero'")
                   (org-ilm--org-with-point-at id
                     (org-attach-sync)))))
 
+             (when (and buffer-download buffer-orgify)
+               (let ((tmp-file (make-temp-file nil)))
+                 (with-current-buffer source
+                   (if-let ((html-buf (ignore-errors (hfy-fontify-buffer))))
+                       (progn
+                         (with-current-buffer html-buf
+                           (write-region nil nil tmp-file))
+                         (kill-buffer html-buf))
+                     (user-error "Failed to html fontify buffer")))
+                 (org-ilm-convert--convert-multi
+                  :process-name "buffer"
+                  :process-id id
+                  :converters
+                  (list
+                   (cons #'org-ilm-convert--convert-with-marker
+                         (list
+                          :input-path tmp-file
+                          :format "markdown"
+                          :output-dir attach-dir
+                          :move-content-out t
+                          :flags '("--disable_ocr")))
+                   (cons #'org-ilm-convert--convert-with-pandoc
+                         (list
+                          :input-path (expand-file-name (concat (file-name-base tmp-file) ".md") attach-dir)
+                          :input-format "markdown"
+                          :output-name id)))
+                  :on-error nil
+                  :on-final-success
+                  (lambda (proc buf id)
+                    (message "[Org-Ilm-Convert] Buffer conversion completed")
+                    (org-ilm--org-with-point-at id
+                      (org-attach-sync))))))
+
              )
              
            )))))
@@ -709,6 +688,7 @@ See `org-ilm--citation-get-zotero'")
        `((file-method . cp)
          (webpage-simplify . "markdown")
          (webpage-orgify . t)
+         (buffer-download . t)
          (html-download . ,(eq type 'webpage))
          ;; Don't want media filename to be org-id as I rely on ILM_MEDIA prop
          ;; to point to media. The dedicated attachment is the org file in
@@ -716,7 +696,15 @@ See `org-ilm--citation-get-zotero'")
          ;; (media-template . " id ".%(ext)s")
          (media-template . "%(title)s.%(ext)s")
          (title . ,(pcase type
-                     ('file (file-name-base source))))
+                     ('file (file-name-base source))
+                     ('buffer (with-current-buffer source
+                                (cond-let*
+                                  ([link (org-store-link '(4))]
+                                   [m (string-match org-link-bracket-re link)]
+                                   [desc (match-string 2 link)]
+                                   desc)
+                                  (t
+                                   (buffer-name source)))))))
          (collection . ,(org-ilm--active-collection)))))))
 
 
