@@ -417,6 +417,7 @@ See `org-ilm--citation-get-zotero'")
    ]
 
   ["Buffer"
+   :if (lambda () (eq 'buffer (transient-scope)))
    ("bd" "Download"
     :cons 'buffer-download
     :class org-ilm-transient-cons-switch

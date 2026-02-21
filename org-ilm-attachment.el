@@ -145,11 +145,9 @@ holding headline is an ilm element."
 (defun org-ilm--attachment-prepare-buffer ()
   "Prepare ilm attachment buffers."
   (when-let ((data (org-ilm--attachment-data)))
-    (pcase-let* ((`(,id ,collection, collection-file) data)
+    (pcase-let* ((`(,id ,collection ,collection-file ,attach-type) data)
                  (element (org-ilm--element-by-id id))
-                 (entry (org-mem-entry-by-id id))
-                 (registry-entry (org-mem-entry-by-id
-                                  (org-ilm-element--registry element))))
+                 (entry (org-mem-entry-by-id id)))
 
       ;; Prepare the buffer local data object which contains info about the
       ;; attachment as well as data used to update the priority.
@@ -161,16 +159,6 @@ holding headline is an ilm element."
              ;; TODO porbably remove and just use `org-ilm--element-by-id' to
              ;; get most recent
              :element element
-             ;; :beta (org-ilm--priority-to-beta
-             ;;        (org-ilm-element-prelative element))
-             ;; Manual accumalating change in the priority
-             :a 0
-             :b 0
-             ;; Data that is compiled to form change in priority
-             :start (current-time)
-             :extracts 0
-             :cards 0
-             :characters 0
              ))
 
       (when (eq major-mode 'org-mode)
