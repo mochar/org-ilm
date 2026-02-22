@@ -13,6 +13,16 @@
 
 ;;;; Functions
 
+(defun org-ilm--transient-parse ()
+  "Return the args of the current transient.
+
+During setup, transient requires using `transient-get-value', while
+suffix commands require calling `transient-args' which expects the
+transient name as parameter."
+  (if transient-current-command
+      (transient-args transient-current-command)
+    (transient-get-value)))
+
 (defun org-ilm--transient-set-target-value (target-key new-value)
   "Finds the target argument by its key and sets its internal value slot."
   (let* (;; Get the list of currently displayed suffix objects (internal variable)

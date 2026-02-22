@@ -518,16 +518,18 @@ does not have an option for this so it is done here.
   "Get the filename that will be generated for URL and TEMPLATE.
 
 See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-examples"
-  (string-trim
-   (car
-    (apply #'process-lines
-     (append
-      '("yt-dlp" "--print" "filename")
-      (when template (list "-o" template))
-      (list url)
-      (when restrict-p '("--restrict-filenames"))
-      org-ilm-convert-ytdlp-args
-      '("--no-warnings"))))))
+  (-some->
+   (ignore-errors
+     (apply #'process-lines
+            (append
+             '("yt-dlp" "--print" "filename")
+             (when template (list "-o" template))
+             (list url)
+             (when restrict-p '("--restrict-filenames"))
+             org-ilm-convert-ytdlp-args
+             '("--no-warnings"))))
+   car
+   string-trim))
 
 (defun org-ilm-convert--ytdlp-title-from-url (url)
   (org-ilm-convert--ytdlp-filename-from-url url "%(title)s"))
@@ -971,6 +973,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :converters converters
      :on-error nil
      :on-final-success on-success)))
+
 
 ;;;; Footer
 

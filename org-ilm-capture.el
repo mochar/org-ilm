@@ -40,9 +40,28 @@ Arguments are: type, id, collection, parent-id")
 (cl-defstruct (org-ilm-capture
                (:conc-name org-ilm-capture--))
   "Data for a capture (material or card)."
-  type parent title id ext content props file method
-  priority scheduled template collection state bibtex
-  target on-success on-abort capture-kwargs)
+  (id (org-id-new))
+  (title "")
+  (type nil :documentation "Should be one of `org-ilm-element-types'.")
+  (parent nil :documentation "Parent org-ilm element.
+If specified this is a child element, otherwise this is 
+and either COLLECTION or TARGET must be set.")
+  (collection nil :documentation "Collection symbol.
+When omitted and PARENT specified, use PARENT's collection.")
+  (target nil :documentation "Target specifier as in org-capture.
+Ignored when PARENT is specified.")
+  (file nil :documentation "Path to file that will be used as main attachment.")
+  (attach-method 'cp :documentation "How to import FILE. See `org-attach-method'.")
+  (ext nil :documentation "The extension of the main attachment file.
+This needs to be specified when an element has multiple attachments with
+the same ID name, or when CONTENT is specified. When set to t, FILE is
+used to infer the extension. When specified, the extension will be set
+in the ILM_EXT property.")
+  (content nil :documentation "String with attachment contents.
+Assumes Org unless EXT is specified.")
+  (bibtex nil :documentation "Bibtex string.")
+  props priority scheduled template state
+  on-success on-abort capture-kwargs)
 
 (defun org-ilm-capture-ensure (&rest data)
   "Parse plist DATA as org-ilm-capture object, or return if it already is
@@ -69,7 +88,7 @@ The callback ON-ABORT is called when capture is cancelled."
   ;; plist or a single org-ilm-capture object. So: start by making an invalid
   ;; org-ilm-capture object and immediately unpack it for processing.
   (with-slots
-      (type parent title id ext content props file method
+      (type parent title id ext content props file attach-method
             priority scheduled template collection state bibtex
             target on-success on-abort capture-kwargs)
 
@@ -81,27 +100,23 @@ The callback ON-ABORT is called when capture is cancelled."
     (unless id (setq id (org-id-new)))
 
     ;; See `org-attach-method'
-    (unless method (setq method 'cp))
-    (cl-assert (member method '(mv cp ln lns)))
+    (unless attach-method (setq attach-method 'cp))
+    (cl-assert (member attach-method '(mv cp ln lns)))
 
-    ;; Target, parent id, and collection
+    ;; Target, parent, and collection
     (cond
-     ((stringp parent)
+     ((org-ilm-element-p parent)
       ;; Determine collection. Note that TARGET is ignored as PARENT specifies
       ;; this.
-      (unless collection
-        (if-let* ((col (org-ilm-element--collection (org-ilm--element-by-id parent))))
-            (setq collection col)
-          (error "Collection not found for PARENT %s" parent)))
+      (unless collection (setq collection (oref parent collection)))
 
       ;; If no priority given, decide based on parent
       (unless priority
-        (when-let* ((parent-p (org-ilm--pqueue-priority parent nil 'nil-if-absent collection))
+        (when-let* ((parent-p (org-ilm--pqueue-priority
+                               (oref parent id) nil 'nil-if-absent collection))
                     (p (org-ilm--priority-calculate-child-priority parent-p type)))
-          (setq priority p)))
-      )
-     (parent
-      (error "PARENT must be org-id string"))
+          (setq priority p))))
+     (parent (error "PARENT must be of type `org-ilm-element'"))
      (target
       (let* ((target-buf (org-ilm--org-capture-target-buffer target))
              (target-path (buffer-file-name target-buf)))
@@ -152,11 +167,11 @@ The callback ON-ABORT is called when capture is cancelled."
       (setq file (expand-file-name
                   (format "%s.%s" id (or ext "org"))
                   temporary-file-directory)
-            method 'cp))
+            attach-method 'cp))
 
     (make-org-ilm-capture
      :parent parent :target target :type type :title title :id id :ext ext
-     :content content :props props :file file :method method
+     :content content :props props :file file :attach-method attach-method
      :priority priority :scheduled scheduled :template template
      :state state :on-success on-success :on-abort on-abort
      :bibtex bibtex :collection collection :capture-kwargs capture-kwargs)))
@@ -189,7 +204,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
         ;; cause, but org-node finds location accurately so i rely
         ;; on it instead to find the location of a heading by id.
         ;; `(id ,parent)
-        (let ((parent-id (copy-sequence parent)))
+        (let ((parent-id (copy-sequence (oref parent id))))
           (setq target (list 'function
                              (lambda ()
                                (org-node-goto-id parent-id)
@@ -292,10 +307,10 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
            (lambda ()
              ;; Attach the file in the org heading attach dir
              (when-let ((file   (org-ilm-capture--file capture))
-                        (method (org-ilm-capture--method capture)))
+                        (attach-method (org-ilm-capture--attach-method capture)))
                ;; Turn of auto tagging if not import source.
                (let ((org-attach-auto-tag (if parent nil org-attach-auto-tag)))
-                 (org-attach-attach file nil method)
+                 (org-attach-attach file nil attach-method)
 
                  ;; Make sure the file name is the org-id
                  (rename-file
@@ -321,7 +336,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                ;; Store bibtex
                (when-let ((bibtex (org-ilm-capture--bibtex capture))
                           (bib-target (org-ilm--collection-property collection :bib)))
-                 (org-ilm--org-capture-programmatic bib-target (org-ilm--format-bibtex-entry bibtex) 'plain))
+                 (org-ilm--org-capture-programmatic bib-target bibtex 'plain))
                
                (when org-ilm-update-org-mem-after-capture
                  (org-ilm--org-mem-update-cache-after-capture 'entry))
@@ -384,7 +399,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
     (list title rank scheduled collection)))
 
-(transient-define-prefix org-ilm--capture-transient (scope)
+(transient-define-prefix org-ilm--capture-transient (capture)
   :refresh-suffixes t
   
   [:description
@@ -459,17 +474,17 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
   (interactive)
   (transient-setup 'org-ilm--capture-transient
-                   nil nil :scope scope
+                   nil nil :scope capture
                    :value (append
-                           (let* ((collection (org-ilm-capture--collection scope))
-                                  (target (or (org-ilm-capture--target scope)
+                           (let* ((collection (org-ilm-capture--collection capture))
+                                  (target (or (org-ilm-capture--target capture)
                                               (org-ilm--collection-property
                                                collection :import))))
                              (list (concat "--collection="
                                            (file-relative-name
                                             target
                                             (org-ilm--collection-path collection)))))
-                           (when-let ((title (org-ilm-capture--title scope)))
+                           (when-let ((title (org-ilm-capture--title capture)))
                              (list (concat "--title=" title))))))
 
 (defun org-ilm--capture-transient-capture (&optional with-buffer-p)

@@ -51,15 +51,16 @@
     t))
 
 (defun org-ilm--media-url-p (url)
-  ;; Determine if media type by attempting to extract filename from url
-  ;; using yt-dlp. If error thrown, yt-dlp failed to extract metadata ->
-  ;; not media type.
-  ;; NOTE Quite slow (~3 sec)
-  ;; (condition-case err
-  ;;     (or (org-ilm-convert--ytdlp-filename-from-url url) t)
-  ;;   (error nil))
+  "Determine if URL contains downloadable media.
 
-  ;; Instead just check if its a youtube link for now
+This works attempting to extract filename from url using yt-dlp. If
+error thrown, yt-dlp failed to extract metadata -> not media. Note this
+is quite slow (~3 sec)"
+  (condition-case err
+      (or (org-ilm-convert--ytdlp-filename-from-url url) t)
+    (error nil)))
+
+(defun org-ilm--media-youtube-p (url)
   (member (url-domain (url-generic-parse-url url))
           '("youtube.com" "youtu.be")))
 

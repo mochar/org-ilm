@@ -99,6 +99,21 @@ holding headline is an ilm element."
 (cl-defun org-ilm--attachment-open (&key pdf-no-region no-error)
   "Open the attachment of collection element at point, returns its buffer."
   (cond-let*
+    ;; First check if attachment is in the process of being generated with a
+    ;; conversion tool.
+    ([org-id (org-id-get)]
+     [conversion (org-ilm-convert--conversion-by-id org-id)]
+     [state (plist-get conversion :state)]
+     [_ (eq state 'busy)]
+     (let ((message (pcase state
+                      ;; TODO for success and error, provide option to
+                      ;; delete headline and extract highlight in parent
+                      ;; attachment.
+                      ('success "Attachment finished conversion but not found.")
+                      ('error "Attachment conversion failed.")
+                      (_ "Attachment still being converted."))))
+       (when (yes-or-no-p (concat message " View conversion buffer?"))
+         (pop-to-buffer (plist-get conversion :buffer)))))
     ;; Check if there is an attachment org-id.ext where org-id is current
     ;; headline's id and ext is org by default or ILM_EXT property
     ([path (org-ilm--attachment-find)]
@@ -112,19 +127,6 @@ holding headline is an ilm element."
     ;; Check if headline represents a virtual view of a parent PDF element.
     ([virtual-pdf-buffer (org-ilm--pdf-open-virtual pdf-no-region)]
      virtual-pdf-buffer)
-    ;; Check if attachment is in the process of being generated with a conversion
-    ;; tool.
-    ([org-id (org-id-get)]
-     [conversion (org-ilm-convert--conversion-by-id org-id)]
-     (let ((message (pcase (plist-get conversion :state)
-                      ;; TODO for success and error, provide option to
-                      ;; delete headline and extract highlight in parent
-                      ;; attachment.
-                      ('success "Attachment finished conversion but not found.")
-                      ('error "Attachment conversion failed.")
-                      (_ "Attachment still being converted."))))
-       (when (yes-or-no-p (concat message " View conversion buffer?"))
-         (pop-to-buffer (plist-get conversion :buffer)))))
     ;; Check if there is a web link in the ROAM_REFS property and open website in
     ;; eww.
     ([web-refs (org-ilm--org-mem-website-refs)]
