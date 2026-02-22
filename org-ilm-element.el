@@ -600,116 +600,22 @@ COLLECTION specifies in which queue to look at."
    (:info "")
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
+   (org-ilm--element-transient-collection)
+   ]
+
+  [
    ("n" "Concepts..."
     (lambda ()
       (interactive)
       (org-ilm--element-with-point-at (transient-scope)
         (org-ilm-concepts)))
     :transient t)
-   (org-ilm--element-transient-collection)
+   ("a" "Attachment..." org-ilm--element-attachment-transient :transient t)
+   ("q" "Queue..." org-ilm--element-queue-transient :transient t)
+   ("m" "Media..." org-ilm--element-media-transient :transient t
+    :if (lambda () (oref (transient-scope) media)))
    ]
-
-  [
-   ["Attachment"
-    ("as" "Set"
-     (lambda ()
-       (interactive)
-       (let* ((attach-dir (org-attach-dir))
-              (attachments (org-attach-file-list attach-dir))
-              (attachment (completing-read "Attachment: " attachments)))
-         (cond
-          ((member attachment attachments)
-           (rename-file (expand-file-name attachment attach-dir)
-                        (expand-file-name
-                         (concat (org-id-get-create) "." (file-name-extension attachment))
-                         attach-dir)))
-          ((org-url-p attachment)
-           (let ((f (expand-file-name (concat (org-id-get-create) ".org") attach-dir)))
-             (with-temp-file f
-               (insert (org-ilm--get-website-as-org attachment)))
-             (find-file f)))
-          ((string-empty-p attachment)
-           (find-file (expand-file-name
-                       (concat (org-id-get-create) ".org")
-                       attach-dir)))
-          (t
-           (user-error "Select attachment, pass in URL, or leave empty to create new")
-           )))))
-    ("ao" "Open"
-     (lambda ()
-       (interactive)
-       (org-ilm--element-with-point-at (transient-scope)
-         (org-ilm-open-attachment))))
-    ("ad" "Dired"
-     (lambda ()
-       (interactive)
-       (let* ((element (transient-scope))
-              (id (org-ilm-element--id element))
-              attach-dir)
-         (org-ilm--element-with-point-at element
-           (setq attach-dir (org-attach-dir)))
-         (unless attach-dir (user-error "No attachment directory"))
-         (find-name-dired attach-dir (concat id "*")))))
-    ]
-
-   ["Media"
-    :if (lambda () (oref (transient-scope) media))
-    ("ms" "Set"
-     (lambda ()
-       (interactive)
-       (let* ((element (transient-scope))
-              (id (org-ilm-element--id element))
-              (entry (org-mem-entry-by-id id))
-              (registry-entry (org-mem-entry-by-id (org-ilm-element--registry element)))
-              (element-medias (org-ilm--entry-media-sources entry))
-              (registry-medias (org-ilm--entry-media-sources registry-entry))
-              (choice (consult--multi
-                       (list
-                        (list
-                         :name "Element"
-                         :narrow ?e
-                         :items element-medias
-                         :action #'message)
-                        (list
-                         :name "Registry"
-                         :narrow ?r
-                         :items registry-medias
-                         :action #'message))
-                       :require-match t
-                       :prompt "Media: "))
-              (media (car choice)))
-         (org-ilm--org-with-point-at id
-           (org-entry-put nil org-ilm-property-media media)
-           (save-buffer))))
-     :transient transient--do-call)
-    ("mo" "Open"
-     (lambda ()
-       (interactive)
-       (org-ilm--media-open
-        (org-ilm-element-entry (transient-scope))))
-     :if (lambda () (oref (transient-scope) media)))
-    ("mr" "Range"
-     (lambda ()
-       (interactive)
-       (let* ((element (transient-scope))
-              (entry (org-ilm-element--entry element))
-              (parts (org-ilm--media-compile entry))
-              (range (read-string "Range: "
-                                  (when (stringp (nth 1 parts))
-                                    (if (stringp (nth 2 parts))
-                                        (string-join (cdr parts) "-")
-                                      (nth 1 parts)))))
-              (source (car parts)))
-         (org-ilm--org-with-point-at (oref element id)
-           (org-entry-put nil org-ilm-property-media+ range)
-           (save-buffer)
-           (org-mem-updater-update t)
-           (org-ilm--transient-set-scope (org-ilm--element-at-point)))))
-     :if (lambda () (oref (transient-scope) media))
-     :transient transient--do-call)
-    ]
-   ]
-
+   
   ["Actions"
    [
     ("o" "Open"
@@ -732,7 +638,6 @@ COLLECTION specifies in which queue to look at."
        (funcall-interactively #'org-ilm-element-delete (transient-scope))))
     ]
    [
-    ("q" "Queue..." org-ilm--element-queue-transient :transient t)
     ("C" "New card"
      (lambda ()
        (interactive)
@@ -758,6 +663,132 @@ COLLECTION specifies in which queue to look at."
       (user-error "Element actions not available for type %s" (oref element type)))
      (t
       (org-ilm--element-transient element)))))
+
+;;;;; Attachment
+
+(transient-define-prefix org-ilm--element-attachment-transient ()
+  :refresh-suffixes t
+
+  ["Attachment"
+   ("o" "Open"
+    (lambda ()
+      (interactive)
+      (let ((element (transient-scope)))
+        (make-thread
+         (lambda ()
+           (org-ilm--element-with-point-at element
+             (org-ilm-open-attachment))))))
+    :transient transient--do-exit
+    )
+   ("d" "Dired"
+    (lambda ()
+      (interactive)
+      (let ((element (transient-scope))
+            attach-dir)
+        (org-ilm--element-with-point-at element
+          (setq attach-dir (org-attach-dir)))
+        (unless attach-dir (user-error "No attachment directory"))
+        (find-name-dired attach-dir (concat (oref element id) "*"))))
+    :transient transient--do-exit)
+   ("s" "Set"
+    (lambda ()
+      (interactive)
+      (let* ((attach-dir (org-attach-dir))
+             (attachments (org-attach-file-list attach-dir))
+             (attachment (completing-read "Attachment: " attachments)))
+        (cond
+         ((member attachment attachments)
+          (rename-file (expand-file-name attachment attach-dir)
+                       (expand-file-name
+                        (concat (org-id-get-create) "." (file-name-extension attachment))
+                        attach-dir)))
+         ((org-url-p attachment)
+          (let ((f (expand-file-name (concat (org-id-get-create) ".org") attach-dir)))
+            (with-temp-file f
+              (insert (org-ilm--get-website-as-org attachment)))
+            (find-file f)))
+         ((string-empty-p attachment)
+          (find-file (expand-file-name
+                      (concat (org-id-get-create) ".org")
+                      attach-dir)))
+         (t
+          (user-error "Select attachment, pass in URL, or leave empty to create new")
+          )))))
+   ]
+
+  (interactive)
+  (transient-setup 'org-ilm--element-attachment-transient nil nil :scope (transient-scope)))
+
+;;;;; Media
+
+(transient-define-prefix org-ilm--element-media-transient ()
+  :refresh-suffixes t
+  
+  ["Media"
+   (:info*
+    (lambda ()
+      (let* ((entry (org-ilm-element--entry (transient-scope)))
+             (parts (org-ilm--media-compile entry)))
+        (concat 
+         (propertize (car parts) 'face 'Info-quoted)
+         (when (or (nth 1 parts) (nth 1 parts))
+           (format " [%s-%s]" (nth 1 parts) (nth 2 parts)))))))
+   ("o" "Open"
+    (lambda ()
+      (interactive)
+      (org-ilm--media-open (org-ilm-element--entry (transient-scope))))
+    :transient transient--do-exit)
+   ("r" "Range"
+    (lambda ()
+      (interactive)
+      (let* ((element (transient-scope))
+             (entry (org-ilm-element--entry element))
+             (parts (org-ilm--media-compile entry))
+             (range (read-string "Range: "
+                                 (when (stringp (nth 1 parts))
+                                   (if (stringp (nth 2 parts))
+                                       (string-join (cdr parts) "-")
+                                     (nth 1 parts)))))
+             (source (car parts)))
+        (org-ilm--org-with-point-at (oref element id)
+          (org-entry-put nil org-ilm-property-media+ range)
+          (save-buffer)
+          (org-mem-updater-update t)
+          (org-ilm--transient-set-scope (org-ilm--element-at-point)))))
+    :transient transient--do-call)
+   ("s" "Set"
+    (lambda ()
+      (interactive)
+      (let* ((element (transient-scope))
+             (id (org-ilm-element--id element))
+             (entry (org-mem-entry-by-id id))
+             (registry-entry (org-mem-entry-by-id (org-ilm-element--registry element)))
+             (element-medias (org-ilm--entry-media-sources entry))
+             (registry-medias (org-ilm--entry-media-sources registry-entry))
+             (choice (consult--multi
+                      (list
+                       (list
+                        :name "Element"
+                        :narrow ?e
+                        :items element-medias
+                        :action #'message)
+                       (list
+                        :name "Registry"
+                        :narrow ?r
+                        :items registry-medias
+                        :action #'message))
+                      :require-match t
+                      :prompt "Media: "))
+             (media (car choice)))
+        (org-ilm--org-with-point-at id
+          (org-entry-put nil org-ilm-property-media media)
+          (save-buffer))))
+    :transient transient--do-call)
+   ]
+
+  (interactive)
+  (transient-setup 'org-ilm--element-media-transient nil nil :scope (transient-scope)))
+
 
 ;;;;; Queue
 
