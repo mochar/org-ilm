@@ -293,6 +293,9 @@ Direct copy from mm-decode.el"
   ;; (org-id-find string)
   (org-mem-entry-by-id string))
 
+(defun org-ilm--org-element-around-point (type)
+  (org-element-lineage (org-element-at-point) type t))
+
 (defun org-ilm--org-headline-at-point ()
   "Return headline at point."
   (let ((element (org-element-at-point))

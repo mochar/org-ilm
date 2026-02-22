@@ -846,7 +846,7 @@ by default will be the child of this parent element."
                    (error (message "Failed to download paper for %s" title))))))
 
             (when webpage-download
-              (org-ilm-convert--transient-webpage-run
+              (org-ilm--convert-transient-webpage-run
                url id attach-dir id))))))
 
 (transient-define-prefix org-ilm--import-webpage-transient (import)
@@ -857,34 +857,9 @@ by default will be the child of this parent element."
    org-ilm--import-group-main
    ]
 
-  ["HTML -> org download"
-   (:info* (lambda () "Convert HTML to Org"))
-   ("hd" "Download"
-    :cons 'html-download
-    :class org-ilm-transient-cons-switch
-    :transient transient--do-call)
-   ]
+  org-ilm--convert-html-transient-group
 
-  ["Webpage download"
-   (:info* (lambda () "Download a full snapshot of the webpage"))
-   ("wd" "Download"
-    :cons 'webpage-download
-    :class org-ilm-transient-cons-switch
-    :transient transient--do-call)
-   ("ws" "Simplify"
-    :cons 'webpage-simplify
-    :class org-ilm-transient-cons-switches
-    :transient transient--do-call
-    :choices ("markdown" "html")
-    :allow-empty t
-    :if (lambda () (alist-get 'webpage-download (org-ilm--transient-parse))))
-   ("wo" "Orgify"
-    :cons 'webpage-orgify
-    :class org-ilm-transient-cons-switch
-    :summary "Convert to Org mode with Pandoc"
-    :transient transient--do-call
-    :if (lambda () (alist-get 'webpage-download (org-ilm--transient-parse))))
-   ]
+  org-ilm--convert-webpage-transient-group
 
   ["Website attachment"
    ("ad" "Download"

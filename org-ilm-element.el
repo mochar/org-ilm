@@ -557,6 +557,7 @@ COLLECTION specifies in which queue to look at."
    ("q" "Queue..." org-ilm--element-queue-transient :transient t)
    ("m" "Media..." org-ilm--element-media-transient :transient t
     :if (lambda () (oref (transient-scope) media)))
+   ("v" "Convert..." org-ilm-convert-menu :transient t)
    ]
    
   ["Actions"

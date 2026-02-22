@@ -174,6 +174,7 @@ final converter succeeds."
          "-o" output-path)))))))
 
 ;;;; Defuddle
+
 ;; Defuddle: https://github.com/kepano/defuddle
 ;; Simplify html to markdown
 
@@ -181,22 +182,35 @@ final converter succeeds."
   (expand-file-name "scripts/defuddle.mjs"
                     (file-name-directory (or load-file-name buffer-file-name))))
 
-(cl-defun org-ilm-convert--convert-with-defuddle (&rest args &key process-id process-name input-path output-format &allow-other-keys)
-  "Convert an HTM file to Markdown using Defuddle."
-  (unless (and process-id input-path output-format)
-    (error "Required args: PROCESS-ID INPUT-PATH OUTPUT-FORMAT"))
+(cl-defun org-ilm-convert--convert-with-defuddle (&rest args &key process-id process-name source input-format output-format output-name output-folder &allow-other-keys)
+  "Convert a URL or HTML file to Markdown using Defuddle."
+  (unless (and process-id source output-format)
+    (error "Required args: PROCESS-ID SOURCE OUTPUT-FORMAT"))
   (unless (member output-format '("markdown" "html"))
     (error "OUTPUT-FORMAT must be one of [markdown|html]"))
-  (let* ((input-path (expand-file-name input-path))
+  (let* ((source-type (cond
+                       ((file-exists-p source)
+                        (setq source (expand-file-name source))
+                        (unless output-name
+                          (setq output-name (file-name-base source)))
+                        (unless output-folder
+                          (setq output-folder (file-name-directory source)))
+                        "html")
+                       ((org-url-p source)
+                        (unless output-folder
+                          (error "Must specify OUTPUT-FOLDER when SOURCE is URL"))
+                        (unless output-name
+                          (setq output-name (org-ilm--get-page-title source 'slugify)))
+                        "url")
+                       (t (error "SOURCE not file or URL"))))
          (to-markdown (string= output-format "markdown"))
          (output-path (expand-file-name
-                       (format "%s.%s"
-                               (file-name-base input-path)
-                               (if to-markdown "md" "html"))
-                       (file-name-directory input-path))))
+                       (concat output-name "." (if to-markdown "md" "html"))
+                       output-folder)))
     (apply
      #'org-ilm-convert--convert-make-process
-     (org-combine-plists
+     (map-merge
+      'plist
       args
       (list
        :name (or process-name "defuddle")
@@ -205,10 +219,37 @@ final converter succeeds."
        (list
         org-ilm-convert-node-path
         org-ilm-convert-defuddle-path
-        "html"
-        input-path
+        source-type
+        source
         output-format
         output-path))))))
+
+(cl-defun org-ilm-convert--convert-to-org-with-defuddle-pandoc (&key process-id on-success on-error defuddle-args pandoc-args)
+  "Convert a URL or HTML file to Markdown with Defuddle, then to Org mode using Pandoc."
+  (setq monolith-args
+        (plist-put monolith-args :process-id process-id))
+  
+  (let* ((defuddle-output-format (plist-get defuddle-args :output-format))
+         (defuddle-output-path (concat
+                                (file-name-sans-extension output-path)
+                                "."
+                                (if (string= defuddle-output-format "markdown")
+                                    "md" "html"))))
+    (org-ilm-convert--convert-multi
+     :process-name "defuddle-pandoc"
+     :process-id process-id
+     :converters
+     (list
+      (cons #'org-ilm-convert--convert-with-defuddle
+            defuddle-args)
+      (cons #'org-ilm-convert--convert-with-pandoc
+            (append
+             pandoc-args
+             (list
+              :input-path defuddle-output-path
+              :input-format defuddle-output-format))))
+     :on-error on-error
+     :on-final-success on-success))))
 
 
 ;;;; Marker
@@ -433,7 +474,7 @@ does not have an option for this so it is done here.
         (cons #'org-ilm-convert--convert-with-monolith monolith-args)
         (cons #'org-ilm-convert--convert-with-defuddle
               (append
-               (list :input-path monolith-output-path)
+               (list :source monolith-output-path)
                defuddle-args)))
        :on-error on-error
        :on-final-success on-success))))
@@ -488,7 +529,7 @@ does not have an option for this so it is done here.
       (cons #'org-ilm-convert--convert-with-monolith monolith-args)
       (cons #'org-ilm-convert--convert-with-defuddle
             (append
-             (list :input-path monolith-output-path)
+             (list :source monolith-output-path)
              defuddle-args))
       (cons #'org-ilm-convert--convert-with-pandoc
             (append
@@ -775,159 +816,36 @@ SUB-LANGS may also be 'all' to download all subtitles."
       (kill-buffer buf)
       (message "No conversions found!")))))
 
-;;;; Org headings
+;;;; Org transient
 
 ;; Convert using metadata in Org heading properties and attachments.
-;; TODO This needs a redo. And placed somewhere else to avoid circular dependnecy.
 
-;; (defvar org-ilm-convert--org-data nil)
+;;;;; Webpage group
 
-;; (defun org-ilm-convert-org-convert ()
-;;   (interactive)
-;;   (let* ((attach-dir (org-attach-dir))
-;;          (attachments (when attach-dir (org-attach-file-list attach-dir)))
-;;          (entry (org-node-at-point))
-;;          (refs (org-ilm--org-mem-refs entry)))
-;;     (when-let ((url (org-entry-get nil "URL")))
-;;       (cl-pushnew url refs :test #'equal))
-;;     (setq refs (seq-filter #'org-url-p refs))
-    
-;;     (let* ((choice (consult--multi
-;;                     (list
-;;                      (list
-;;                       :name "Refs"
-;;                       :narrow ?r
-;;                       :items refs
-;;                       :action #'message)
-;;                      (list
-;;                       :name "Attachments"
-;;                       :narrow ?a
-;;                       :items attachments
-;;                       :action #'message))
-;;                     :require-match t
-;;                     :prompt "Convert: " ))
-;;            (source (car choice))
-;;            (type (if (string= (plist-get (cdr choice) :name) "Attachments")
-;;                    'attachment 'url)))
-;;       (setq org-ilm-convert--org-data
-;;             (list :title (org-mem-entry-title entry) :source source :type type))
-;;       (org-ilm--add-hook-once
-;;        'transient-post-exit-hook
-;;        (lambda () (setq org-ilm-convert--org-data nil)))
-;;       (org-ilm-convert--org-transient))))
-
-;; (transient-define-prefix org-ilm-convert--org-transient ()
-;;   :refresh-suffixes t
-;;   :value
-;;   (lambda ()
-;;     (list (concat "--source=" (plist-get org-ilm-convert--org-data :source))))
-
-;;   ["Convtool"
-;;    (:info*
-;;     (lambda ()
-;;       (propertize (plist-get org-ilm-convert--org-data :title) 'face 'italic))
-;;     :if (lambda () (plist-get org-ilm-convert--org-data :title)))
-;;    (:info*
-;;     (lambda ()
-;;       (propertize (plist-get org-ilm-convert--org-data :source) 'face 'transient-value))
-;;     :if (lambda () (plist-get org-ilm-convert--org-data :source)))
-;;    ]
-
-;;   [:hide (lambda () t) ("s" "Source" "--source=")]
-
-;;   ["Webpage"
-;;    :if
-;;    (lambda ()
-;;      (or (eq (plist-get org-ilm-convert--org-data :type) 'url)
-;;          (string= (file-name-extension (plist-get org-ilm-convert--org-data :source)) "webpage")))
-;;    :setup-children
-;;    (lambda (_)
-;;      (org-ilm-convert--transient-webpage-build
-;;       (eq (plist-get org-ilm-convert--org-data :type) 'url)))
-;;    ]
-
-;;   ["Media"
-;;    :if
-;;    (lambda ()
-;;      (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
-;;           (org-ilm-convert--transient-media-url-is-media-p
-;;            (plist-get org-ilm-convert--org-data :source))))
-;;    :setup-children
-;;    (lambda (_)
-;;      (org-ilm-convert--transient-media-build))
-;;    ]
-
-;;   ["Actions"
-;;    ("RET" "Convert"
-;;     (lambda ()
-;;       (interactive)
-;;       (when-let* ((args (transient-args 'org-ilm-convert--org-transient))
-;;                   (source (plist-get org-ilm-convert--org-data :source))
-;;                   (type (plist-get org-ilm-convert--org-data :type))
-;;                   (org-id (org-id-get))
-;;                   (attach-dir (org-attach-dir-get-create)))
-
-;;         ;; Webpage
-;;         (when-let ((_ (transient-arg-value "--webpage-download" args))
-;;                    (title (if (eq type 'url)
-;;                               (if-let ((title (org-ilm--get-page-title source)))
-;;                                   (org-ilm--slugify-title title)
-;;                                 org-id)
-;;                             (file-name-base source))))
-;;           (org-ilm-convert--transient-webpage-run source title attach-dir org-id args))
-
-;;         ;; Media
-;;         (when (or (transient-arg-value "--media-download" args)
-;;                   (cdr (assoc "--media-subs=" args)))
-;;           (org-ilm-convert--transient-media-run source attach-dir org-id args))))
-;;     :inapt-if
-;;     (lambda ()
-;;       (and (eq (plist-get org-ilm-convert--org-data :type) 'url)
-;;            (not (transient-arg-value "--webpage-download" (transient-get-value)))
-;;            (not (transient-arg-value "--media-download" (transient-get-value)))
-;;            (not (cdr (assoc "--media-subs=" (transient-get-value)))))))
-;;    ]
-;;   )
-
-;;;;; Webpage
-
-(defvar org-ilm-convert--transient-webpage-download-suffix
-  '("wd" "Download" "--webpage-download" :transient transient--do-call))
-
-(defvar org-ilm-convert--transient-webpage-simplify-suffix
-  '("ws" "Simplify" "--webpage-simplify="
-     :class transient-switches
-     :transient transient--do-call
-     :argument-format "--webpage-simplify-to-%s"
-     :argument-regexp "\\(--webpage-simplify-to-\\(markdown\\|html\\)\\)"
-     :choices ("markdown" "html")))
-
-(defvar org-ilm-convert--transient-webpage-orgify-suffix
-  '("wo" "Orgify" "--webpage-orgify"
+(transient-define-group org-ilm--convert-webpage-transient-group
+  ["Webpage download"
+   (:info* (lambda () "Download a full snapshot of the webpage"))
+   ("wd" "Download"
+    :cons 'webpage-download
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call)
+   ("ws" "Simplify"
+    :cons 'webpage-simplify
+    :class org-ilm-transient-cons-switches
+    :transient transient--do-call
+    :choices ("markdown" "html")
+    :allow-empty t
+    :if (lambda () (alist-get 'webpage-download (org-ilm--transient-parse))))
+   ("wo" "Orgify"
+    :cons 'webpage-orgify
+    :class org-ilm-transient-cons-switch
     :summary "Convert to Org mode with Pandoc"
-    :transient transient--do-call))
+    :transient transient--do-call
+    :if (lambda () (alist-get 'webpage-download (org-ilm--transient-parse))))
+   ])
 
-(defun org-ilm-convert--transient-webpage-build (&optional with-download hide-invalid-p)
-  (let ((condition
-         (lambda ()
-           (and with-download
-                (null (transient-arg-value "--webpage-download" (transient-get-value)))))))
-    (mapcar
-     (lambda (suffix)
-       (transient-parse-suffix 'transient--prefix suffix))
-     (append
-      (when with-download
-        (list org-ilm-convert--transient-webpage-download-suffix))
-      (mapcar
-       (lambda (suffix)
-         (append suffix (list (if hide-invalid-p :if-not :inapt-if) condition)))
-       (list org-ilm-convert--transient-webpage-simplify-suffix
-             org-ilm-convert--transient-webpage-orgify-suffix))))))
-
-(defun org-ilm-convert--transient-webpage-run (source title output-dir id)
-  (let* ((transient-args (if transient-current-command
-                             (transient-args transient-current-command)
-                           (transient-get-value)))
+(defun org-ilm--convert-transient-webpage-run (source title output-dir id)
+  (let* ((transient-args (org-ilm--transient-parse))
          (download (alist-get 'webpage-download transient-args))
          (simplify (alist-get 'webpage-simplify transient-args))
          (orgify (alist-get 'webpage-orgify transient-args))
@@ -935,8 +853,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
          (on-success
           (lambda (proc buf id)
             (message "[Org-Ilm-Convert] HTML conversion completed: %s" source)
-            (org-ilm--org-with-point-at id
-              (org-attach-sync))))
+            (org-ilm--org-with-point-at id (org-attach-sync))))
          converters)
 
     (when download
@@ -948,7 +865,7 @@ SUB-LANGS may also be 'all' to download all subtitles."
     (when simplify
       (push
        (cons #'org-ilm-convert--convert-with-defuddle
-             (list :input-path html-path :output-format simplify))
+             (list :source html-path :output-format simplify))
        converters))
 
     (when orgify
@@ -973,6 +890,133 @@ SUB-LANGS may also be 'all' to download all subtitles."
      :converters converters
      :on-error nil
      :on-final-success on-success)))
+
+;;;;; HTML download group
+
+(transient-define-group org-ilm--convert-html-transient-group
+  ["HTML -> org download"
+   (:info* (lambda () "Convert HTML to Org"))
+   ("hd" "Download"
+    :cons 'html-download
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call)
+   ])
+
+(defun org-ilm--convert-transient-html-run (source title output-dir id)
+  (org-ilm-convert--convert-with-defuddle
+   :process-name "html"
+   :process-id id
+   :source source
+   :output-name title
+   :output-folder output-dir))
+
+
+;;;;; Main transient
+
+(defun org-ilm-convert-menu ()
+  (interactive)
+  (when-let ((entry (org-node-at-point)))
+    (let* ((attach-dir (org-attach-dir))
+           (attachments (when attach-dir (org-attach-file-list attach-dir)))
+           (refs (org-ilm--org-mem-refs entry)))
+      (when-let ((url (org-entry-get nil "URL")))
+        (cl-pushnew url refs :test #'equal))
+      (setq refs (seq-filter #'org-url-p refs))
+      
+      (let* ((choice (consult--multi
+                      (list
+                       (list
+                        :name "Refs"
+                        :narrow ?r
+                        :items refs
+                        :action #'message)
+                       (list
+                        :name "Attachments"
+                        :narrow ?a
+                        :items attachments
+                        :action #'message))
+                      :require-match t
+                      :prompt "Convert: " ))
+             (source (car choice))
+             (type (if (string= (plist-get (cdr choice) :name) "Attachments")
+                       'attachment 'url)))
+        (org-ilm--convert-transient
+         (list :title (org-mem-entry-title entry) :source source :type type))))))
+
+(transient-define-prefix org-ilm--convert-transient (data)
+  :refresh-suffixes t
+  :value
+  (lambda ()
+    `((webpage-simplify . "markdown")
+      (webpage-orgify . t)
+      (html-download . t)))
+
+  ["Convtool"
+   (:info*
+    (lambda ()
+      (propertize (plist-get (transient-scope) :title) 'face 'italic))
+    :if (lambda () (plist-get (transient-scope) :title)))
+   (:info*
+    (lambda ()
+      (propertize (plist-get (transient-scope) :source) 'face 'transient-value))
+    :if (lambda () (plist-get (transient-scope) :source)))
+   ]
+
+  [:if (lambda () (eq (plist-get (transient-scope) :type) 'url))
+   org-ilm--convert-html-transient-group
+   ]
+
+  [:if (lambda () (eq (plist-get (transient-scope) :type) 'url))
+   org-ilm--convert-webpage-transient-group
+   ]
+
+  ;; ["Media"
+  ;;  :if
+  ;;  (lambda ()
+  ;;    (and (eq (plist-get (transient-scope) :type) 'url)
+  ;;         ;; (org-ilm-convert--transient-media-url-is-media-p
+  ;;         ;;  (plist-get (transient-scope) :source))
+  ;;         ))
+  ;;  :setup-children
+  ;;  (lambda (_)
+  ;;    (org-ilm-convert--transient-media-build))
+  ;;  ]
+
+  ["Actions"
+   ("RET" "Convert"
+    (lambda ()
+      (interactive)
+      (pcase-let* (((map webpage-download webpage-simplify webpage-orgify)
+                    (org-ilm--transient-parse))
+                   ((map :source :type) (transient-scope))
+                   (org-id (org-id-get))
+                   (attach-dir (org-attach-dir-get-create)))
+
+        ;; Webpage
+        (when webpage-download
+          (let ((title (org-ilm--get-page-title source 'slugify)))
+            (org-ilm--convert-transient-webpage-run
+             source title attach-dir org-id)))
+
+        ;; Media
+        ;; (when (or (transient-arg-value "--media-download" args)
+        ;;           (cdr (assoc "--media-subs=" args)))
+        ;;   (org-ilm-convert--transient-media-run source attach-dir org-id args))
+
+        ))
+    :inapt-if
+    (lambda ()
+      (pcase-let (((map webpage-download media-download media-subs)
+                   (org-ilm--transient-parse))
+                  ((map type) (transient-scope)))
+        (and (eq type 'url)
+             (not webpage-download)
+             (not media-download)
+             (not media-subs)))))
+   ]
+
+  (interactive "P")
+  (transient-setup 'org-ilm--convert-transient nil nil :scope data))
 
 
 ;;;; Footer
