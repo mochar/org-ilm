@@ -527,7 +527,7 @@ If point on concept, add all headlines of concept."
     (pcase type
       ('concept
        ;; TODO This can prob be replaced with org-ql regex on CONCEPTS property
-       (dolist (entry (org-ilm--collection-entries collection))
+       (dolist (entry (org-ilm--collection-element-entries collection))
          (when-let* ((element (org-ilm--element-by-id (org-mem-entry-id entry)))
                      (concepts (car (org-ilm-element--concepts element)))
                      (ancestor-ids (mapcar #'car concepts)))

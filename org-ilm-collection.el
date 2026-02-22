@@ -287,12 +287,34 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
     (when file
       (if relative-p (file-relative-name file col-path) file))))
 
-(defun org-ilm--collection-entries (collection)
-  "All org-mem entries in COLLECTION."
+(defun org-ilm--collection-element-entries (collection)
+  "All org-mem entries of elements in COLLECTION."
   (seq-filter
    (lambda (entry)
      (member (org-ilm--element-type entry) '(material card)))
    (org-mem-entries-in-files (org-ilm--collection-files collection))))
+
+(defun org-ilm--collection-select-entry (collection &optional prompt)
+  "Select an org-mem entry that is part of COLLECTION."
+  (get-text-property
+   0 :entry
+   (car
+    (consult--multi
+     (seq-map
+      (lambda (file)
+        (list :name file
+              :items
+              (lambda ()
+                (seq-map
+                 (lambda (e)
+                   (propertize
+                    (org-ilm--org-mem-title-full e)
+                    :entry e))
+                 (org-mem-entries-in-file file)))
+              ))
+      (org-ilm--collection-files collection))
+     :require-match t
+     :prompt (or prompt "Entry: ")))))
 
 (defun org-ilm--collection-tags (collection)
   "List of tags used in COLLECTION."

@@ -79,7 +79,8 @@ See `org-ilm--citation-get-zotero'"))
     `((collection . ,collection)
       (title . ,title)
       (priority . ,priority)
-      (scheduled . ,scheduled))))
+      (scheduled . ,scheduled)
+      (location . default))))
 
 (cl-defgeneric org-ilm--import-get-ref ((import org-ilm-import))
   "Get a reference identifier/url to pass to Zotero translation server."
@@ -92,26 +93,24 @@ See `org-ilm--citation-get-zotero'"))
 
 (cl-defgeneric org-ilm--import-process ((import org-ilm-import) args)
   "Fill in capture data in IMPORT using transient state ARGS."
-  (map-let (title collection as-child priority scheduled cite-key) args
+  (map-let (title collection location priority scheduled cite-key) args
     (oset import title title)
     (oset import priority priority)
     (oset import scheduled scheduled)
     (oset import collection collection)
-    ;; We by default set the parent slot to the element at point in the
-    ;; initializer of `org-ilm-import' struct definition.
-    (unless as-child (oset import parent nil))
+    (pcase location
+      ((or 'default 'custom)
+       ;; We by default set the parent slot to the element at point in the
+       ;; initializer of `org-ilm-import' struct definition, so we need to
+       ;; remove it.
+       (oset import parent nil))
+      ('child
+       (oset import target nil)))
     (when-let ((bib-alist (oref import bib-alist)))
       (oset import bibtex (org-ilm--format-bibtex-entry bib-alist cite-key))
       (setf (plist-get (oref import props) :ROAM_REFS) (concat "@" cite-key)))))
 
 ;;;; Main suffixes
-
-(transient-define-infix org-ilm--import-suffix-aschild ()
-  :class org-ilm-transient-cons-switch
-  :key "v"
-  :description "As child"
-  :argument 'as-child
-  :inapt-if-not (lambda () (org-ilm-element-p (oref (transient-scope) parent))))
 
 (transient-define-infix org-ilm--import-suffix-title ()
   :class org-ilm-transient-cons-option
@@ -152,6 +151,36 @@ See `org-ilm--citation-get-zotero'"))
         (org-ilm--transient-set-target-value "p" nil)
         (org-ilm--transient-set-target-value "s" nil))
       collection)))
+
+(transient-define-infix org-ilm--import-suffix-location ()
+  :class org-ilm-transient-cons-switches
+  :allow-empty nil
+  :argument 'location
+  :key "l"
+  :description "Location"
+  :choices
+  (lambda ()
+    (if (oref (transient-scope) parent)
+        '(default child custom)
+      '(default custom)))
+  :on-change
+  (lambda (location)
+    (let* ((args (org-ilm--transient-parse))
+           (collection (alist-get 'collection args)))
+      (pcase location
+        ('default
+         ;; (oset (transient-scope) target (org-ilm--collection-property collection :import))
+         (oset (transient-scope) target nil))
+        ('child
+         (oset (transient-scope) target nil))
+        ('custom
+         (pcase (completing-read "Type: " '("file" "heading"))
+           ("file"
+            (let ((file (org-ilm--select-collection-file collection 'relative)))
+              (oset (transient-scope) target (list 'file (expand-file-name file)))))
+           ("heading"
+            (let ((entry (org-ilm--collection-select-entry collection)))
+              (oset (transient-scope) target (list 'id (oref entry id)))))))))))
 
 (transient-define-infix org-ilm--import-suffix-scheduled ()
   :class 'org-ilm-transient-cons-option
@@ -206,13 +235,22 @@ See `org-ilm--citation-get-zotero'"))
       (message "%s" x))
     :transient t)
    (org-ilm--import-suffix-collection)
-   (org-ilm--import-suffix-aschild)
+   (org-ilm--import-suffix-location)
    (:info
     (lambda ()
-      (propertize
-       (org-ilm-element--title (oref (transient-scope) parent))
-       'face 'Info-quoted))
-    :if (lambda () (alist-get 'as-child (org-ilm--transient-parse))))
+      (map-let (location collection) (org-ilm--transient-parse)
+      (pcase location
+        ('default
+         (let ((target (org-ilm--collection-property collection :import)))
+           (concat
+            (propertize (format "%s" target) 'face 'Info-quoted))))
+        ('child
+         (let ((parent (oref (transient-scope) parent)))
+           (propertize (org-ilm-element--title parent) 'face 'Info-quoted)))
+        ('custom
+         (let ((target (oref (transient-scope) target)))
+           (concat
+            (propertize (format "%s" target) 'face 'Info-quoted))))))))
    (org-ilm--import-suffix-priority)
    (org-ilm--import-suffix-scheduled)
    (org-ilm--import-suffix-title)

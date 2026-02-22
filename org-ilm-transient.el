@@ -60,7 +60,9 @@ transient name as parameter."
 
 (defclass org-ilm-transient-cons-switches (transient-switches)
   ((argument-format :initform "%s")
-   (format          :initform " %k %d %v")) ; remove round brackets
+   (format          :initform " %k %d %v") ; remove round brackets
+   (on-change       :initarg :on-change 
+                    :initform nil))
   "Hybrid class: cycles like switches, but returns an alist pair like cons.")
 
 (cl-defmethod transient-infix-value ((obj org-ilm-transient-cons-switches))
@@ -73,10 +75,17 @@ transient name as parameter."
   (let ((prefix-val (oref transient--prefix value)))
     (oset obj value (alist-get (oref obj argument) prefix-val))))
 
+(cl-defmethod transient-infix-set ((obj org-ilm-transient-cons-switches) value)
+  "Save the new value and execute the `:on-change' callback if one exists."
+  (cl-call-next-method obj value)
+  (when-let ((callback (oref obj on-change)))
+    (funcall callback value)))
+
 (cl-defmethod transient-infix-read ((obj org-ilm-transient-cons-switches))
   "Cycle through the choices. Respects the `:allow-empty' slot.
 Supports both symbols and strings."
-  (let ((choices (oref obj choices))) 
+  (let* ((choices (oref obj choices))
+         (choices (if (functionp choices) (funcall choices) choices))) 
     (if-let ((value (oref obj value)))
         (let ((next (cadr (member value choices))))
           (cond
@@ -88,17 +97,18 @@ Supports both symbols and strings."
 (cl-defmethod transient-format-value ((obj org-ilm-transient-cons-switches))
   "Override how the value is formatted so it safely handles symbols."
   (with-slots (value choices inapt) obj
-    (format (propertize "[%s]" 'face 'transient-delimiter)
-            (mapconcat
-             (lambda (choice)
-               (propertize (format "%s" choice) 'face
-                           (if (equal choice value)
-                               (if inapt
-                                   'transient-inapt-argument
-                                 'transient-value)
-                             'transient-inactive-value)))
-             choices
-             (propertize "|" 'face 'transient-delimiter)))))
+    (let ((choices (if (functionp choices) (funcall choices) choices)))
+      (format (propertize "[%s]" 'face 'transient-delimiter)
+              (mapconcat
+               (lambda (choice)
+                 (propertize (format "%s" choice) 'face
+                             (if (equal choice value)
+                                 (if inapt
+                                     'transient-inapt-argument
+                                   'transient-value)
+                               'transient-inactive-value)))
+               choices
+               (propertize "|" 'face 'transient-delimiter))))))
 
 ;;;; Custom cons switch class
 
