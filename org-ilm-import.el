@@ -73,14 +73,23 @@ See `org-ilm--citation-get-zotero'"))
 
 ;;;; Generics
 
-(cl-defgeneric org-ilm--import-default-args ((import org-ilm-capture))
+(cl-defgeneric org-ilm--import-default-args ((capture org-ilm-capture))
   "Default args for the import transient."
-  (with-slots (collection title priority scheduled) import
+  (with-slots (collection title priority scheduled parent) capture
     `((collection . ,collection)
       (title . ,title)
       (priority . ,priority)
       (scheduled . ,scheduled)
-      (location . default))))
+      (location . ,(if parent 'child 'default)))))
+
+(cl-defgeneric org-ilm--import-default-args ((import org-ilm-import))
+  ;; Since org-ilm-import always default to having a parent element, and the
+  ;; main use case is importing new source elements, we default the location to
+  ;; the standard target.
+  (map-merge
+   'alist
+   (cl-call-next-method)
+   '((location . default))))
 
 (cl-defgeneric org-ilm--import-get-ref ((import org-ilm-import))
   "Get a reference identifier/url to pass to Zotero translation server."
@@ -404,14 +413,10 @@ is then passed as a file move capture."
          (after-finalize (lambda ()
                            (unless org-note-abort
                              (org-ilm--import-plain-transient
-                              ;; (make-org-ilm-import
-                              (make-org-ilm-capture
+                              (make-org-ilm-import
                                :type type
                                :file tmp-file
-                               :attach-method 'mv
-                               :parent (org-ilm--element-from-context)
-                               :collection (org-ilm--active-collection)
-                               ))))))
+                               :attach-method 'mv))))))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list (list "n" "New" 'plain (list 'file tmp-file) ""
                            :after-finalize after-finalize))))
