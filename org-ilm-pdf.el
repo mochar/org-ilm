@@ -1160,16 +1160,16 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 
       (pcase output-type
         ('virtual
-         (org-ilm--capture-capture
-          (if card-p 'card 'material)
-          :parent id
+         (org-ilm--import-capture
+          :type (if card-p 'card 'material)
+          :parent (org-ilm--element-by-id id)
           :id extract-id
           :title title
           :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))
         ('text
-         (org-ilm--capture-capture
-          (if card-p 'card 'material)
-          :parent id
+         (org-ilm--import-capture
+          :type (if card-p 'card 'material)
+          :parent (org-ilm--element-by-id id)
           :id extract-id
           :title title
           :content (org-ilm--pdf-spec-capture-text spec)
@@ -1193,19 +1193,19 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                               '(0 0 1 1)))
                   (region (org-ilm--pdf-region-denormalized region))
                   (file (org-ilm--pdf-image-export extract-id :region region)))
-             (org-ilm--capture-capture
-              'material
-              :parent id
+             (org-ilm--import-capture
+              :type 'material
+              :parent (org-ilm--element-by-id id)
               :id extract-id
               :title title
               :file file
-              :method 'mv
+              :attach-method 'mv
               :ext t
               :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))))
         ('marker
-         (org-ilm--capture-capture
-          'material
-          :parent id
+         (org-ilm--import-capture
+          :type 'material
+          :parent (org-ilm--element-by-id id)
           :id extract-id
           :title title
           :ext "org"
@@ -1300,9 +1300,9 @@ See also `org-ilm-pdf-convert-org-respect-area'."
             (org-ilm-capture-show-menu nil))
         (dolist (section outline)
           (when (= depth (alist-get 'depth section))
-            (org-ilm--capture-capture
-             'material
-             :parent id
+            (org-ilm--import-capture
+             :type 'material
+             :parent (org-ilm--element-by-id id)
              :title (concat "Section: " (alist-get 'title section))
              :props (list :ILM_PDF (org-ilm--pdf-spec-to-string (alist-get 'spec section))))))))))
 

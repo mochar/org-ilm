@@ -51,7 +51,7 @@ is then passed as a file move capture."
                                 :parent parent
                                 :collection collection
                                 :file tmp-file
-                                :method 'mv))))))
+                                :attach-method 'mv))))))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list (list "n" "New" 'plain (list 'file tmp-file) ""
                            :after-finalize after-finalize))))
@@ -189,9 +189,9 @@ is then passed as a file move capture."
         (when-let ((timer (org-ilm--media-extract-range region-text)))
           (setf (plist-get props :ILM_MEDIA+) timer)))
           
-      (org-ilm--capture-capture
-       'material
-       :parent file-org-id
+      (org-ilm--import-capture
+       :type 'material
+       :parent (org-ilm--element-by-id file-org-id)
        :id extract-org-id
        :content region-text
        :title title
@@ -422,9 +422,9 @@ A cloze is made automatically of the element at point or active region."
         (org-ilm--card-cloze-region (prog1 (point) (insert content)) (point))
         (setq buffer-text (buffer-string))))
         
-    (org-ilm--capture-capture
-     'card
-     :parent file-org-id
+    (org-ilm--import-capture
+     :type 'card
+     :parent (org-ilm--element-by-id file-org-id)
      :id card-org-id
      :content buffer-text
      :title snippet

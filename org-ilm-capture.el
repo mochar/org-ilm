@@ -365,8 +365,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                          current-prefix-arg
                        (not current-prefix-arg)))
         (capture (apply #'org-ilm-capture-ensure
-                        (org-combine-plists
-                         data (list :type type)))))
+                        (map-merge 'plist data (list :type type)))))
     (if immediate-p
         (org-ilm--capture capture)
       (org-ilm--capture-transient capture))))

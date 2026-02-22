@@ -789,15 +789,11 @@ COLLECTION specifies in which queue to look at."
     ("C" "New card"
      (lambda ()
        (interactive)
-       (org-ilm--org-new
-        'card
-        (org-ilm-element--id org-ilm--element-transient-element))))
+       (org-ilm--import-org 'card 'as-capture)))
     ("M" "New material"
      (lambda ()
        (interactive)
-       (org-ilm--capture-capture
-        'material
-        :parent (org-ilm-element--id org-ilm--element-transient-element))))
+       (org-ilm--import-org 'material 'as-capture)))
     ]
    ]
   )

@@ -399,24 +399,34 @@ See `org-ilm--citation-get-zotero'"))
    :scope import
    :value (lambda () (org-ilm--import-default-args import))))
 
-(defun org-ilm--import-org (type)
+(defun org-ilm--import-org (type &optional as-capture)
   "Create a new Org element of TYPE by letting user type in attachment
 content in a capture buffer.
 
 This functions creates a capture for the org attachments, while
-`org-ilm--capture-capture' creates a capture for the collection
-element. The way it works is by writing the capture in a tmp file, which
-is then passed as a file move capture."
+`org-ilm--capture' creates a capture for the collection element. The way
+it works is by writing the capture in a tmp file, which is then passed
+as a file move capture.
+
+AS-CAPTURE specifies whether to pass the import transient the object as
+a `org-ilm-import' org `org-ilm-capture' struct. The practical
+difference is that when the later has a parent specified, the location
+by default will be the child of this parent element."
   ;; Use `org-capture's after-finalize hook to immediately capture the content
   ;; into an element.
   (let* ((tmp-file (make-temp-file "" nil ".org"))
          (after-finalize (lambda ()
                            (unless org-note-abort
                              (org-ilm--import-plain-transient
-                              (make-org-ilm-import
+                              (funcall
+                               (if as-capture #'make-org-ilm-capture
+                                 #'make-org-ilm-import)
                                :type type
                                :file tmp-file
-                               :attach-method 'mv))))))
+                               :attach-method 'mv
+                               :parent (org-ilm--element-from-context)
+                               :collection (org-ilm--collection-from-context)
+                               ))))))
     (cl-letf (((symbol-value 'org-capture-templates)
                (list (list "n" "New" 'plain (list 'file tmp-file) ""
                            :after-finalize after-finalize))))
@@ -429,6 +439,15 @@ is then passed as a file move capture."
 (defun org-ilm-import-card ()
   (interactive)
   (org-ilm--import-org 'card))
+
+(defun org-ilm--import-capture (&rest data)
+  (let ((immediate-p (if org-ilm-capture-show-menu
+                         current-prefix-arg
+                       (not current-prefix-arg)))
+        (capture (apply #'org-ilm-capture-ensure data)))
+    (if immediate-p
+        (org-ilm--capture capture)
+      (org-ilm--import-plain-transient capture))))
 
 ;;;; File import
 
