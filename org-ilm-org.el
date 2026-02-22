@@ -30,41 +30,6 @@
 
 ;;;; Functions
 
-(defun org-ilm--org-new (type collection &optional parent)
-  "Create a new Org element of TYPE by letting user type in attachment
-content in a capture buffer.
-
-This functions creates a capture for the org attachments, while
-`org-ilm--capture-capture' creates a capture for the collection
-element. The way it works is by writing the capture in a tmp file, which
-is then passed as a file move capture."
-  ;; Use `org-capture's after-finalize hook to immediately capture the content
-  ;; into an element.
-  (let* ((tmp-file (make-temp-file "" nil ".org"))
-         (after-finalize (lambda ()
-                           (unless org-note-abort
-                             ;; (let ((org-ilm-capture-show-menu t))
-                             (let ((org-ilm-capture-show-menu nil))
-                               (org-ilm--capture-capture
-                                type
-                                :capture-kwargs '(:immediate-finish nil)
-                                :parent parent
-                                :collection collection
-                                :file tmp-file
-                                :attach-method 'mv))))))
-    (cl-letf (((symbol-value 'org-capture-templates)
-               (list (list "n" "New" 'plain (list 'file tmp-file) ""
-                           :after-finalize after-finalize))))
-      (org-capture nil "n"))))
-
-(defun org-ilm-org-new-material (collection &optional parent)
-  (interactive)
-  (org-ilm--org-new 'material collection parent))
-
-(defun org-ilm-org-new-card (collection &optional parent)
-  (interactive)
-  (org-ilm--org-new 'card collection parent))
-
 (cl-defun org-ilm--org-buffer-text-process (&key keep-clozes no-footnotes (source-buffer (current-buffer)) (begin (point-min)) (end (point-max)))
   "Process current buffer for extraction or cloze."
   ;; Remove capture targets
