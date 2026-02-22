@@ -552,12 +552,7 @@ COLLECTION specifies in which queue to look at."
    ]
 
   [
-   ("n" "Concepts..."
-    (lambda ()
-      (interactive)
-      (org-ilm--element-with-point-at (transient-scope)
-        (org-ilm-concepts)))
-    :transient t)
+   ("n" "Concepts..." org-ilm--concept-transient :transient t)
    ("a" "Attachment..." org-ilm--element-attachment-transient :transient t)
    ("q" "Queue..." org-ilm--element-queue-transient :transient t)
    ("m" "Media..." org-ilm--element-media-transient :transient t

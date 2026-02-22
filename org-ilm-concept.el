@@ -197,11 +197,7 @@
 
 (defun org-ilm-concepts ()
   (interactive)
-  (if-let* ((element (org-ilm--element-from-context))
-            (id (org-ilm-element--id element)))
-      (let ((transient-data (org-ilm--concept-transient-data id)))
-        (org-ilm--concept-transient transient-data))
-    (user-error "No element at point")))
+  (org-ilm--concept-transient))
 
 (defun org-ilm--concept-transient-data (id)
   "Annotate for each concept of element with ID whether it is a direct,
@@ -211,7 +207,7 @@ outline, and/or property concept."
       (let* ((concept-ids (copy-sequence (car concept-data)))
              (n-direct (cdr concept-data))
              prop-ids parent-ids)
-        
+
         (org-ilm--org-with-point-at id
           (setq prop-ids (mapcar #'car (org-ilm--concept-parse-property)))
           (save-excursion
@@ -230,50 +226,38 @@ outline, and/or property concept."
          (reverse concept-ids))))
     data))
 
-(defun org-ilm--concept-transient-concepts-build (concepts)
-  (seq-map
-   (lambda (concept)
-     (let ((title (plist-get concept :title)))
-       (transient-parse-suffix '
-        'org-ilm--concept-transient
-        (list :info* (concat "- " title)))))
-   concepts))
+(defun org-ilm--concept-transient-rebuild-scope ()
+  (let ((data (org-ilm--concept-transient-data (plist-get (transient-scope) :id))))
+    (org-ilm--transient-set-scope data)))
 
-(transient-define-prefix org-ilm--concept-transient (scope)
+(transient-define-prefix org-ilm--concept-transient ()
   :refresh-suffixes t
 
-  ["Outline concepts"
+  ["Concepts"
    :setup-children
    (lambda (_)
-     (org-ilm--concept-transient-concepts-build
-      (seq-filter
-       (lambda (concept)
-         (and (plist-get concept :outline)
-              (plist-get concept :direct)))
-       (plist-get (transient-scope) :concepts))))
+     (seq-map
+      (lambda (concept)
+        (pcase-let (((map :outline :direct :property :title :id) concept)
+                    (keymap (make-sparse-keymap)))
+          ;; TODO Clicking doesnt work
+          (define-key keymap [mouse-1]
+                      (lambda ()
+                        (interactive)
+                        (org-ilm--org-goto-id id)))
+          (transient-parse-suffix
+           'org-ilm--concept-transient
+           (list :info*
+                 (concat 
+                  (propertize "P" 'face (if property 'error 'Info-quoted))
+                  (propertize "O" 'face (if outline 'error 'Info-quoted))
+                  (propertize "D" 'face (if direct 'error 'Info-quoted))
+                  " "
+                  (propertize title 'mouse-face 'highlight 'keymap keymap))))))
+      (plist-get (transient-scope) :concepts)))
    ]
 
-  ["Inherited concepts"
-   :setup-children
-   (lambda (_)
-     (org-ilm--concept-transient-concepts-build
-      (seq-filter
-       (lambda (concept)
-         (and (not (plist-get concept :property))
-              (not (plist-get concept :outline))))
-       (plist-get (transient-scope) :concepts))))
-   ]
-
-  ["Property concepts"
-   :setup-children
-   (lambda (suffixes)
-     (append
-      (org-ilm--concept-transient-concepts-build
-       (seq-filter
-        (lambda (concept)
-          (plist-get concept :property))
-        (plist-get (transient-scope) :concepts)))
-      suffixes))
+  [
    ("a" "Add"
     (lambda ()
       (interactive)
@@ -281,24 +265,28 @@ outline, and/or property concept."
       ;; (org-ilm-concepts-add), happens when capture buffer opens.
       (let ((id (plist-get (transient-scope) :id)))
         (org-ilm--org-with-point-at id
-          (org-ilm-concept-add)))
-      (run-with-timer .1 nil #'org-ilm-concepts)
-      )
-    :transient transient--do-exit
+          (org-ilm-concept-add)
+          (org-mem-updater-update t)))
+      (org-ilm--concept-transient-rebuild-scope))
+    :transient t
     )
    ("r" "Remove"
     (lambda ()
       (interactive)
       (let ((id (plist-get (transient-scope) :id)))
         (org-ilm--org-with-point-at id
-          (org-ilm-concept-remove)))
-      (run-with-timer .1 nil #'org-ilm-concepts))
-    :transient transient--do-exit
+          (org-ilm-concept-remove)
+          (org-mem-updater-update t)))
+      (org-ilm--concept-transient-rebuild-scope))
+    :transient t
     )
    ]
   
   (interactive)
-  (transient-setup 'org-ilm--concept-transient nil nil :scope scope))
+  (transient-setup
+   'org-ilm--concept-transient nil nil
+   :scope (org-ilm--concept-transient-data
+           (or (-some-> (transient-scope) (oref id)) (org-id-get)))))
   
 ;;;; Parsing
 
