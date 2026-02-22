@@ -55,7 +55,7 @@
   "M-n" #'org-ilm-queue-next-marked
   "M-p" #'org-ilm-queue-previous-marked
   "r" #'org-ilm-queue-review
-  "e" #'org-ilm-element-actions
+  "e" #'org-ilm-element-menu
   "v" #'org-ilm-queue-settings
   "m" #'org-ilm-queue-element-mark
   "<backspace>" #'org-ilm-queue-element-unmark-backwards

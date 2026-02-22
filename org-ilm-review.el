@@ -457,7 +457,7 @@ needs the attachment buffer."
     ("d" "Done" org-ilm-review-done)
     ("q" "Quit" org-ilm-review-quit)]
    ["Element"
-    ("e" "Element..." org-ilm-element-actions)
+    ("e" "Element..." org-ilm-element-menu)
     ("c" "Open collection" org-ilm-review-open-collection)
     ("a" "Open attachment" org-ilm-review-open-attachment)]
    ]

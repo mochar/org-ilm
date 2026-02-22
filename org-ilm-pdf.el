@@ -830,7 +830,7 @@ buffer-local `pdf-view--hotspot-functions'."
             (vector id-symb 'mouse-1)
             (lambda ()
               (interactive)
-              (org-ilm-element-actions nil el-id)))   
+              (org-ilm-element-menu nil el-id)))   
 
            (local-set-key
             (vector id-symb 'down-mouse-3)

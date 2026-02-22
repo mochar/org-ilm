@@ -641,9 +641,9 @@ A cloze is made automatically of the element at point or active region."
 ;; Integration with embark so that we can apply actions on elements without
 ;; opening them.
 
-(defun org-ilm-element-actions-embark (target)
+(defun org-ilm-element-menu-embark (target)
   (let ((id (get-text-property 0 :id target)))
-    (org-ilm-element-actions nil id)))
+    (org-ilm-element-menu nil id)))
 
 (defun org-ilm-element-set-priority-embark (target)
   (let ((element (get-text-property 0 :element target)))
@@ -666,7 +666,7 @@ A cloze is made automatically of the element at point or active region."
 
 (defvar-keymap org-ilm-element-embark-map
   ;; :parent embark-general-map
-  "e" #'org-ilm-element-actions-embark
+  "e" #'org-ilm-element-menu-embark
   "p" #'org-ilm-element-set-priority-embark
   "k" #'org-ilm-element-delete-embark
   "RET" #'org-ilm-element-enter-embark)

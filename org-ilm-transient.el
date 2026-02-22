@@ -23,17 +23,21 @@ transient name as parameter."
       (transient-args transient-current-command)
     (transient-get-value)))
 
+(defun org-ilm--transient-suffix-by-slot (slot value)
+  (cl-find value transient--suffixes
+           :key (lambda (s) (slot-value s slot))
+           :test #'equal))
+
 (defun org-ilm--transient-set-target-value (target-key new-value)
   "Finds the target argument by its key and sets its internal value slot."
-  (let* (;; Get the list of currently displayed suffix objects (internal variable)
-         (all-suffixes transient--suffixes)
-         ;; Find the target object by its key
-         (target-obj (cl-find target-key all-suffixes
-                             :key (lambda (s) (oref s key))
-                             :test #'equal)))
+  (let* ((all-suffixes transient--suffixes)
+         (target-obj (org-ilm--transient-suffix-by-slot 'key target-key)))
     ;; Check if it's a valid object and manually set the 'value' slot (internal slot)
     (when (cl-typep target-obj 'transient-infix)
       (oset target-obj value new-value))))
+
+(defun org-ilm--transient-set-scope (scope)
+  (oset (transient-prefix-object) scope scope))
 
 ;;;; Custom patched cons class
 

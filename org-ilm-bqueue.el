@@ -447,7 +447,7 @@ If the bqueue has a query, run it again. Else re-parse elements."
   "Choose a bqueue buffer or make a new one."
   (let* ((bqueue-buffers (mapcar (lambda (b) (cons (buffer-name b) b))
                                  (org-ilm--bqueue-buffers)))
-         (bqueue (completing-read "Add to queue, or create new: "
+         (bqueue (completing-read "Select queue or create new: "
                                   bqueue-buffers nil require-match)))
     (or (cdr (assoc bqueue bqueue-buffers))
         (org-ilm--bqueue-buffer-create
@@ -510,19 +510,22 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
 ;; - Exclude cards.
 ;; Replace current arg with double arg
 ;; TODO Only add child elements of same collection
-(defun org-ilm-queue-add-dwim (&optional arg exclude-self)
+(defun org-ilm-queue-add-dwim (&optional arg target bqueue-buf)
   "Add element at point + descendants to queue. With ARG, add to new queue.
 
 If point on headline, add headline and descendants.
 If point on concept, add all headlines of concept."
   (interactive "P")
+  (setq target (or target 'all))
+  (cl-assert (member target '(all self children)))
   (when-let* ((headline (org-ilm--org-headline-at-point))
               ;; We also want this to work on headlines that are not ilm elements.
               (type (or (org-ilm--element-type headline) 'headline))
               (collection (org-ilm--collection-from-context))
-              (queue-buffer (org-ilm--bqueue-completing-read
-                             (format "[%s] %s" (upcase (symbol-name type))
-                                     (org-element-property :title headline))))
+              (bqueue-buf (or bqueue-buf
+                              (org-ilm--bqueue-completing-read
+                               (format "[%s] %s" (upcase (symbol-name type))
+                                       (org-element-property :title headline)))))
               (n-added 0))
     (pcase type
       ('concept
@@ -532,23 +535,25 @@ If point on concept, add all headlines of concept."
                      (concepts (car (org-ilm-element--concepts element)))
                      (ancestor-ids (mapcar #'car concepts)))
            (when (member (org-element-property :ID headline) ancestor-ids)
-             (when (org-ilm--bqueue-insert element :buffer queue-buffer :exists-ok t)
+             (when (org-ilm--bqueue-insert element :buffer bqueue-buf :exists-ok t)
                (cl-incf n-added))))))
       (_
        (save-excursion
          (org-back-to-heading t)
-         (let ((end (save-excursion (org-end-of-subtree t)))
+         (let ((end (save-excursion (if (eq target 'self)
+                                        (org-end-of-meta-data)
+                                      (org-end-of-subtree t))))
                el)
-           (when exclude-self (outline-next-heading))
+           (when (eq target 'children) (outline-next-heading))
            (while (< (point) end)
              (when (setq el (org-ilm--element-at-point))
-               (when (org-ilm--bqueue-insert el :buffer queue-buffer :exists-ok t)
+               (when (org-ilm--bqueue-insert el :buffer bqueue-buf :exists-ok t)
                  (cl-incf n-added)))
              (outline-next-heading))))))
 
     (message "Added %s element(s) to the queue" n-added)
     
-    (with-current-buffer (switch-to-buffer queue-buffer)
+    (with-current-buffer (switch-to-buffer bqueue-buf)
       (org-ilm-queue-revert))))
 
 (defun org-ilm-queue (new &optional dont-switch)

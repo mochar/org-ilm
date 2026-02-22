@@ -73,7 +73,7 @@
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-minor-mode'."
   "i" #'org-ilm-import
-  "e" #'org-ilm-element-actions
+  "e" #'org-ilm-element-menu
   "a" #'org-ilm-attachment-actions
   "p" #'org-ilm-element-set-priority
   "s" #'org-ilm-element-set-schedule
@@ -124,7 +124,7 @@
                   #'org-ilm--pqueue-write-all)
         
         (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
-        (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-actions)
+        (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-menu)
         (define-key image-mode-map (kbd "A") org-ilm-image-map)
         (advice-add 'pdf-annot-create-context-menu
                     :around #'org-ilm--pdf-annot-create-context-menu-advice)

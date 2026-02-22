@@ -235,7 +235,7 @@ To safely include the children in the migration, call
 (cl-defun org-ilm--element-query-children (element &key return-type include-self all-descendants more-query any-collection)
   "Return child elements of element in order."
   (unless return-type (setq return-type 'element))
-  (cl-assert (member return-type '(entry element headline)))
+  (cl-assert (member return-type '(entry element headline id)))
   (cl-assert (org-ilm-element-p element))
   (let* ((id (org-ilm-element--id element))
          (collection (unless any-collection
@@ -254,6 +254,7 @@ To safely include the children in the migration, call
       :action
       (pcase (or return-type 'headline)
         ('headline) ;; default: org headline element
+        ('id #'org-id-get)
         ('entry #'org-node-at-point)
         ('element #'org-ilm--element-at-point)
         (_ (error "Unrecognized return type"))))))
@@ -309,7 +310,7 @@ COLLECTION specifies in which queue to look at."
 (defun org-ilm-element-set-schedule (element timestamp)
   "Set the schedule of an ilm element."
   (interactive
-   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))
+   (list (org-ilm--element-from-context)
          (org-read-date 'with-time nil nil "Schedule: ")))
   (org-ilm--element-with-point-at element
     (atomic-change-group
@@ -323,8 +324,7 @@ COLLECTION specifies in which queue to look at."
 
 (defun org-ilm-element-set-priority (element)
   "Set the priority of an ilm element."
-  (interactive
-   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
+  (interactive (list (org-ilm--element-from-context)))
   (org-ilm--element-with-point-at element
     (let ((priority (org-ilm-element--priority element)))
       (if (org-ilm-element--done element)
@@ -377,8 +377,7 @@ COLLECTION specifies in which queue to look at."
 
 (defun org-ilm-element-done (element &optional duration timestamp)
   "Apply done on ilm element at point."
-  (interactive
-   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
+  (interactive (list (org-ilm--element-from-context)))
   (cl-assert (org-ilm-element-p element) nil "Not an org-ilm element")
 
   (org-ilm--element-with-point-at element
@@ -446,8 +445,7 @@ COLLECTION specifies in which queue to look at."
 
 (defun org-ilm-element-delete (element &optional warn-attach)
   "Delete ilm element at point."
-  (interactive
-   (list (or org-ilm--element-transient-element (org-ilm--element-from-context))))
+  (interactive (list (org-ilm--element-from-context)))
   (cl-assert (org-ilm-element-p element) nil "Not an ilm element")
 
   (with-slots (id type collection) element
@@ -486,24 +484,23 @@ COLLECTION specifies in which queue to look at."
 
 ;;;; Transient
 
-(defvar org-ilm--element-transient-element nil)
-
 (transient-define-suffix org-ilm--element-transient-schedule ()
   :key "s"
   :description
   (lambda ()
     (concat
      "Schedule "
-     (if (org-ilm-element--done org-ilm--element-transient-element)
+     (if (oref (transient-scope) done)
          (propertize "(done)" 'face 'Info-quoted)
-       (when-let* ((element org-ilm--element-transient-element)
-                   (sched (org-ilm-element--sched element)))
+       (when-let* ((element (transient-scope))
+                   (sched (oref element sched)))
          (propertize (ts-format "%Y-%m-%d" sched) 'face 'transient-value)))))
   :transient 'transient--do-call
-  :inapt-if (lambda () (org-ilm-element--done org-ilm--element-transient-element))
+  :inapt-if (lambda () (oref (transient-scope) done))
   (interactive)
   (call-interactively #'org-ilm-element-set-schedule)
-  (setq org-ilm--element-transient-element (org-ilm--element-from-context)))
+  (org-mem-updater-update t)
+  (org-ilm--transient-set-scope (org-ilm--element-from-context)))
 
 (transient-define-suffix org-ilm--element-transient-priority ()
   :key "p"
@@ -511,19 +508,19 @@ COLLECTION specifies in which queue to look at."
   (lambda ()
     (concat
      "Priority "
-     (if (org-ilm-element--done org-ilm--element-transient-element)
+     (if (org-ilm-element--done (transient-scope))
          (propertize "(done)" 'face 'Info-quoted)
-       (when-let* ((element org-ilm--element-transient-element)
+       (when-let* ((element (transient-scope))
                    (priority (org-ilm-element--priority-formatted element)))
          (propertize priority 'face 'transient-value)))))
   :transient 'transient--do-call
   :face (lambda ()
-          (when (org-ilm-element--done org-ilm--element-transient-element)
+          (when (org-ilm-element--done (transient-scope))
             'Info-quoted))
-  ;; :inapt-if (lambda () (org-ilm-element--done org-ilm--element-transient-element))
+  ;; :inapt-if (lambda () (org-ilm-element--done (transient-scope)))
   (interactive)
   (call-interactively #'org-ilm-element-set-priority)
-  (setq org-ilm--element-transient-element (org-ilm--element-from-context)))
+  (org-ilm--transient-set-scope (org-ilm--element-from-context)))
 
 (transient-define-suffix org-ilm--element-transient-collection ()
   :key "c"
@@ -533,15 +530,15 @@ COLLECTION specifies in which queue to look at."
     (concat
      "Collection "
      (propertize 
-      (symbol-name (org-ilm-element--collection org-ilm--element-transient-element))
+      (symbol-name (org-ilm-element--collection (transient-scope)))
       'face 'transient-value)))
   (interactive)
   (funcall-interactively #'org-ilm-element-set-collection
-                         org-ilm--element-transient-element))
+                         (transient-scope)))
 
 (defun org-ilm--element-transient-registry-attach-read ()
   (org-ilm--element-with-point-at-registry
-      org-ilm--element-transient-element
+      (transient-scope)
     (when-let* ((attach-dir (org-attach-dir))
                 (attachments (org-attach-file-list attach-dir)))
       (completing-read "Attachment: " attachments nil t))))
@@ -573,11 +570,11 @@ COLLECTION specifies in which queue to look at."
       (let* ((args (transient-args transient-current-command))
              (attachment (transient-arg-value "--attachment=" args))
              (attach-dir (org-ilm--element-with-point-at-registry
-                             org-ilm--element-transient-element
+                             (transient-scope)
                            (org-attach-dir)))
              (method (transient-arg-value "--method=" args))
              (main (transient-arg-value "--main" args)))
-        (org-ilm--element-with-point-at org-ilm--element-transient-element
+        (org-ilm--element-with-point-at (transient-scope)
           (org-attach-attach (expand-file-name attachment attach-dir) nil (intern method))
           (when main
             (rename-file
@@ -591,23 +588,22 @@ COLLECTION specifies in which queue to look at."
    ]
   )
 
-(transient-define-prefix org-ilm--element-transient ()
+(transient-define-prefix org-ilm--element-transient (element)
   :refresh-suffixes t
+  
   [:description
    (lambda ()
-     (capitalize (symbol-name (org-ilm-element--type org-ilm--element-transient-element))))
+     (capitalize (symbol-name (oref (transient-scope) type))))
    (:info*
     (lambda ()
-      (propertize
-       (org-ilm-element--title org-ilm--element-transient-element)
-       'face 'italic)))
+      (propertize (oref (transient-scope) title) 'face 'italic)))
    (:info "")
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
    ("n" "Concepts..."
     (lambda ()
       (interactive)
-      (org-ilm--element-with-point-at org-ilm--element-transient-element
+      (org-ilm--element-with-point-at (transient-scope)
         (org-ilm-concepts)))
     :transient t)
    (org-ilm--element-transient-collection)
@@ -638,16 +634,16 @@ COLLECTION specifies in which queue to look at."
                        attach-dir)))
           (t
            (user-error "Select attachment, pass in URL, or leave empty to create new")
-          )))))
+           )))))
     ("ao" "Open"
      (lambda ()
        (interactive)
-       (org-ilm--element-with-point-at org-ilm--element-transient-element
+       (org-ilm--element-with-point-at (transient-scope)
          (org-ilm-open-attachment))))
     ("ad" "Dired"
      (lambda ()
        (interactive)
-       (let* ((element org-ilm--element-transient-element)
+       (let* ((element (transient-scope))
               (id (org-ilm-element--id element))
               attach-dir)
          (org-ilm--element-with-point-at element
@@ -656,26 +652,12 @@ COLLECTION specifies in which queue to look at."
          (find-name-dired attach-dir (concat id "*")))))
     ]
 
-   ;; ["Registry"
-   ;;  :if (lambda () (org-ilm-element--registry org-ilm--element-transient-element))
-   ;;  ("gj" "Jump"
-   ;;   (lambda ()
-   ;;     (interactive)
-   ;;     (org-node-goto-id (org-ilm-element--registry org-ilm--element-transient-element))))
-   ;;  ("ga" "Attach..." org-ilm--element-transient-registry-attach
-   ;;   :inapt-if-not
-   ;;   (lambda ()
-   ;;     (org-ilm--org-with-point-at
-   ;;         (org-ilm-element--registry org-ilm--element-transient-element)
-   ;;       (org-attach-dir))))
-   ;;  ]
-
    ["Media"
-    :if (lambda () (org-ilm-element--media org-ilm--element-transient-element))
+    :if (lambda () (oref (transient-scope) media))
     ("ms" "Set"
      (lambda ()
        (interactive)
-       (let* ((element org-ilm--element-transient-element)
+       (let* ((element (transient-scope))
               (id (org-ilm-element--id element))
               (entry (org-mem-entry-by-id id))
               (registry-entry (org-mem-entry-by-id (org-ilm-element--registry element)))
@@ -704,13 +686,13 @@ COLLECTION specifies in which queue to look at."
      (lambda ()
        (interactive)
        (org-ilm--media-open
-        (org-ilm-element-entry org-ilm--element-transient-element)))
-     :if (lambda () (org-ilm-element--media org-ilm--element-transient-element)))
+        (org-ilm-element-entry (transient-scope))))
+     :if (lambda () (oref (transient-scope) media)))
     ("mr" "Range"
      (lambda ()
        (interactive)
-       (let* ((element org-ilm--element-transient-element)
-              (entry (org-ilm-element-entry element))
+       (let* ((element (transient-scope))
+              (entry (org-ilm-element--entry element))
               (parts (org-ilm--media-compile entry))
               (range (read-string "Range: "
                                   (when (stringp (nth 1 parts))
@@ -718,49 +700,13 @@ COLLECTION specifies in which queue to look at."
                                         (string-join (cdr parts) "-")
                                       (nth 1 parts)))))
               (source (car parts)))
-         (org-ilm--org-with-point-at (org-ilm-element--id element)
+         (org-ilm--org-with-point-at (oref element id)
            (org-entry-put nil org-ilm-property-media+ range)
            (save-buffer)
-           (org-mem-updater-ensure-id-node-at-point-known)
-           (setq org-ilm--element-transient-element (org-ilm--element-at-point)))))
-     :if (lambda () (org-ilm-element--media org-ilm--element-transient-element))
+           (org-mem-updater-update t)
+           (org-ilm--transient-set-scope (org-ilm--element-at-point)))))
+     :if (lambda () (oref (transient-scope) media))
      :transient transient--do-call)
-    ]
-   ["Queue"
-    ("q." "Add this"
-     (lambda ()
-       (interactive)
-       (let* ((element org-ilm--element-transient-element)
-              (queue-buffer (org-ilm--bqueue-completing-read
-                             (org-ilm-element--title element))))
-         (org-ilm--bqueue-insert element :buffer queue-buffer :exists-ok t)
-         (with-current-buffer (switch-to-buffer queue-buffer)
-           (org-ilm-queue-revert)))))
-    ("qa" "Add all"
-     (lambda ()
-       (interactive)
-       (transient-quit-all)
-       (org-ilm-queue-add-dwim)))
-    ("qc" "Add children"
-     (lambda ()
-       (interactive)
-       (transient-quit-all)
-       (org-ilm-queue-add-dwim nil 'exclude-self)))
-    ("qm" "Mark all"
-     (lambda ()
-       (interactive)
-       (let* ((element org-ilm--element-transient-element)
-              (children (org-ilm--element-query-children
-                         element :return-type 'headline :include-self t :all-descendants t))
-              (queue-buffer (org-ilm--bqueue-completing-read nil t)))
-         (with-current-buffer queue-buffer
-           (dolist (el children)
-             (when-let ((id (org-element-property :ID el)))
-               (when (org-ilm-queue--contains-p org-ilm-pqueue id)
-                 (push id org-ilm--pqueue-marked-objects))))
-           (org-ilm-queue-revert))
-         (switch-to-buffer queue-buffer)))
-     :inapt-if-not org-ilm--bqueue-buffers)
     ]
    ]
 
@@ -769,23 +715,24 @@ COLLECTION specifies in which queue to look at."
     ("o" "Open"
      (lambda ()
        (interactive)
-       (org-ilm--org-goto-id (org-ilm-element--id org-ilm--element-transient-element))))
+       (org-ilm--org-goto-id (oref (transient-scope) id))))
     ("d" "Done"
      (lambda ()
        (interactive)
-       (funcall-interactively #'org-ilm-element-done org-ilm--element-transient-element))
-     :if-not (lambda () (org-ilm-element--done org-ilm--element-transient-element)))
+       (funcall-interactively #'org-ilm-element-done (transient-scope)))
+     :if-not (lambda () (oref (transient-scope) done)))
     ("d" "Undone"
      (lambda ()
        (interactive)
-       (funcall-interactively #'org-ilm-element-undone org-ilm--element-transient-element))
-     :if (lambda () (org-ilm-element--done org-ilm--element-transient-element)))
+       (funcall-interactively #'org-ilm-element-undone (transient-scope)))
+     :if (lambda () (oref (transient-scope) done)))
     ("k" "Delete"
      (lambda ()
        (interactive)
-       (funcall-interactively #'org-ilm-element-delete org-ilm--element-transient-element)))
+       (funcall-interactively #'org-ilm-element-delete (transient-scope))))
     ]
    [
+    ("q" "Queue..." org-ilm--element-queue-transient :transient t)
     ("C" "New card"
      (lambda ()
        (interactive)
@@ -796,25 +743,82 @@ COLLECTION specifies in which queue to look at."
        (org-ilm--import-org 'material 'as-capture)))
     ]
    ]
-  )
 
-(defun org-ilm-element-actions (&optional arg id)
+  (interactive "P")
+  (transient-setup 'org-ilm--element-transient nil nil :scope element))
+
+(defun org-ilm-element-menu (&optional arg id)
   "Open menu to apply an action on an element."
   (interactive "P")
   (let ((element (if id (org-ilm--element-by-id id) (org-ilm--element-from-context))))
     (cond
      ((null element)
       (user-error "No ilm element!"))
-     ((eq (org-ilm-element--type element) 'concept)
-      (user-error "Element actions not available for concepts"))
+     ((not (member (oref element type) '(card material)))
+      (user-error "Element actions not available for type %s" (oref element type)))
      (t
-      (setq org-ilm--element-transient-element element)
-      ;; Unset var after transient exited. Tried temporarily setting var within
-      ;; let, but gets lost somehow.
-      (org-ilm--add-hook-once
-       'transient-post-exit-hook
-       (lambda () (setq org-ilm--element-transient-element nil)))
-      (org-ilm--element-transient)))))
+      (org-ilm--element-transient element)))))
+
+;;;;; Queue
+
+(defun org-ilm--element-mark-in-queue (element target &optional queue-buffer)
+  (cl-assert (member target '(self children all))) 
+  (let* ((ids (if (eq target 'self)
+                  (list (oref element id))
+                (org-ilm--element-query-children
+                 element
+                 :return-type 'id
+                 :include-self (eq target 'all)
+                 :all-descendants t)))
+         (queue-buffer (or queue-buffer (org-ilm--bqueue-completing-read nil t))))
+    (with-current-buffer queue-buffer
+      (org-ilm--bqueue-mark-objects ids)
+      (org-ilm-queue-revert))))
+
+(transient-define-prefix org-ilm--element-queue-transient ()
+  :refresh-suffixes t
+  :value
+  (lambda ()
+    `((target . all)
+      (buffer . ,(or org-ilm-bqueue-active-buffer (org-ilm--bqueue-buffer-current)))))
+  
+  ["Queue actions"
+   ("t" "Target"
+    :cons 'target
+    :class org-ilm-transient-cons-switches
+    :choices (all children self))
+   ("b" "Buffer"
+    :cons 'buffer
+    :class org-ilm-transient-cons-option
+    :always-read t
+    :reader
+    (lambda (&rest _)
+      (let ((buf (org-ilm--bqueue-completing-read (oref (transient-scope) title))))
+        buf)))
+   (:info (lambda () ""))
+   ("a" "Add to queue"
+    (lambda ()
+      (interactive)
+      (map-let (target buffer) (org-ilm--transient-parse)
+        (unless buffer
+          (let ((obj (org-ilm--transient-suffix-by-slot 'key "b")))
+            (setq buffer (transient-infix-read obj))
+            (transient-infix-set obj buffer)))
+        (org-ilm-queue-add-dwim nil target buffer)))
+    :transient t)
+   ("m" "Mark in queue"
+    (lambda ()
+      (interactive)
+      (map-let (target buffer) (org-ilm--transient-parse)
+        (org-ilm--element-mark-in-queue
+         (transient-scope) target buffer)))
+    :inapt-if-not (lambda () (alist-get 'buffer (org-ilm--transient-parse)))
+    :transient t)
+   ]
+  
+  (interactive)
+  (transient-setup 'org-ilm--element-queue-transient nil nil :scope (transient-scope)))
+
 
 ;;; Footer
 
