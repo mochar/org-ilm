@@ -61,8 +61,8 @@ See `org-ilm--citation-get-zotero'"))
     ("u" "URL" org-ilm-import-url)
     ("b" "Buffer" org-ilm-import-buffer)]
    ["New"
-   ("o" "Org" org-ilm-org-new-material)
-   ("c" "Card" org-ilm-org-new-card)]
+   ("o" "Org" org-ilm-import-org)
+   ("c" "Card" org-ilm-import-card)]
    ]
   )
 
@@ -73,7 +73,7 @@ See `org-ilm--citation-get-zotero'"))
 
 ;;;; Generics
 
-(cl-defgeneric org-ilm--import-default-args ((import org-ilm-import))
+(cl-defgeneric org-ilm--import-default-args ((import org-ilm-capture))
   "Default args for the import transient."
   (with-slots (collection title priority scheduled) import
     `((collection . ,collection)
@@ -91,7 +91,7 @@ See `org-ilm--citation-get-zotero'"))
 (cl-defgeneric org-ilm--import-get-title ((import org-ilm-import))
   "Infer title from IMPORT.")
 
-(cl-defgeneric org-ilm--import-process ((import org-ilm-import) args)
+(cl-defgeneric org-ilm--import-process ((import org-ilm-capture) args)
   "Fill in capture data in IMPORT using transient state ARGS."
   (map-let (title collection location priority scheduled cite-key) args
     (oset import title title)
@@ -106,9 +106,10 @@ See `org-ilm--citation-get-zotero'"))
        (oset import parent nil))
       ('child
        (oset import target nil)))
-    (when-let ((bib-alist (oref import bib-alist)))
-      (oset import bibtex (org-ilm--format-bibtex-entry bib-alist cite-key))
-      (setf (plist-get (oref import props) :ROAM_REFS) (concat "@" cite-key)))))
+    (when (org-ilm-import-p import)
+      (when-let ((bib-alist (oref import bib-alist)))
+        (oset import bibtex (org-ilm--format-bibtex-entry bib-alist cite-key))
+        (setf (plist-get (oref import props) :ROAM_REFS) (concat "@" cite-key))))))
 
 ;;;; Main suffixes
 
@@ -368,6 +369,61 @@ See `org-ilm--citation-get-zotero'"))
    (org-ilm--import-suffix-import)
    ])
 
+
+;;;; Plain import
+
+(transient-define-prefix org-ilm--import-plain-transient (import)
+  :refresh-suffixes t
+  
+  ["Import"
+   org-ilm--import-group-main
+   ]
+  
+  ["Actions"
+   (org-ilm--import-suffix-import)
+   ]
+  
+  (interactive "P")
+  (transient-setup
+   'org-ilm--import-plain-transient
+   nil nil
+   :scope import
+   :value (lambda () (org-ilm--import-default-args import))))
+
+(defun org-ilm--import-org (type)
+  "Create a new Org element of TYPE by letting user type in attachment
+content in a capture buffer.
+
+This functions creates a capture for the org attachments, while
+`org-ilm--capture-capture' creates a capture for the collection
+element. The way it works is by writing the capture in a tmp file, which
+is then passed as a file move capture."
+  ;; Use `org-capture's after-finalize hook to immediately capture the content
+  ;; into an element.
+  (let* ((tmp-file (make-temp-file "" nil ".org"))
+         (after-finalize (lambda ()
+                           (unless org-note-abort
+                             (org-ilm--import-plain-transient
+                              ;; (make-org-ilm-import
+                              (make-org-ilm-capture
+                               :type type
+                               :file tmp-file
+                               :attach-method 'mv
+                               :parent (org-ilm--element-from-context)
+                               :collection (org-ilm--active-collection)
+                               ))))))
+    (cl-letf (((symbol-value 'org-capture-templates)
+               (list (list "n" "New" 'plain (list 'file tmp-file) ""
+                           :after-finalize after-finalize))))
+      (org-capture nil "n"))))
+
+(defun org-ilm-import-org ()
+  (interactive)
+  (org-ilm--import-org 'material))
+
+(defun org-ilm-import-card ()
+  (interactive)
+  (org-ilm--import-org 'card))
 
 ;;;; File import
 

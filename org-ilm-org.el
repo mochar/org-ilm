@@ -48,7 +48,7 @@ is then passed as a file move capture."
                                (org-ilm--capture-capture
                                 type
                                 :capture-kwargs '(:immediate-finish nil)
-                                :parent (-some-> parent org-ilm-element--id)
+                                :parent parent
                                 :collection collection
                                 :file tmp-file
                                 :method 'mv))))))
