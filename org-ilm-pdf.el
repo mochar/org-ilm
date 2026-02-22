@@ -1151,30 +1151,34 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 
   (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
     (let* ((extract-id (org-id-new))
-           (pdf-buffer (current-buffer)))
+           (pdf-buffer (current-buffer))
+           (refresh (lambda ()
+                      (with-current-buffer pdf-buffer
+                        (org-ilm--pdf-highlights-refresh))))
+           capture-args)
 
       (unless title
         (let* ((first-text (org-ilm--pdf-spec-capture-first-text spec))
                (default (org-ilm--generate-text-snippet first-text)))
           (setq title (read-string "Title: " default))))
 
+      (setq capture-args
+            (list :type (if card-p 'card 'material)
+                  :parent (org-ilm--element-by-id id)
+                  :id extract-id
+                  :title title
+                  :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))
+                  :on-success (lambda (&rest _) (funcall refresh))))
+
       (pcase output-type
         ('virtual
-         (org-ilm--import-capture
-          :type (if card-p 'card 'material)
-          :parent (org-ilm--element-by-id id)
-          :id extract-id
-          :title title
-          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))
+         (apply #'org-ilm--import-capture capture-args))
         ('text
-         (org-ilm--import-capture
-          :type (if card-p 'card 'material)
-          :parent (org-ilm--element-by-id id)
-          :id extract-id
-          :title title
+         (apply
+          #'org-ilm--import-capture
           :content (org-ilm--pdf-spec-capture-text spec)
           :ext "org"
-          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))
+          capture-args))
         ('image
          (let* ((page (car (oref spec parts))))
            (when (or (> (length (oref spec parts)) 1)
@@ -1193,34 +1197,27 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                               '(0 0 1 1)))
                   (region (org-ilm--pdf-region-denormalized region))
                   (file (org-ilm--pdf-image-export extract-id :region region)))
-             (org-ilm--import-capture
-              :type 'material
-              :parent (org-ilm--element-by-id id)
-              :id extract-id
-              :title title
+             (apply
+              #'org-ilm--import-capture
               :file file
               :attach-method 'mv
               :ext t
-              :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))))))
+              capture-args))))
         ('marker
-         (org-ilm--import-capture
-          :type 'material
-          :parent (org-ilm--element-by-id id)
-          :id extract-id
-          :title title
-          :ext "org"
-          :props (list :ILM_PDF (org-ilm--pdf-spec-to-string spec))
-          :on-success
-          (lambda (&rest _)
-            (org-ilm--pdf-convert-attachment-to-org
-             (org-ilm--pdf-path)
-             (pcase-let ((`(,beg . ,end) (org-ilm-pdf-spec--range spec)))
-               (if (= beg end)
-                   (1- beg)
-                 (cons (1- beg) (1- end))))
-             extract-id
-             :on-success
-             (lambda (proc buf id) (message "Conversion finished.")))))))
+         (map-put! capture-args
+                   :on-success
+                   (lambda (&rest _)
+                     (funcall refresh)
+                     (org-ilm--pdf-convert-attachment-to-org
+                      (org-ilm--pdf-path)
+                      (pcase-let ((`(,beg . ,end) (org-ilm-pdf-spec--range spec)))
+                        (if (= beg end)
+                            (1- beg)
+                          (cons (1- beg) (1- end))))
+                      extract-id
+                      :on-success
+                      (lambda (proc buf id) (message "Conversion finished.")))))         
+         (apply #'org-ilm--import-capture :ext "org" capture-args)))
 
       (org-ilm--pdf-interactive-capture-reset))))
 
@@ -1266,9 +1263,8 @@ See also `org-ilm-pdf-convert-org-respect-area'."
         (user-error "Cannot cloze without selection"))
       (org-ilm--pdf-extract-outline-section
        (org-ilm--pdf-capture-prompt-for-format
-          '(virtual text image marker)
-        (concat action-str " custom outline section as: ")))))
-    (org-ilm--pdf-highlights-refresh)))
+        '(virtual text image marker)
+        (concat action-str " custom outline section as: ")))))))
 
 (cl-defmethod org-ilm--extract (&context (ilm-attachment pdf))
   (org-ilm--pdf-capture))
