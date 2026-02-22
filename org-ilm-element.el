@@ -536,58 +536,6 @@ COLLECTION specifies in which queue to look at."
   (funcall-interactively #'org-ilm-element-set-collection
                          (transient-scope)))
 
-(defun org-ilm--element-transient-registry-attach-read ()
-  (org-ilm--element-with-point-at-registry
-      (transient-scope)
-    (when-let* ((attach-dir (org-attach-dir))
-                (attachments (org-attach-file-list attach-dir)))
-      (completing-read "Attachment: " attachments nil t))))
-
-(transient-define-infix org-ilm--element-transient-registry-attach-attachment ()
-  :class 'transient-option
-  :transient 'transient--do-call
-  :argument "--attachment="
-  :reader
-  (lambda (prompt initial-input history)
-    (org-ilm--element-transient-registry-attach-read)))
-
-(transient-define-prefix org-ilm--element-transient-registry-attach ()
-  :refresh-suffixes t
-  :value
-  (lambda ()
-    (append
-     (list "--method=lns" "--main")
-     (when-let ((attachment (org-ilm--element-transient-registry-attach-read)))
-       (list (concat "--attachment=" attachment)))))
-  
-  ["Attach from registry"
-   ("a" "Attachment" org-ilm--element-transient-registry-attach-attachment)
-   ("m" "Method" "--method=" :choices ("cp" "mv" "ln" "lns") :always-read t)
-   ("M" "Main attachment (use id)" "--main")
-   ("RET" "Attach"
-    (lambda ()
-      (interactive)
-      (let* ((args (transient-args transient-current-command))
-             (attachment (transient-arg-value "--attachment=" args))
-             (attach-dir (org-ilm--element-with-point-at-registry
-                             (transient-scope)
-                           (org-attach-dir)))
-             (method (transient-arg-value "--method=" args))
-             (main (transient-arg-value "--main" args)))
-        (org-ilm--element-with-point-at (transient-scope)
-          (org-attach-attach (expand-file-name attachment attach-dir) nil (intern method))
-          (when main
-            (rename-file
-             (expand-file-name attachment (org-attach-dir))
-             (expand-file-name 
-              (concat (org-id-get) "." (file-name-extension attachment))
-              (org-attach-dir)))))))
-    :inapt-if-not
-    (lambda ()
-      (transient-arg-value "--attachment=" (transient-get-value))))
-   ]
-  )
-
 (transient-define-prefix org-ilm--element-transient (element)
   :refresh-suffixes t
   
