@@ -1291,6 +1291,8 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
              (source (car choice))
              (type (if (string= (plist-get (cdr choice) :name) "Attachments")
                        'attachment 'url)))
+        (when (eq type 'attachment)
+          (setq source (expand-file-name source attach-dir)))
         (org-ilm--convert-transient
          (make-org-ilm-convert-menu-data
           :title (org-mem-entry-title entry)
@@ -1324,19 +1326,33 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    org-ilm--convert-media-transient-group
    ]
 
+  ["PDF conversion"
+   :if (lambda () (and (eq (oref (transient-scope) type) 'attachment)
+                       (s-ends-with-p "pdf" (oref (transient-scope) source))))
+   (:info* (lambda () "Convert a PDF document to Markdown or Org mode"))
+   ("pc" "Convert"
+    :cons 'pdf-convert
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call)
+   ("pp" "Pages" :cons 'pdf-pages
+    :class org-ilm-transient-cons-option
+    :transient transient--do-call)
+   ]
+
   [
    :if (lambda ()
-         (map-let (media-download webpage-download) (org-ilm--transient-parse)
-           (or media-download webpage-download)))
+         (map-let (media-download webpage-download pdf-convert) (org-ilm--transient-parse)
+           (or media-download webpage-download pdf-convert)))
    ("a" "Main attachment"
     :cons 'main-attachment
     :class org-ilm-transient-cons-switches
     :choices
     (lambda ()
-      (map-let (media-download webpage-download) (org-ilm--transient-parse)
+      (map-let (media-download webpage-download pdf-convert) (org-ilm--transient-parse)
         (let (options)
           (when media-download (push 'media options))
           (when webpage-download (push 'webpage options))
+          (when pdf-convert (push 'pdf options))
           options)))
     )
    ]
@@ -1346,7 +1362,7 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
     (lambda ()
       (interactive)
       (pcase-let* ((args (org-ilm--transient-parse)) 
-                   ((map webpage-download media-download media-subs main-attachment) args)
+                   ((map webpage-download media-download media-subs pdf-convert pdf-pages main-attachment) args)
                    (data (transient-scope))
                    (source (oref data source))
                    (type (oref data type))
@@ -1366,7 +1382,28 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
         ;; Media
         (when (or media-download media-subs)
           (org-ilm--convert-transient-media-run
-           source attach-dir org-id (eq main-attachment 'media) args))))
+           source attach-dir org-id (eq main-attachment 'media) args))
+
+        ;; PDF
+        (when pdf-convert
+          (org-ilm--convert-make-converter-chain
+           :run-p t
+           :on-success (lambda (j) (message "WOWOWOWO"))
+           :converters
+           `((marker
+              :input-path ,source
+              ;; :output-dir "~/tmp/marker/"
+              :output-format "markdown"
+              :pages ,pdf-pages
+              :new-name ,(when (eq main-attachment 'pdf) org-id)
+              )
+             (pandoc
+              ;; :output-path "~/tmp/marker/"
+              :output-format "org"
+              ))
+           )
+          )
+        ))
     :inapt-if
     (lambda ()
       (with-slots (type) (transient-scope)
