@@ -582,13 +582,10 @@ by default will be the child of this parent element."
     (oset import ext "org")
 
     ;; If we do not download the media, set the ILM_MEDIA property to the
-    ;; URL. Otherwise we need to figure out what the filename will be based
-    ;; on the template passed to yt-dlp.
-    (let ((media-prop (if media-download
-                          (org-ilm-convert--ytdlp-filename-from-url
-                           url media-template 'restrict)
-                        url)))
-      (setf (plist-get (oref import props) :ILM_MEDIA) media-prop))
+    ;; URL. Otherwise we need to figure out what the filename will be based on
+    ;; the template passed to yt-dlp.
+    (unless media-download 
+      (setf (plist-get (oref import props) :ILM_MEDIA) url))
 
     ;; Always add the URL in ROAM_REFS.
     (let ((roam-refs (concat (plist-get (oref import props) :ROAM_REFS)
@@ -596,13 +593,21 @@ by default will be the child of this parent element."
       (setf (plist-get (oref import props) :ROAM_REFS) roam-refs))
 
     ;; After capture, download the media file or subtitles.
-    (oset import on-success
-          (lambda (id attach-dir collection)
-            (when (or media-download media-subs)
-              (make-thread
-               (lambda ()
-                 (org-ilm--convert-transient-media-run
-                  url attach-dir id args))))))))
+    (when (or media-download media-subs)
+      (oset import on-success
+            (lambda (id attach-dir collection)
+              (org-ilm--convert-transient-media-run
+               url attach-dir id args
+               (when media-download
+                 (lambda (job)
+                   (if-let* ((filename-path (plist-get (oref job data) :output-path))
+                             (filename (org-ilm-convert--ytdlp-read-filename
+                                        filename-path)))
+                       (progn
+                         (org-ilm--org-with-point-at id
+                           (org-entry-put nil org-ilm-property-media filename))
+                         (save-buffer))
+                     (warn "Ilm media filename not found"))))))))))
 
 (transient-define-prefix org-ilm--import-media-transient (import)
   :refresh-suffixes t

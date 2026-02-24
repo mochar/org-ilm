@@ -40,15 +40,14 @@
   name
   (status :pending) ; :pending, :busy, :success, :error
   method ; :cli, :elisp
-  payload ; elisp func or cli command list
+  payload ; elispL func. cli: command list, or func make one
+  data ; arbitrary
   buffer
   chain ; org-ilm-convert-chain object
   start ;; ts
   on-success
   on-error
-  default-dir
-  output-path
-  output-format)
+  default-dir)
 
 (defvar org-ilm-convert--jobs (make-hash-table :test 'equal)
   "Registry of all conversion jobs.")
@@ -74,17 +73,19 @@
   (unless (gethash (oref job id) org-ilm-convert--jobs)
     (puthash (oref job id) job org-ilm-convert--jobs))
 
-  (with-slots (buffer name method payload default-dir output-path output-format) job
+  (with-slots (buffer name method payload default-dir data) job
+    (when (and (eq method :cli) (functionp payload))
+      (setq payload (funcall payload)))
+    
     (with-current-buffer buffer
       (goto-char (point-max))
       (insert (propertize (format "\n====== START: %s ======\n" name) 'face 'bold))
       (insert (propertize (oref job id) 'face 'Info-quoted) "\n")
       (when default-dir
         (insert (propertize "Default directory:" 'face 'highlight) " " default-dir "\n"))
-      (when output-path
-        (insert (propertize "Output path:" 'face 'highlight) " " output-path "\n"))
-      (when output-format
-        (insert (propertize "Output format:" 'face 'highlight) " " output-format "\n"))
+      (when data
+        (insert (propertize "Data:" 'face 'highlight) "\n")
+        (insert (pp-to-string data)))
       (insert (propertize "Payload:" 'face 'highlight) "\n")
       (insert (pp-to-string payload))
       (insert "\n\n\n" (propertize "Log:" 'face 'highlight) "\n"))
@@ -481,8 +482,8 @@ successfully.. ON-ERROR will be called when any job errors."
      :method :cli
      ;; Make sure we are in output dir so that media files references correct
      :default-dir output-dir
-     :output-path output-path
-     :output-format output-format
+     :data (list :output-path output-path
+                 :output-format output-format)
      :payload
      (list "pandoc"
            "--from" input-format
@@ -560,8 +561,8 @@ successfully.. ON-ERROR will be called when any job errors."
      run-p
      :type 'defuddle
      :method :cli
-     :output-path output-path
-     :output-format output-format
+     :data (list :output-path output-path
+                 :output-format output-format)
      :payload
      (list
       org-ilm-convert-node-path
@@ -577,8 +578,9 @@ successfully.. ON-ERROR will be called when any job errors."
 
 (cl-defmethod org-ilm--convert-make-converter-in-chain
   ((type (eql 'pandoc)) (from-type (eql 'defuddle)) defuddle-job args)
-  (setf (plist-get args :input-path) (oref defuddle-job output-path)
-        (plist-get args :input-format) (oref defuddle-job output-format))
+  (map-let (:output-path :output-format) (oref defuddle-job data)
+    (setf (plist-get args :input-path) output-path
+          (plist-get args :input-format) output-format))
   (cl-call-next-method type from-type defuddle-job args))
 
 (when nil
@@ -659,8 +661,8 @@ does not have an option for this so it is done here. "
      run-p
      :type 'marker
      :method :cli
-     :output-format output-format
-     :output-path output-path
+     :data (list :output-format output-format
+                 :output-path output-path)
      :payload
      (append
       (list
@@ -732,12 +734,10 @@ does not have an option for this so it is done here. "
   (apply #'org-ilm--convert-make-marker run-p args))
 
 (cl-defmethod org-ilm--convert-make-converter-in-chain
-  ((type (eql 'pandoc))
-   (from-type (eql 'marker))
-   marker-job
-   args)
-  (setf (plist-get args :input-path) (oref marker-job output-path)
-        (plist-get args :input-format) (oref marker-job output-format))
+  ((type (eql 'pandoc)) (from-type (eql 'marker)) marker-job args)
+  (map-let (:output-path :output-format) (oref marker-job data)
+    (setf (plist-get args :input-path) output-path
+          (plist-get args :input-format) output-format))
   (cl-call-next-method type from-type marker-job args))
 
 (when nil
@@ -819,8 +819,8 @@ does not have an option for this so it is done here. "
      :type 'monolith
      :method :cli
      :id job-id
-     :output-format "html"
-     :output-path output-path
+     :data (list :output-format "html"
+                 :output-path output-path)
      :payload
      (append 
       (list
@@ -835,13 +835,15 @@ does not have an option for this so it is done here. "
 
 (cl-defmethod org-ilm--convert-make-converter-in-chain
   ((type (eql 'pandoc)) (from-type (eql 'monolith)) monolith-job args)
-  (setf (plist-get args :input-path) (oref monolith-job output-path)
-        (plist-get args :input-format) (oref monolith-job output-format))
+  (map-let (:output-path :output-format) (oref monolith-job data)
+    (setf (plist-get args :input-path) output-path
+          (plist-get args :input-format) output-format))
   (cl-call-next-method type from-type monolith-job args))
 
 (cl-defmethod org-ilm--convert-make-converter-in-chain
   ((type (eql 'defuddle)) (from-type (eql 'monolith)) monolith-job args)
-  (setf (plist-get args :input) (oref monolith-job output-path))
+  (map-let (:output-path) (oref monolith-job data)
+    (setf (plist-get args :input) output-path))
   (cl-call-next-method type from-type monolith-job args))
 
 (when nil
@@ -957,71 +959,116 @@ Parse the OUTPUT string from:
       (setcdr r (nreverse (cdr r))))
     (nreverse result)))
 
+(defun org-ilm-convert--ytdlp-read-filename (path)
+  (car (string-split (string-trim (f-read path)))))
+
 (cl-defun org-ilm--convert-make-ytdlp
     (run-p
      &key
      job-args
      url output-dir output-path output-format
+     filename-path
      filename-template sub-langs
-     audio-only-p no-download
-     working-dir)
+     audio-only-p no-download)
   "Download media from url using yt-dlp.
 
 SUB-LANGS may also be 'all' to download all subtitles.
 
+FILENAME-PATH should be a txt file where the last non-empty line
+contains the filename. When passed, OUTPUT-DIR must be specified as
+well.
+
 OUTPUT-FORMAT is a format expression. Can be a file extension (currently
 3gp, aac, flv, m4a, mp3, mp4, ogg, wav, webm are supported). See
 https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#format-selection. When
-OUTPUT-PATH or FILENAME-TEMPLATE with explicit extension specified, it
-overthrows this option."
+OUTPUT-PATH, FILENAME-PATH, or FILENAME-TEMPLATE with explicit extension
+specified, it overthrows this option."
   (unless (and url (or (xor output-path output-dir) sub-langs))
     (error "Required args: URL [OUTPUT-DIR|OUTPUT-PATH]"))
   (unless (and org-ilm-convert-ytdlp-path
                (file-executable-p org-ilm-convert-ytdlp-path))
     (user-error "The yt-dlp executable not available. See org-ilm-convert-ytdlp-path."))
+  (when filename-path
+    (unless output-dir
+      (error "Must specify OUTPUT-DIR when FILENAME-PATH is given")))
 
-  (when (and (not output-path) output-dir)
-    (setq output-path (expand-file-name
-                       (org-ilm-convert--ytdlp-filename-from-url
-                        url filename-template 'restrict output-format)
-                       output-dir)))
-
-  (when sub-langs
-    (cond
-     ((stringp sub-langs)
-      (setq sub-langs (list sub-langs)))
-     ((listp sub-langs))
-     (t (error "SUB-LANGS must be string or list of strings"))))
+  (setq sub-langs (ensure-list sub-langs)) 
 
   (apply
    #'org-ilm--convert-make-job
    run-p
    :type 'ytdlp
    :method :cli
-   :default-dir working-dir
-   :output-path output-path
-   :output-format (or output-format (-some-> output-path file-name-extension))
    :payload
-   (append
-    (list
-     org-ilm-convert-ytdlp-path
-     url
-     "--embed-chapters")
-    org-ilm-convert-ytdlp-args
-    (cond
-     (output-path (list "-o" output-path))
-     (filename-template (list  "-o" filename-template "--no-download"))
-     (t (list "--no-download")))
-    (when output-format `("--format" ,output-format))
-    (when audio-only-p '("-x"))
-    (when no-download '("--no-download"))
-    (when sub-langs
-      (append '("--write-sub" "--sub-lang") (list (string-join sub-langs ","))))
-    )
+   (lambda ()
+     (cond
+      (filename-path
+       (setq output-path
+             (expand-file-name
+              (org-ilm-convert--ytdlp-read-filename filename-path)
+              output-dir)))
+      ((and (not output-path) output-dir)
+       (setq output-path (expand-file-name
+                          (org-ilm-convert--ytdlp-filename-from-url
+                           url filename-template 'restrict output-format)
+                          output-dir))))
+     (append
+      (list
+       org-ilm-convert-ytdlp-path
+       url
+       "--embed-chapters"
+       "--newline" ; Output progress bar as new lines
+       )
+      org-ilm-convert-ytdlp-args
+      (cond
+       (output-path (list "-o" output-path))
+       (filename-template (list  "-o" filename-template "--no-download"))
+       (t (list "--no-download")))
+      (when output-format `("--format" ,output-format))
+      (when audio-only-p '("-x"))
+      (when no-download '("--no-download"))
+      (when sub-langs
+        (append '("--write-sub" "--sub-lang") (list (string-join sub-langs ","))))
+      ))
    job-args))
 
 (cl-defmethod org-ilm--convert-make-converter ((type (eql 'ytdlp)) run-p &rest args)
   (apply #'org-ilm--convert-make-ytdlp run-p args))
+
+(cl-defmethod org-ilm--convert-make-converter ((type (eql 'ytdlp-filename)) run-p &rest args)
+  "Get the filename that will be generated for URL and TEMPLATE.
+
+See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-examples"
+  (map-let (:job-args :url :template :restrict-p :format :output-path) args
+    (if output-path
+        (setq output-path (expand-file-name output-path))
+      (setq output-path (make-temp-file "" nil ".txt")))
+    (apply
+     #'org-ilm--convert-make-job
+     run-p
+     :type type
+     :method :cli
+     :data (list :url url :template template
+                 :format format :output-path output-path)
+     :payload
+     (append
+      `("yt-dlp" "--print-to-file" "filename" ,output-path)
+      (when template (list "-o" template))
+      (when format (list "-f" format))
+      `(,url)
+      (when restrict-p '("--restrict-filenames"))
+      org-ilm-convert-ytdlp-args
+      '("--no-warnings"))
+     job-args)))
+
+(cl-defmethod org-ilm--convert-make-converter-in-chain
+  ((type (eql 'ytdlp)) (from-type (eql 'ytdlp-filename)) from-job args)
+  (map-let (:output-path :format :template :url) (oref from-job data)
+    (setf (plist-get args :filename-path) output-path
+          (plist-get args :url) url
+          (plist-get args :output-format) format
+          (plist-get args :filename-template) template))
+  (cl-call-next-method type from-type from-job args))
 
 (when nil
   (org-ilm--convert-make-ytdlp
@@ -1037,6 +1084,22 @@ overthrows this option."
    ;; :output-format "m4a"
    ;; :output-path "~/tmp/marker/a.webm"
    :filename-template "wow.webm"
+   )
+  (org-ilm--convert-make-converter-chain
+   :run-p t
+   :on-success (lambda (j) (notifications-notify :title "wow"))
+   :on-error (lambda (j) (notifications-notify :title "nonnonono"))
+   :converters
+   `((ytdlp-filename
+      :url "https://www.youtube.com/shorts/gqQ_6zcz-i8"
+      :template "%(title)s.%(ext)s"
+      :restrict-p t
+      :format "m4a"
+      )
+     (ytdlp
+      :output-dir "~/tmp/marker/"
+      )
+     )
    )
 )
 
@@ -1155,25 +1218,32 @@ overthrows this option."
    ]
   )
 
-(defun org-ilm--convert-transient-media-run (url output-dir id &optional transient-args)
+(defun org-ilm--convert-transient-media-run (url output-dir id &optional transient-args ytdlp-filename-on-success)
   (map-let (media-download media-subs media-template media-subs media-audio)
       (or transient-args (org-ilm--transient-parse))
     (when (or media-download media-subs)
-      (org-ilm--convert-make-ytdlp
-       'run-p
-       :url url
-       :output-dir output-dir
-       :filename-template media-template
-       :audio-only-p media-audio
-       :sub-langs media-subs
-       :no-download (not media-download)
-       :job-args
-       (list
-        :id id
-        :on-success
-        (lambda (job)
-          (message "[Org-Ilm-Convert] Media download completed: %s" url)
-          (org-ilm--org-with-point-at (oref job id) (org-attach-sync))))))))
+      (org-ilm--convert-make-converter-chain
+       :run-p t
+       :converters
+       `((ytdlp-filename
+          :url ,url
+          :template ,media-template
+          :restrict-p t
+          :job-args (:on-success ,ytdlp-filename-on-success)
+          )
+         (ytdlp
+          :output-dir ,output-dir
+          ;; TODO This wont be handled correctly when we depend on ytdlp-filename
+          :audio-only-p ,media-audio
+          :sub-langs ,media-subs
+          :no-download ,(not media-download)
+          )
+         )
+       :id id
+       :on-success
+       (lambda (job)
+         (message "[Org-Ilm-Convert] Media download completed: %s" url)
+         (org-ilm--org-with-point-at (oref (oref job chain) id) (org-attach-sync)))))))
 
 ;;;;; Main transient
 
@@ -1264,10 +1334,8 @@ overthrows this option."
 
         ;; Media
         (when (or media-download media-subs)
-          (make-thread
-           (lambda ()
-             (org-ilm--convert-transient-media-run
-              source attach-dir org-id args))))))
+          (org-ilm--convert-transient-media-run
+           source attach-dir org-id args))))
     :inapt-if
     (lambda ()
       (with-slots (type) (transient-scope)
