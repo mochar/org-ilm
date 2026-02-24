@@ -1218,10 +1218,11 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    ]
   )
 
-(defun org-ilm--convert-transient-media-run (url output-dir id &optional transient-args ytdlp-filename-on-success)
+(defun org-ilm--convert-transient-media-run (url output-dir id set-media-prop &optional transient-args title)
   (map-let (media-download media-subs media-template media-subs media-audio)
       (or transient-args (org-ilm--transient-parse))
     (when (or media-download media-subs)
+      (when title (setq media-template (concat title "." "%(ext)s")))
       (org-ilm--convert-make-converter-chain
        :run-p t
        :converters
@@ -1229,7 +1230,18 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
           :url ,url
           :template ,media-template
           :restrict-p t
-          :job-args (:on-success ,ytdlp-filename-on-success)
+          :job-args
+          (:on-success
+           ,(when set-media-prop
+              (lambda (job)
+                (if-let* ((filename-path (plist-get (oref job data) :output-path))
+                          (filename (org-ilm-convert--ytdlp-read-filename
+                                     filename-path)))
+                    (progn
+                      (org-ilm--org-with-point-at id
+                        (org-entry-put nil org-ilm-property-media filename))
+                      (save-buffer))
+                  (warn "Ilm media filename not found")))))
           )
          (ytdlp
           :output-dir ,output-dir
@@ -1312,12 +1324,29 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    org-ilm--convert-media-transient-group
    ]
 
+  [
+   :if (lambda ()
+         (map-let (media-download webpage-download) (org-ilm--transient-parse)
+           (or media-download webpage-download)))
+   ("a" "Main attachment"
+    :cons 'main-attachment
+    :class org-ilm-transient-cons-switches
+    :choices
+    (lambda ()
+      (map-let (media-download webpage-download) (org-ilm--transient-parse)
+        (let (options)
+          (when media-download (push 'media options))
+          (when webpage-download (push 'webpage options))
+          options)))
+    )
+   ]
+
   ["Actions"
    ("RET" "Convert"
     (lambda ()
       (interactive)
       (pcase-let* ((args (org-ilm--transient-parse)) 
-                   ((map webpage-download media-download media-subs) args)
+                   ((map webpage-download media-download media-subs main-attachment) args)
                    (data (transient-scope))
                    (source (oref data source))
                    (type (oref data type))
@@ -1328,14 +1357,16 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
         (when webpage-download
           (make-thread
            (lambda ()
-             (let ((title (org-ilm--get-page-title source 'slugify)))
+             (let ((title (if (eq main-attachment 'webpage)
+                              org-id
+                            (org-ilm--get-page-title source 'slugify))))
                (org-ilm--convert-transient-webpage-run
                 source title attach-dir org-id args)))))
 
         ;; Media
         (when (or media-download media-subs)
           (org-ilm--convert-transient-media-run
-           source attach-dir org-id args))))
+           source attach-dir org-id (eq main-attachment 'media) args))))
     :inapt-if
     (lambda ()
       (with-slots (type) (transient-scope)

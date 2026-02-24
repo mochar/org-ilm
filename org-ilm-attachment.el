@@ -127,16 +127,22 @@ holding headline is an ilm element."
     ;; Check if headline represents a virtual view of a parent PDF element.
     ([virtual-pdf-buffer (org-ilm--pdf-open-virtual pdf-no-region)]
      virtual-pdf-buffer)
-    ;; Check if there is a web link in the ROAM_REFS property and open website in
-    ;; eww.
-    ([web-refs (org-ilm--org-mem-website-refs)]
-     [web-ref (if (= 1 (length web-refs))
-                  (car web-refs)
-                (completing-read "Open: " web-refs nil t))]
-     ;; We use window excursion so that we can return the eww buffer
-     (save-window-excursion
-       (eww-browse-url web-ref))
-     (switch-to-buffer "*eww*"))
+    ;; Check if is media but missing an org file
+    ([media (org-ilm--media-open)]
+     (let ((f (expand-file-name (concat (org-id-get) ".org")
+                                        (org-attach-dir))))
+       (make-empty-file f)
+       (find-file f)))
+    ;; ;; Check if there is a web link in the ROAM_REFS property and open website in
+    ;; ;; eww.
+    ;; ([web-refs (org-ilm--org-mem-website-refs)]
+    ;;  [web-ref (if (= 1 (length web-refs))
+    ;;               (car web-refs)
+    ;;             (completing-read "Open: " web-refs nil t))]
+    ;;  ;; We use window excursion so that we can return the eww buffer
+    ;;  (save-window-excursion
+    ;;    (eww-browse-url web-ref))
+    ;;  (switch-to-buffer "*eww*"))
     (t (unless no-error (user-error "Attachment not found")))))
   
 (defun org-ilm--attachment-open-by-id (id)

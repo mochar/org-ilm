@@ -103,7 +103,8 @@ is quite slow (~3 sec)"
       (setq source (org-ilm--source-recover
                     source (org-mem-entry-id entry)
                     (org-mem-entry-property-with-inheritance "REGISTRY" entry)))
-      (org-media-note--follow-link source start end))))
+      (org-media-note--follow-link source start end)
+      (list source start end))))
 
 ;; TODO too fragile. should at the very least check in org-media-note org links
 (defun org-ilm--media-extract-range (text)

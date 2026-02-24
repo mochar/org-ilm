@@ -597,17 +597,7 @@ by default will be the child of this parent element."
       (oset import on-success
             (lambda (id attach-dir collection)
               (org-ilm--convert-transient-media-run
-               url attach-dir id args
-               (when media-download
-                 (lambda (job)
-                   (if-let* ((filename-path (plist-get (oref job data) :output-path))
-                             (filename (org-ilm-convert--ytdlp-read-filename
-                                        filename-path)))
-                       (progn
-                         (org-ilm--org-with-point-at id
-                           (org-entry-put nil org-ilm-property-media filename))
-                         (save-buffer))
-                     (warn "Ilm media filename not found"))))))))))
+               url attach-dir id t args))))))
 
 (transient-define-prefix org-ilm--import-media-transient (import)
   :refresh-suffixes t
