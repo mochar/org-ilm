@@ -29,6 +29,10 @@
 
 ;;;; Jobs
 
+(cl-defstruct (org-ilm-convert-chain
+               (:conc-name org-ilm-convert-chain--))
+  name id prev next)
+  
 (cl-defstruct (org-ilm-convert-job
                (:conc-name org-ilm-convert-job--))
   type ; pandoc, marker, ...
@@ -38,7 +42,8 @@
   method ; :cli, :elisp
   payload ; elisp func or cli command list
   buffer
-  chain ; (prev-job-id . next-job-id)
+  chain ; org-ilm-convert-chain object
+  start ;; ts
   on-success
   on-error
   default-dir
@@ -68,11 +73,12 @@
                       (oref job name) (oref job id))))
   (unless (gethash (oref job id) org-ilm-convert--jobs)
     (puthash (oref job id) job org-ilm-convert--jobs))
-  (org-ilm-convert-job--update job :busy)
 
   (with-slots (buffer name method payload default-dir output-path output-format) job
     (with-current-buffer buffer
+      (goto-char (point-max))
       (insert (propertize (format "\n====== START: %s ======\n" name) 'face 'bold))
+      (insert (propertize (oref job id) 'face 'Info-quoted) "\n")
       (when default-dir
         (insert (propertize "Default directory:" 'face 'highlight) " " default-dir "\n"))
       (when output-path
@@ -82,6 +88,9 @@
       (insert (propertize "Payload:" 'face 'highlight) "\n")
       (insert (pp-to-string payload))
       (insert "\n\n\n" (propertize "Log:" 'face 'highlight) "\n"))
+
+    (oset job start (ts-now))
+    (org-ilm-convert-job--update job :busy)
     
     (pcase method
       (:cli
@@ -106,98 +115,22 @@
                 (run-at-time 0 nil #'org-ilm-convert-job--handle-completion job t))
             (error
              (with-current-buffer (oref job buffer)
+               (goto-char (point-max))
                (insert (format "%s" err)))
              (run-at-time 0 nil #'org-ilm-convert-job--handle-completion job nil))))
         name)))))
-
-(defun org-ilm--convert-make-job (run-p &rest args)
-  ""
-  (let ((job (apply #'make-org-ilm-convert-job args)))
-    (unless (oref job id) (oset job id (org-id-new)))
-    (unless (oref job name) (oset job name (symbol-name (oref job type))))
-    (puthash (oref job id) job org-ilm-convert--jobs)
-    (when run-p (org-ilm-convert-job--run job))
-    job))
-
-(cl-defgeneric org-ilm--convert-make-converter (type run-p &rest args)
-  "Given ARGS, creates a job for converter of TYPE.
-Implementations should call `org-ilm--convert-make-job' to register the job.")
-
-(cl-defgeneric org-ilm--convert-make-converter-in-chain (type from-type from-job args)
-  "Given a previous job FROM-JOB with type FROM-TYPE, make a new converter
-of TYPE with the given ARGS."
-  (apply #'org-ilm--convert-make-converter type nil args))
-
-(cl-defun org-ilm--convert-make-converter-chain
-    (&key name buffer run-p on-success on-error converters)
-  "Run a sequence of converters sequentially.
-
-CONVERTERS is an alist converter-type -> converter-args."
-  (when converters
-    (let (jobs)
-      (dotimes (i (length converters))
-        (pcase-let* ((`(,type . ,args) (nth i converters))
-                     (job-args (plist-get args :job-args))
-                     (job-on-success (plist-get job-args :on-success))
-                     (job-on-error (plist-get job-args :on-error))
-                     (prev-job (car jobs)))
-
-          (when on-error
-            (setf (plist-get (plist-get args :job-args) :on-error)
-                  (lambda (j)
-                    (when job-on-error (funcall job-on-error j))
-                    (funcall on-error j))))
-
-          (when (and on-success (= i (1- (length converters))))
-            (setf (plist-get (plist-get args :job-args) :on-success)
-                  (lambda (j)
-                    (when job-on-success (funcall job-on-success j))
-                    (funcall on-success j))))
-          
-          (push
-           (org-ilm--convert-make-converter-in-chain
-            type
-            (when prev-job (oref prev-job type))
-            prev-job args)
-           jobs)))
-
-      (setq jobs (reverse jobs))
-
-      (unless name
-        (setq name (mapconcat #'org-ilm-convert-job--name jobs "-")))
-
-      (unless buffer
-        (setq buffer (org-ilm-convert--job-buf-get-create
-                      name (oref (car (last jobs)) id))))
-
-      (with-current-buffer buffer
-        (insert (propertize (format "CHAIN: %s\n" name) 'face 'bold))
-        (dolist (job jobs)
-          (insert "- " (propertize (format "%s (%s)" (oref job name) (oref job id)) 'face 'highlight) "\n")))
-      
-      ;; Assign chain ids after the jobs are created to ensure id exists.
-      (dotimes (i (length jobs))
-        (let ((job (nth i jobs))
-              (prev-job (when (> i 0) (nth (1- i) jobs)))
-              (next-job (nth (1+ i) jobs)))
-          (oset job buffer buffer)
-          (oset job chain
-                (cons (when prev-job (oref prev-job id))
-                      (when next-job (oref next-job id))))))
-
-      (when (and run-p jobs)
-        (org-ilm-convert-job--run (car jobs)))
-      jobs)))
 
 (defun org-ilm-convert-job--handle-completion (job success)
   "Handles completion of a JOB. SUCCESS indicates if job finished
 successfully."
   (with-slots (buffer name on-success on-error) job
     (let* ((status (if success :success :error))
-           (next-job-id (cdr (oref job chain)))
+           (chain (oref job chain))
+           (next-job-id (when chain (oref chain next)))
            (next-job (gethash next-job-id org-ilm-convert--jobs)))
       
       (with-current-buffer buffer
+        (goto-char (point-max))
         (insert (propertize (format "\n====== END: %s (" name) 'face 'bold)
                 (org-ilm-convert--propertize-job-status status)
                 (propertize ") ======\n" 'face 'bold)))
@@ -220,6 +153,115 @@ successfully."
     (:error (propertize "Error" 'face 'error))
     (:success (propertize "Success" 'face 'success))
     (:busy (propertize "Busy" 'face 'italic))))
+
+;; The following functions and generics relate to the API of creating
+;; converters.  The idea is to register the converter by implementing the
+;; generic `org-ilm--convert-make-converter', which works by specifying a unique
+;; converter type symbol. The ARGS parameter are converter-specific
+;; arguments. If you wish to pass values for the job slots, add an argument
+;; "job-args". Make sure to call `org-ilm--convert-make-job' at the end of the
+;; implementation, and to return the job. If the converter is to be used in a
+;; chain, implement the generic `org-ilm--convert-make-converter-in-chain' for
+;; the different types.
+
+(defun org-ilm--convert-make-job (run-p &rest args)
+  "Create a job using ARGS and registers it in the global hashmap."
+  (let ((job (apply #'make-org-ilm-convert-job args)))
+    (unless (oref job id) (oset job id (org-id-new)))
+    (unless (oref job name) (oset job name (symbol-name (oref job type))))
+    (puthash (oref job id) job org-ilm-convert--jobs)
+    (when run-p (org-ilm-convert-job--run job))
+    job))
+
+(cl-defgeneric org-ilm--convert-make-converter (type run-p &rest args)
+  "Given ARGS, creates a job for converter of TYPE.
+Implementations should call `org-ilm--convert-make-job' to register the job.")
+
+(cl-defgeneric org-ilm--convert-make-converter-in-chain (type from-type from-job args)
+  "Given a previous job FROM-JOB with type FROM-TYPE, make a new converter
+of TYPE with the given ARGS."
+  (apply #'org-ilm--convert-make-converter type nil args))
+
+(cl-defun org-ilm--convert-make-converter-chain
+    (&key name id buffer run-p on-success on-error converters)
+  "Run a sequence of converters sequentially.
+
+Jobs contain a slot :chain that holds the next and previous job ids in
+the chain.
+
+CONVERTERS is an alist converter-type -> converter-args.
+
+ON-SUCCESS wil be run only when the last job finishes
+successfully.. ON-ERROR will be called when any job errors."
+  (when converters
+    (let (jobs)
+
+      ;; Create the job objects from the converter arguments. Since the
+      ;; converter arguments do not necessarily contain the job name and ids, we
+      ;; first have to create the objects which will ensure these values are
+      ;; set.
+      (dotimes (i (length converters))
+        (pcase-let* ((`(,type . ,args) (nth i converters))
+                     (job-args (plist-get args :job-args))
+                     (job-on-success (plist-get job-args :on-success))
+                     (job-on-error (plist-get job-args :on-error))
+                     (prev-job (car jobs)))
+
+          ;; If ON-ERROR is specified, it needs to be part of every job's
+          ;; on-error callback.
+          (when on-error
+            (setf (plist-get (plist-get args :job-args) :on-error)
+                  (lambda (j)
+                    (when job-on-error (funcall job-on-error j))
+                    (funcall on-error j))))
+
+          ;; If ON-SUCCESS is specified, it needs to be part of the last job's
+          ;; on-success callback only.
+          (when (and on-success (= i (1- (length converters))))
+            (setf (plist-get (plist-get args :job-args) :on-success)
+                  (lambda (j)
+                    (when job-on-success (funcall job-on-success j))
+                    (funcall on-success j))))
+          
+          (push
+           (org-ilm--convert-make-converter-in-chain
+            type
+            (when prev-job (oref prev-job type))
+            prev-job args)
+           jobs)))
+
+      (setq jobs (reverse jobs))
+
+      (unless name
+        (setq name (mapconcat #'org-ilm-convert-job--name jobs "-")))
+      (unless id (setq id (org-id-new)))
+      (unless buffer
+        (setq buffer (org-ilm-convert--job-buf-get-create name id)))
+
+      (with-current-buffer buffer
+        (insert (propertize (format "CHAIN: %s" name) 'face 'bold) "\n")
+        (insert (propertize id 'face 'Info-quoted) "\n")
+        (dolist (job jobs)
+          (insert "- " (propertize (format "%s (%s)" (oref job name) (oref job id)) 'face 'highlight) "\n")))
+      
+      ;; Assign chain ids after the jobs are created to ensure id exists.
+      (dotimes (i (length jobs))
+        (let ((job (nth i jobs))
+              (prev-job (when (> i 0) (nth (1- i) jobs)))
+              (next-job (nth (1+ i) jobs)))
+          (oset job buffer buffer) ; also the buffer ;)
+          (oset job chain
+                (make-org-ilm-convert-chain
+                 :id id :name name
+                 :prev (when prev-job (oref prev-job id))
+                 :next (when next-job (oref next-job id))))))
+
+      ;; Running a chain is done by running the first job. In
+      ;; `org-ilm-convert-job--handle-completion', the next job in the chain
+      ;; will be run.
+      (when (and run-p jobs)
+        (org-ilm-convert-job--run (car jobs)))
+      jobs)))
 
 ;;;; Conversions view
 
@@ -300,12 +342,6 @@ successfully."
       (buffer-name buf)))
    (buffer-list)))
 
-(defun org-ilm-convert--conversion-propertize-state (state)
-  (pcase state
-    ('error (propertize "Error" 'face 'error))
-    ('success (propertize "Success" 'face 'success))
-    ('busy (propertize "Busy" 'face 'italic))))
-
 (defun org-ilm-convert-conversions-revert ()
   (interactive)
   (org-ilm-convert--conversions-rebuild))
@@ -316,21 +352,58 @@ successfully."
    :insert nil ; Return vtable object rather than insert at point
    :objects-function
    (lambda ()
-     (hash-table-values org-ilm-convert--jobs))
+     (let (jobs)
+       (dolist (job (hash-table-values org-ilm-convert--jobs))
+         (let ((chain (oref job chain)))
+           (cond
+            ((null chain)
+             (push job jobs))
+            ((null (oref chain prev))
+             (while job
+               (push job jobs)
+               (setq job (-some-> job (oref chain) (oref next)
+                                  (gethash org-ilm-convert--jobs))))))))
+       (reverse jobs)))
    :columns
    `((:name
-      "State")
+      "Status"
+      :formatter
+      (lambda (status)
+        (org-ilm-convert--propertize-job-status status))
+      )
      (:name
-      "ID")
+      "Start"
+      :width 6
+      )
      (:name
       "Converter"
-      :min-width "100%"))
+      ;; :min-width "30%"
+      ;; :min-width "100%"
+      )
+     (:name
+      "Chain"
+      :formatter
+      (lambda (chain)
+        (if chain (oref chain name) ""))
+      :max-width "30%"
+      )
+     (:name
+      "ID"
+      :formatter
+      (lambda (id)
+        (propertize id 'face 'Info-quoted))
+      ;; :width 20
+      )
+     )
    :getter
    (lambda (job column vtable)
      (pcase (vtable-column vtable column)
        ("ID" (oref job id))
-       ("State" (org-ilm-convert--propertize-job-status (oref job status)))
-       ("Converter" (oref job name))))
+       ("Start" (ts-format "%H:%M" (oref job start)))
+       ("Status" (oref job status))
+       ("Converter" (oref job name))
+       ("Chain" (oref job chain))
+       ))
    :keymap org-ilm-convert-conversions-map))
 
 (defun org-ilm-convert--conversions-buffer ()
