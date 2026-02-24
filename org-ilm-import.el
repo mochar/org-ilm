@@ -557,7 +557,8 @@ by default will be the child of this parent element."
 (cl-defstruct (org-ilm-media-import
                (:conc-name org-ilm-media-import--)
                (:include org-ilm-import))
-  url)
+  ;; called source to be comptaible with convert org transient
+  source)
 
 (cl-defmethod org-ilm--import-default-args ((import org-ilm-media-import))
   (append
@@ -569,12 +570,12 @@ by default will be the child of this parent element."
      (media-template . "%(title)s.%(ext)s"))))
 
 (cl-defmethod org-ilm--import-get-title ((import org-ilm-media-import))
-  (org-ilm-convert--ytdlp-title-from-url (oref import url)))
+  (org-ilm-convert--ytdlp-title-from-url (oref import source)))
 
 (cl-defmethod org-ilm--import-process ((import org-ilm-media-import) args)
   (cl-call-next-method import args)
   (pcase-let (((map media-download media-template media-audio media-subs) args)
-              (url (oref import url)))
+              (url (oref import source)))
 
     ;; Create an org attachment for note taking.
     (oset import content "")
@@ -598,18 +599,10 @@ by default will be the child of this parent element."
     (oset import on-success
           (lambda (id attach-dir collection)
             (when (or media-download media-subs)
-              (org-ilm-convert--convert-with-ytdlp
-               :process-id id
-               :url url
-               :output-dir attach-dir
-               :filename-template media-template
-               :audio-only-p media-audio
-               :sub-langs media-subs
-               :no-download (not media-download)
-               :on-success
-               (lambda (proc buf id output-path)
-                 (message "[Org-Ilm-Convert] Media download completed: %s" url)
-                 (org-ilm--org-with-point-at id (org-attach-sync)))))))))
+              (make-thread
+               (lambda ()
+                 (org-ilm--convert-transient-media-run
+                  url attach-dir id args))))))))
 
 (transient-define-prefix org-ilm--import-media-transient (import)
   :refresh-suffixes t
@@ -618,34 +611,7 @@ by default will be the child of this parent element."
    org-ilm--import-group-main
    ]
 
-  ["Media download"
-   ("md" "Download"
-    :cons 'media-download
-    :class org-ilm-transient-cons-switch
-    :transient transient--do-call)
-   ("mt" "Template"
-    :cons 'media-template
-    :class org-ilm-transient-cons-option
-    :prompt "Template: "
-    :transient transient--do-call
-    :inapt-if-not (lambda () (alist-get 'media-download (org-ilm--transient-parse))))
-   ("ma" "Audio only"
-    :cons 'media-audio
-    :class org-ilm-transient-cons-switch
-    :transient transient--do-call
-    :inapt-if-not (lambda () (alist-get 'media-download (org-ilm--transient-parse))))
-   ("ms" "Subtitles download"
-    :cons 'media-subs
-    :class org-ilm-transient-cons-option
-    :transient transient--do-call
-    :multi-value rest
-    :choices
-    (lambda ()
-      (let* ((url (oref (transient-scope) url))
-             (subs (org-ilm-convert--ytdlp-subtitles-from-url url)))
-        (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
-   ]
-
+  org-ilm--convert-media-transient-group
   org-ilm--import-group-citation
   org-ilm--import-group-actions
   
@@ -673,7 +639,7 @@ by default will be the child of this parent element."
       (org-ilm-import-file (expand-file-name source)))
      ((org-url-p source)
       (org-ilm--import-media-transient
-       (make-org-ilm-media-import :url source :ref source)))
+       (make-org-ilm-media-import :source source :ref source)))
      (t
       (user-error "Not a file or URL: %s" source)))))
 
@@ -804,7 +770,7 @@ by default will be the child of this parent element."
    (cl-call-next-method import)
    `((webpage-simplify . "markdown")
      (webpage-orgify . t)
-     (html-download . t))))
+     (webpage-download . t))))
 
 (cl-defmethod org-ilm--import-get-title ((import org-ilm-webpage-import))
   (org-ilm--get-page-title (oref import url)))
@@ -812,12 +778,8 @@ by default will be the child of this parent element."
 (cl-defmethod org-ilm--import-process ((import org-ilm-webpage-import) args)
   (cl-call-next-method import args)
   (pcase-let (((map webattach-download webattach-main
-                    html-download
-                    webpage-download webpage-simplify webpage-orgify) args)
+                    webpage-download webpage-full webpage-simplify webpage-orgify) args)
               (url (oref import url)))
-
-    (when html-download
-      (oset import content (org-ilm--get-website-as-org url)))
 
     ;; Always add the URL in ROAM_REFS.
     (let ((roam-refs (concat (plist-get (oref import props) :ROAM_REFS)
@@ -827,9 +789,10 @@ by default will be the child of this parent element."
     ;; After capture, download the webpage if requested.
     (oset import on-success
           (lambda (id attach-dir collection)
-            (when (or html-download webpage-download webattach-download)
+            (when (or webpage-download webattach-download)
               (make-directory attach-dir t))
-            
+
+            ;; TODO Make converter
             (when webattach-download
               (make-thread
                (lambda ()
@@ -841,7 +804,7 @@ by default will be the child of this parent element."
                         'ok-if-exists)
                        (org-ilm--org-with-point-at id
                          (org-attach-sync)
-                         (when (or webattach-main (and (not webpage-download) (not html-download)))
+                         (when (or webattach-main (and (not webpage-download)))
                            (org-entry-put nil org-ilm-property-ext "pdf"))))
                    (error (message "Failed to download paper for %s" title))))))
 
@@ -851,13 +814,10 @@ by default will be the child of this parent element."
 
 (transient-define-prefix org-ilm--import-webpage-transient (import)
   :refresh-suffixes t
-  :incompatible '((html-download webpage-download)) 
   
   ["Import webpage"
    org-ilm--import-group-main
    ]
-
-  org-ilm--convert-html-transient-group
 
   org-ilm--convert-webpage-transient-group
 
@@ -881,8 +841,8 @@ by default will be the child of this parent element."
     :transient transient--do-call
     :if
     (lambda ()
-      (map-let (webattach-download webpage-download html-download) (org-ilm--transient-parse)
-        (and webattach-download (or webpage-download html-download))))
+      (map-let (webattach-download webpage-download) (org-ilm--transient-parse)
+        (and webattach-download webpage-download)))
     )
    ]
 

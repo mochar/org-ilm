@@ -1048,11 +1048,16 @@ overthrows this option."
 
 (transient-define-group org-ilm--convert-webpage-transient-group
   ["Webpage download"
-   (:info* (lambda () "Download a full snapshot of the webpage"))
+   (:info* (lambda () "Download a webpage and convert to Org mode"))
    ("wd" "Download"
     :cons 'webpage-download
     :class org-ilm-transient-cons-switch
     :transient transient--do-call)
+   ("wf" "Full snapshot"
+    :cons 'webpage-full
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call
+    :if (lambda () (alist-get 'webpage-download (org-ilm--transient-parse))))
    ("ws" "Simplify"
     :cons 'webpage-simplify
     :class org-ilm-transient-cons-switches
@@ -1068,74 +1073,114 @@ overthrows this option."
     :if (lambda () (alist-get 'webpage-download (org-ilm--transient-parse))))
    ])
 
-(defun org-ilm--convert-transient-webpage-run (source title output-dir id)
-  (let* ((transient-args (org-ilm--transient-parse))
+(defun org-ilm--convert-transient-webpage-run (source title output-dir id &optional transient-args)
+  (let* ((transient-args (or transient-args (org-ilm--transient-parse)))
          (download (alist-get 'webpage-download transient-args))
+         (full (alist-get 'webpage-full transient-args))
          (simplify (alist-get 'webpage-simplify transient-args))
          (orgify (alist-get 'webpage-orgify transient-args))
          (html-path (expand-file-name (concat title ".html") output-dir))
          (on-success
           (lambda (job)
             (message "[Org-Ilm-Convert] HTML conversion completed: %s" source)
-            (org-ilm--org-with-point-at (oref job id) (org-attach-sync))))
+            (org-ilm--org-with-point-at
+                (oref (oref job chain) id)
+              (org-attach-sync))))
          converters)
 
-    (when download
-      (push
-       (cons #'org-ilm-convert--convert-with-monolith
-             (list :input-path source :output-path html-path))
-       converters))
+    (if (not full)
+        ;; When not downloading a full snapshot, download the page instead with
+        ;; defuddle.
+        (push
+         (list 'defuddle
+               :input source
+               :output-folder output-dir
+               :output-name title
+               :output-format simplify)
+         converters)
 
-    (when simplify
       (push
-       (cons #'org-ilm-convert--convert-with-defuddle
-             (list :source html-path :output-format simplify))
-       converters))
+       (list 'monolith :input source :output-path html-path)
+       converters)
+
+      (when simplify
+        (push
+         (list 'defuddle :output-format simplify)
+         converters)))
 
     (when orgify
       (push
-       (cons #'org-ilm-convert--convert-with-pandoc
-             (list :input-path
-                   (if simplify
-                       (concat
-                        (file-name-sans-extension html-path)
-                        "."
-                        (if (string= simplify "markdown") "md" "html"))
-                     html-path)
-                   :input-format
-                   (or simplify "html")))
+       (list 'pandoc :output-format "org")
        converters))
 
     (setq converters (reverse converters))
     
-    (org-ilm-convert--convert-multi
-     :process-name "webpage"
-     :process-id id
+    (org-ilm--convert-make-converter-chain
+     :run-p t
+     :id id
      :converters converters
-     :on-error nil
-     :on-final-success on-success)))
+     :on-success on-success)))
 
-;;;;; HTML download group
+;;;;; Media group
 
-(transient-define-group org-ilm--convert-html-transient-group
-  ["HTML -> org download"
-   (:info* (lambda () "Convert HTML to Org"))
-   ("hd" "Download"
-    :cons 'html-download
+(transient-define-group org-ilm--convert-media-transient-group
+  ["Media download"
+   ("md" "Download"
+    :cons 'media-download
     :class org-ilm-transient-cons-switch
     :transient transient--do-call)
-   ])
+   ("ma" "Audio only"
+    :cons 'media-audio
+    :class org-ilm-transient-cons-switch
+    :transient transient--do-call
+    :if (lambda () (alist-get 'media-download (org-ilm--transient-parse))))
+   ("ms" "Subtitles download"
+    :cons 'media-subs
+    :class org-ilm-transient-cons-option
+    :transient transient--do-call
+    :multi-value rest
+    :choices
+    (lambda ()
+      (let* ((url (oref (transient-scope) source))
+             (subs (org-ilm-convert--ytdlp-subtitles-from-url url)))
+        (mapcar (lambda (x) (alist-get 'language x)) (alist-get 'subtitles subs)))))
+   ("mt" "Template"
+    :cons 'media-template
+    :class org-ilm-transient-cons-option
+    :prompt "Template: "
+    :transient transient--do-call
+    :if (lambda ()
+          (map-let (media-download media-subs) (org-ilm--transient-parse)
+            (or media-download media-subs))))
+   ]
+  )
 
-(defun org-ilm--convert-transient-html-run (source title output-dir id)
-  (org-ilm-convert--convert-with-defuddle
-   :process-name "html"
-   :process-id id
-   :source source
-   :output-name title
-   :output-folder output-dir))
-
+(defun org-ilm--convert-transient-media-run (url output-dir id &optional transient-args)
+  (map-let (media-download media-subs media-template media-subs media-audio)
+      (or transient-args (org-ilm--transient-parse))
+    (when (or media-download media-subs)
+      (org-ilm--convert-make-ytdlp
+       'run-p
+       :url url
+       :output-dir output-dir
+       :filename-template media-template
+       :audio-only-p media-audio
+       :sub-langs media-subs
+       :no-download (not media-download)
+       :job-args
+       (list
+        :id id
+        :on-success
+        (lambda (job)
+          (message "[Org-Ilm-Convert] Media download completed: %s" url)
+          (org-ilm--org-with-point-at (oref job id) (org-attach-sync))))))))
 
 ;;;;; Main transient
+
+(cl-defstruct (org-ilm-convert-menu-data
+               (:conc org-ilm-convert-menu-data--))
+  type title source)
+               
 
 (defun org-ilm-convert-menu ()
   (interactive)
@@ -1165,78 +1210,73 @@ overthrows this option."
              (type (if (string= (plist-get (cdr choice) :name) "Attachments")
                        'attachment 'url)))
         (org-ilm--convert-transient
-         (list :title (org-mem-entry-title entry) :source source :type type))))))
+         (make-org-ilm-convert-menu-data
+          :title (org-mem-entry-title entry)
+          :source source :type type))))))
 
 (transient-define-prefix org-ilm--convert-transient (data)
   :refresh-suffixes t
+  ;; :incompatible '((media-download webpage-download)) 
   :value
   (lambda ()
     `((webpage-simplify . "markdown")
       (webpage-orgify . t)
-      (html-download . t)))
+      (media-template . "%(title)s.%(ext)s")))
 
   ["Convtool"
    (:info*
     (lambda ()
-      (propertize (plist-get (transient-scope) :title) 'face 'italic))
-    :if (lambda () (plist-get (transient-scope) :title)))
+      (propertize (oref (transient-scope) title) 'face 'italic))
+    :if (lambda () (oref (transient-scope) title)))
    (:info*
     (lambda ()
-      (propertize (plist-get (transient-scope) :source) 'face 'transient-value))
-    :if (lambda () (plist-get (transient-scope) :source)))
+      (propertize (oref (transient-scope) source) 'face 'transient-value))
+    :if (lambda () (oref (transient-scope) source)))
    ]
 
-  [:if (lambda () (eq (plist-get (transient-scope) :type) 'url))
-   org-ilm--convert-html-transient-group
-   ]
-
-  [:if (lambda () (eq (plist-get (transient-scope) :type) 'url))
+  [:if (lambda () (eq (oref (transient-scope) type) 'url))
    org-ilm--convert-webpage-transient-group
    ]
-
-  ;; ["Media"
-  ;;  :if
-  ;;  (lambda ()
-  ;;    (and (eq (plist-get (transient-scope) :type) 'url)
-  ;;         ;; (org-ilm-convert--transient-media-url-is-media-p
-  ;;         ;;  (plist-get (transient-scope) :source))
-  ;;         ))
-  ;;  :setup-children
-  ;;  (lambda (_)
-  ;;    (org-ilm-convert--transient-media-build))
-  ;;  ]
+  
+  [:if (lambda () (eq (oref (transient-scope) type) 'url))
+   org-ilm--convert-media-transient-group
+   ]
 
   ["Actions"
    ("RET" "Convert"
     (lambda ()
       (interactive)
-      (pcase-let* (((map webpage-download webpage-simplify webpage-orgify)
-                    (org-ilm--transient-parse))
-                   ((map :source :type) (transient-scope))
+      (pcase-let* ((args (org-ilm--transient-parse)) 
+                   ((map webpage-download media-download media-subs) args)
+                   (data (transient-scope))
+                   (source (oref data source))
+                   (type (oref data type))
                    (org-id (org-id-get))
                    (attach-dir (org-attach-dir-get-create)))
 
         ;; Webpage
         (when webpage-download
-          (let ((title (org-ilm--get-page-title source 'slugify)))
-            (org-ilm--convert-transient-webpage-run
-             source title attach-dir org-id)))
+          (make-thread
+           (lambda ()
+             (let ((title (org-ilm--get-page-title source 'slugify)))
+               (org-ilm--convert-transient-webpage-run
+                source title attach-dir org-id args)))))
 
         ;; Media
-        ;; (when (or (transient-arg-value "--media-download" args)
-        ;;           (cdr (assoc "--media-subs=" args)))
-        ;;   (org-ilm-convert--transient-media-run source attach-dir org-id args))
-
-        ))
+        (when (or media-download media-subs)
+          (make-thread
+           (lambda ()
+             (org-ilm--convert-transient-media-run
+              source attach-dir org-id args))))))
     :inapt-if
     (lambda ()
-      (pcase-let (((map webpage-download media-download media-subs)
-                   (org-ilm--transient-parse))
-                  ((map type) (transient-scope)))
-        (and (eq type 'url)
-             (not webpage-download)
-             (not media-download)
-             (not media-subs)))))
+      (with-slots (type) (transient-scope)
+        (pcase-let (((map webpage-download media-download media-subs)
+                     (org-ilm--transient-parse)))
+          (and (eq type 'url)
+               (not webpage-download)
+               (not media-download)
+               (not media-subs))))))
    ]
 
   (interactive "P")
