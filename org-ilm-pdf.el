@@ -1577,7 +1577,7 @@ With prefix arg, use mouse position as bottom cutoff point."
         (org-entry-put nil org-ilm-property-point
                        (format "%s" point))
         (save-buffer))
-      (org-mem-updater-update t)
+      (org-ilm--org-mem-ensure)
       (pdf-view-redisplay))))
 
 (cl-defmethod org-ilm--point (&context (ilm-attachment pdf))

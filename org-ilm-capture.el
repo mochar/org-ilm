@@ -60,8 +60,17 @@ in the ILM_EXT property.")
   (content nil :documentation "String with attachment contents.
 Assumes Org unless EXT is specified.")
   (bibtex nil :documentation "Bibtex string.")
-  props priority scheduled template state bqueue
-  on-success on-abort capture-kwargs)
+  (concepts nil :documentation "Concepts of element.
+For value see `org-ilm--concept-property-prepare'.")
+  props
+  priority
+  scheduled
+  template
+  bqueue
+  state
+  on-success
+  on-abort
+  capture-kwargs)
 
 (defun org-ilm-capture-ensure (&rest data)
   "Parse plist DATA as org-ilm-capture object, or return if it already is
@@ -90,7 +99,7 @@ The callback ON-ABORT is called when capture is cancelled."
   (with-slots
       (type parent title id ext content props file attach-method
             priority scheduled template collection state bibtex
-            target bqueue on-success on-abort capture-kwargs)
+            target bqueue concepts on-success on-abort capture-kwargs)
 
       (if (and (= 1 (length data)) (org-ilm-capture-p (car data)))
           (car data)
@@ -176,10 +185,15 @@ The callback ON-ABORT is called when capture is cancelled."
                   temporary-file-directory)
             attach-method 'cp))
 
+    ;; TODO If concepts, already process them here into props using
+    ;; org-ilm--concept-property-prepare so that if there is an error, it
+    ;; happens already at this point.
+
     (make-org-ilm-capture
      :parent parent :target target :type type :title title :id id :ext ext
      :content content :props props :file file :attach-method attach-method
      :priority priority :scheduled scheduled :template template
+     :concepts concepts
      :state state :on-success on-success :on-abort on-abort :bqueue bqueue
      :bibtex bibtex :collection collection :capture-kwargs capture-kwargs)))
 
@@ -269,6 +283,11 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
              (unless (eq collection (-some-> (org-entry-get nil org-ilm-property-collection 'inherit) intern))
                (org-entry-put nil org-ilm-property-collection (symbol-name collection)))
 
+             ;; Set concept property.
+             (when-let ((concepts (oref capture concepts)))
+               (org-entry-put nil "CONCEPTS+"
+                              (org-ilm--concept-property-prepare concepts)))
+
              ;; Add id to priority queue. An abort is detected in
              ;; `after-finalize' to remove the id.
              (org-ilm--pqueue-insert id priority collection)
@@ -352,7 +371,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                
                (when-let ((bqueue (org-ilm-capture--bqueue capture)))
                  ;; TODO Do this in seperate thread?
-                 (org-mem-updater-update t)
+                 (org-ilm--org-mem-ensure)
                  (let ((element (org-ilm--element-by-id id)))
                    (org-ilm-bqueue--insert bqueue element))) 
 

@@ -500,7 +500,7 @@ COLLECTION specifies in which queue to look at."
   :inapt-if (lambda () (oref (transient-scope) done))
   (interactive)
   (call-interactively #'org-ilm-element-set-schedule)
-  (org-mem-updater-update t)
+  (org-ilm--org-mem-ensure)
   (org-ilm--transient-set-scope (org-ilm--element-from-context)))
 
 (transient-define-suffix org-ilm--element-transient-priority ()
@@ -698,7 +698,7 @@ COLLECTION specifies in which queue to look at."
         (org-ilm--org-with-point-at (oref element id)
           (org-entry-put nil org-ilm-property-media+ range)
           (save-buffer)
-          (org-mem-updater-update t)
+          (org-ilm--org-mem-ensure)
           (org-ilm--transient-set-scope (org-ilm--element-at-point)))))
     :transient transient--do-call)
    ("s" "Set"

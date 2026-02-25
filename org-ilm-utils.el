@@ -355,7 +355,8 @@ Direct copy from mm-decode.el"
 
 ;; TODO Export jump logic in own function
 (defmacro org-ilm--org-with-point-at (thing &rest body)
-  "THING should be an org-id or nil.
+  "Apply BODY within headline of THING.
+THING should be an org-id, an org-mem entry object, or nil.
 
 Note: Previously used org-id-find but it put point above
 headline. org-mem takes me there directly.
@@ -363,31 +364,43 @@ headline. org-mem takes me there directly.
 Alternatively org-id-goto could be used, but does not seem to respect
 save-excursion."
   (declare (debug (body)) (indent 1))
-  `(cond
-    ;; If id is that of headline at point, dont jump, for performance but also
-    ;; so that org-mem is not required to have parsed the headline (useful in
-    ;; capture).
-    ((or (null ,thing) (and (eq major-mode 'org-mode) (string= ,thing (org-id-get))))
-     ;; Reveal entry contents, otherwise run into problems parsing the metadata,
-     ;; such as with org-srs drawer.
-     (org-ilm--org-with-headline-contents-visible ,@body))
-    ((stringp ,thing)
-     (when-let* ((org-id ,thing)
-                 (entry (org-mem-entry-by-id org-id))
-                 (file (org-mem-entry-file-truename entry))
-                 (buf (or (find-buffer-visiting file)
-                          (find-file-noselect file))))
-       (with-current-buffer buf
-         ;; We need to widen the buffer because `find-buffer-visiting' might
-         ;; return an active, narrowed buffer.
-         (org-with-wide-buffer
-          ;; Jump to correct position
-          (goto-char (org-find-property "ID" org-id))
-          
-          ;; Reveal entry contents, otherwise run into problems parsing the
-          ;; metadata, such as with org-srs drawer.
-          (org-ilm--org-with-headline-contents-visible ,@body)))))
-    (t (error "THING should be org-id or nil"))))
+  ;; If THING is id of headline at point, dont jump, for performance but also so
+  ;; that org-mem is not required to have parsed the headline (useful in
+  ;; capture).
+  `(if (or (null ,thing)
+           (and (stringp ,thing)
+                (eq major-mode 'org-mode)
+                (string= ,thing (org-id-get))))
+       ;; Reveal entry contents, otherwise run into problems parsing the
+       ;; metadata, such as with org-srs drawer.
+       (org-ilm--org-with-headline-contents-visible ,@body)
+
+     (let (org-id entry)
+       (cond
+        ((stringp ,thing)
+         (setq org-id ,thing
+               entry (org-ilm--org-mem-get-entry-ensured ,thing))
+         (unless entry
+           (error "Entry with ID %s not found" ,thing)))
+        ((org-mem-entry-p ,thing)
+         (setq org-id (org-mem-entry-id thing)
+               entry ,thing))
+        (t
+         (error "THING must be org-id string or org-mem-entry, got %s" ,thing)))
+       
+       (when-let* ((file (org-mem-entry-file-truename entry))
+                   (buf (or (find-buffer-visiting file)
+                            (find-file-noselect file))))
+         (with-current-buffer buf
+           ;; We need to widen the buffer because `find-buffer-visiting' might
+           ;; return an active, narrowed buffer.
+           (org-with-wide-buffer
+            ;; Jump to correct position
+            (goto-char (org-find-property "ID" org-id))
+            
+            ;; Reveal entry contents, otherwise run into problems parsing the
+            ;; metadata, such as with org-srs drawer.
+            (org-ilm--org-with-headline-contents-visible ,@body)))))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
@@ -617,20 +630,27 @@ PROPERTIES is an optional plist of extra behavior (e.g., '(:prepend t))."
                          (cdr (org-mem-entry-crumbs entry))))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
+(defun org-ilm--org-mem-ensure (&optional full-reset)
+  "Update org-mem cache synchronously.
+With FULL-RESET nil, only update changed files."
+  (if full-reset
+      (call-interactively #'org-mem-reset) 
+    ;; Alternatively just run: (org-mem-updater-update t)
+    ;; However this cancels the update on C-g. This way the update keeps running
+    ;; in the background.
+    ;; See: https://github.com/meedstrom/org-mem/issues/31#issuecomment-3864854312
+    (org-mem-updater-update)
+    (org-mem-await "Org-ilm triggered update..." 60)))
+
 (defun org-ilm--org-mem-get-entry-ensured (&optional id)
   "Returns `org-mem-entry' at point, or if specified, with ID.
-
-If not found in the org-mem cache, this function will then try to force org-mem
-to parse the headline."
-  ;; TODO https://github.com/meedstrom/org-mem/issues/31
-  (cond-let*
-    (id (org-mem-entry-by-id id))
-    ([entry (and (eq major-mode 'org-mode) (org-node-at-point))]
-     entry)
-    (t
-     (org-ilm--org-with-point-at id
-       (org-mem-updater-ensure-id-node-at-point-known))
-     (org-mem-entry-by-id id))))
+If not found in the org-mem cache, an org-mem update is triggered before
+trying again."
+  (setq id (or id (and (eq major-mode 'org-mode) (org-id-get))))
+  (if-let ((entry (org-mem-entry-by-id id)))
+      entry
+    (org-ilm--org-mem-ensure)
+    (org-mem-entry-by-id id)))
 
 ;; TODO this doesnt properly take care of inherited properties
 ;; https://github.com/meedstrom/org-mem/issues/31

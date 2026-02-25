@@ -49,8 +49,7 @@
                  (eq 'concept type)
                  (org-ilm--collection-file file collection)
                  (if predicate (funcall predicate entry) t)))))
-           'require-match
-           )))
+           'require-match)))
     (gethash choice org-node--candidate<>entry)))
 
 (defun org-ilm--concept-parse-property (&optional string inherit)
@@ -65,6 +64,67 @@
         (push concept concepts)
         (setq link-match-pos (match-end 1)))
       concepts)))
+
+(defun org-ilm--concept-property-prepare (concepts)
+  "Prepares the concept property value referencing CONCEPTS.
+CONCEPTS is a list or a singular value. If value(s) is string, should be
+the org-id. If cons, should be (org-id . title). Otherwise should be
+org-mem-entry object."
+  (mapconcat
+   (lambda (concept)
+     (cond
+      ((stringp concept)
+       (format
+        "[[id:%s][%s]]"
+        concept
+        (or (-some-> (org-mem-entry-by-id concept)
+              org-ilm--org-mem-title-full)
+            " ")))
+      ((consp concept)
+       (format "[[id:%s][%s]]" (car concept) (cdr concept)))
+      ((org-mem-entry-p concept)
+       (format "[[id:%s][%s]]"
+               (org-mem-entry-id concept)
+               (org-ilm--org-mem-title-full concept)))
+      (t
+       (error "Invalid parent concept value %s" concept))))
+   (ensure-list concepts) " "))
+
+(cl-defun org-ilm--concept-new (collection title &key id target parent-id parent-concepts mem-ensure)
+  "Create a new concept in COLLECTION with TITLE.
+
+TARGET is the org-capture target of the concept, which defaults to the
+value set in `org-ilm-collections'.
+
+PARENT-ID is the org-id of the outline parent concept. If given, this
+overwrites TARGET.
+
+PARENT-CONCEPTS are the concepts to reference in the concepts property,
+for which see `org-ilm--concept-property-prepare'.
+
+With MEM-ENSURE non-nil, update org-mem cache synchronously to ensure it
+is available after capture."
+  (let ((target (or target
+                    (when parent-id (list 'id parent-id))
+                    (org-ilm--collection-property collection :concept)))
+        (id (or id (org-id-new))))
+    (org-ilm--org-capture-programmatic
+     target
+     (format
+      "%s
+:PROPERTIES:
+:ID: %s
+:ILM_TYPE: concept
+%s:END:"
+      title id
+      (if (null parent-concepts)
+          ""
+        (concat
+         ":CONCEPTS+: "
+         (org-ilm--concept-property-prepare parent-concepts)
+         "\n")))
+     'entry)
+    (when mem-ensure (org-ilm--org-mem-ensure))))
 
 
 ;;;; Commands
@@ -83,40 +143,12 @@
          (t (call-interactively #'org-ilm-concept-new))))
     (call-interactively #'org-ilm-concept-new)))
 
-(cl-defun org-ilm-concept-new (&optional select-collection-p &key title id on-success)
-  "Create a new concept."
-  (interactive "P")
-  (let* ((collection (org-ilm--collection-from-context))
-         (collection (if (or select-collection-p (null collection))
-                         (org-ilm--select-collection)
-                       collection))
-         (file (or (org-ilm--collection-property collection :concept)
-                   (org-ilm--select-collection-file collection nil "Concept location: "))))
-    (setq id (or id (org-id-new)))
-    (cl-letf (((symbol-value 'org-capture-templates)
-               (list
-                (list
-                 "s" "Concept" 'entry (list 'file file)
-                 (concat "* " title "%?")
-                 :hook
-                 (lambda ()
-                   (org-entry-put nil "ID" id)
-                   (org-entry-put nil org-ilm-property-type "concept")
-                   )
-                 :before-finalize
-                 (lambda ()
-                   (setq title (org-get-heading t t t t)))
-                 :after-finalize
-                 (lambda ()
-                   (unless org-note-abort
-                     (with-current-buffer (find-file-noselect file)
-                       (org-with-wide-buffer
-                         (goto-char (org-find-property "ID" id))
-                         (org-mem-updater-ensure-id-node-at-point-known)))
-                     (when on-success 
-                       (funcall on-success id title)))))
-                 )))
-      (org-capture nil "s"))))
+;; (defun org-ilm-concept-new (&optional select-collection-p)
+;;   "Create a new concept."
+;;   (interactive "P")
+;;   (org-ilm--import-plain-transient
+;;    (make-org-ilm-capture
+;;     :type 'concept :collection (org-ilm--collection-from-context))))
 
 (defun org-ilm-concept-into ()
   "Convert headline at point to a concept."
@@ -266,7 +298,7 @@ outline, and/or property concept."
       (let ((id (plist-get (transient-scope) :id)))
         (org-ilm--org-with-point-at id
           (org-ilm-concept-add)
-          (org-mem-updater-update t)))
+          (org-ilm--org-mem-ensure)))
       (org-ilm--concept-transient-rebuild-scope))
     :transient t
     )
@@ -276,7 +308,7 @@ outline, and/or property concept."
       (let ((id (plist-get (transient-scope) :id)))
         (org-ilm--org-with-point-at id
           (org-ilm-concept-remove)
-          (org-mem-updater-update t)))
+          (org-ilm--org-mem-ensure)))
       (org-ilm--concept-transient-rebuild-scope))
     :transient t
     )
