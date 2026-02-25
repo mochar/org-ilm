@@ -124,11 +124,7 @@
         (add-hook 'kill-emacs-hook
                   #'org-ilm--pqueue-write-all)
         
-        (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
-        (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-menu)
         (define-key image-mode-map (kbd "A") org-ilm-image-map)
-        (advice-add 'pdf-annot-create-context-menu
-                    :around #'org-ilm--pdf-annot-create-context-menu-advice)
         )
     ;; Disable
     (remove-hook 'after-change-major-mode-hook
@@ -142,11 +138,7 @@
     (remove-hook 'kill-emacs-hook
                  #'org-ilm--pqueue-write-all)
     (org-ilm--pqueue-write-all)
-    (define-key pdf-view-mode-map (kbd "A") nil)
-    (define-key pdf-view-mode-map (kbd "e") nil)
     (define-key image-mode-map (kbd "A") nil)
-    (advice-remove 'pdf-annot-create-context-menu
-                   #'org-ilm--pdf-annot-create-context-menu-advice)
     ))
 
 ;;;; Commands

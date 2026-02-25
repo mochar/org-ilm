@@ -164,32 +164,24 @@ holding headline is an ilm element."
 
 (defun org-ilm--attachment-prepare-buffer ()
   "Prepare ilm attachment buffers."
-  (when-let ((data (org-ilm--attachment-data)))
-    (pcase-let* ((`(,id ,collection ,collection-file ,attach-type) data)
-                 (element (org-ilm--element-by-id id))
-                 (entry (org-mem-entry-by-id id)))
+  (unless (bound-and-true-p org-ilm--data) 
+    (when-let ((data (org-ilm--attachment-data)))
+      (pcase-let* ((`(,id ,collection ,collection-file ,attach-type) data)
+                   (element (org-ilm--element-by-id id))
+                   (entry (org-mem-entry-by-id id)))
 
-      ;; Prepare the buffer local data object which contains info about the
-      ;; attachment as well as data used to update the priority.
-      (setq-local
-       org-ilm--data
-       (list :id id
-             :type (oref element type)
-             :collection collection
-             :attach-type attach-type
-             ))
+        ;; Prepare the buffer local data object which contains info about the
+        ;; attachment as well as data used to update the priority.
+        (setq-local
+         org-ilm--data
+         (list :id id
+               :type (oref element type)
+               :collection collection
+               :attach-type attach-type
+               ))
 
-      (org-ilm--attachment-setup)
-
-      (when (eq major-mode 'org-mode)
-         (cursor-intangible-mode 1)
-         (org-ilm-recreate-overlays))
-
-      ;; TODO What is this for???????????
-      (when (eq major-mode 'pdf-virtual-view-mode)
-        (setq-local default-directory ""))
-
-      (run-hook-with-args 'org-ilm-attachment-after-setup-hook (current-buffer)))))
+        (org-ilm--attachment-setup)
+        (run-hook-with-args 'org-ilm-attachment-after-setup-hook (current-buffer))))))
 
 (defun org-ilm--attachment-ensure-data-object ()
   "Ensure `org-ilm--data' is initialized properly.

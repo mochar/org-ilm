@@ -275,6 +275,10 @@ When not specified, PAGE is current page."
       (nth 1 (pdf-virtual-document-page page)))
      (t (error "Not in a PDF buffer")))))
 
+(defun org-ilm--pdf-page-denormalized (page)
+  "Returns virtual page number of actual page number."
+  (1+ (- page (org-ilm--pdf-page-normalized 1))))
+
 (defun org-ilm--pdf-active-region ()
   "If region select, return first region, if text select, return bounding box."
   (interactive)
@@ -689,7 +693,7 @@ TODO Cute if we can use numeric prefix to jump to that page number"
 (cl-defstruct (org-ilm-pdf-highlight
                (:conc-name org-ilm-pdf-highlight--))
   el-id el-type
-  type ;; selection, area
+  type ;; selection, area, point
   interactive-p ;; user interactive capture selection
   self-p ;; highlight of current element
   page rect)
@@ -786,6 +790,16 @@ TODO Cute if we can use numeric prefix to jump to that page number"
                  :page page
                  :rect (list 0 0 1 1))
                 highlights)))))))
+    ;; Point
+    (when-let* ((point (org-ilm--pdf-point-get))
+                (point-page (car point))
+                (point-rect (cdr point)))
+      (when (= page point-page)
+        (push
+         (make-org-ilm-pdf-highlight
+          :type 'point :page point-page :rect point-rect)
+         highlights)))
+      
     highlights))
 
 (defun org-ilm--pdf-create-capture-context-menu (id)
@@ -856,18 +870,24 @@ buffer-local `pdf-view--hotspot-functions'."
   ;; :foreground) and creating a highlight (:highlight-region).
   (let* ((extract-color (face-background 'org-ilm-face-extract))
          (cloze-color (face-background 'org-ilm-face-card))
-         (interactive-color (face-background 'org-ilm-pdf-interactive-capture-face)) 
+         (interactive-color (face-background 'org-ilm-pdf-interactive-capture-face))
+         (point-color (or (face-background 'org-ilm-point) "grey"))
          cmds)
 
     (dolist (highlight highlights)
       (with-slots (el-type type interactive-p self-p rect) highlight
-        (let ((alpha (if (or interactive-p self-p)
-                         org-ilm-pdf-highlight-alpha
-                       org-ilm-pdf-capture-alpha))
+        (let ((alpha (cond
+                      ((eq type 'point) 1)
+                      ((or interactive-p self-p)
+                       org-ilm-pdf-highlight-alpha)
+                      (t
+                       org-ilm-pdf-capture-alpha)))
               color)
           (cond
            (interactive-p
             (setq color interactive-color))
+           ((eq type 'point)
+            (setq color point-color))
            ((eq el-type 'card)
             (when (and self-p
                        (org-ilm-reviewing-p)
@@ -1524,6 +1544,45 @@ With prefix arg, use mouse position as bottom cutoff point."
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-interactive-capure--hook)
 
+;;;; Point
+
+;; The point is stored as (page rect) - same format as pdf spec.  The rect forms
+;; a visual indicator of the reading point. By default this is a horizontal
+;; strip at the mouse y position.
+
+(defun org-ilm--pdf-point-get ()
+  "Return the saved point as a cons (page . rect)."
+  (when-let* ((entry (org-ilm--attachment-element-entry))
+              (point (org-mem-entry-property org-ilm-property-point entry))
+              (spec (ignore-errors (org-ilm--pdf-spec-parse point)))
+              (part (car (oref spec parts))))
+    (when (org-ilm-pdf-page-p part)
+      (cons (oref part number) (oref part area)))))
+
+(defun org-ilm--pdf-point-set ()
+  (let ((id (org-ilm--attachment-element-id))
+        (page (org-ilm--pdf-page-normalized))
+        point)
+    
+    (cond
+     ((pdf-view-active-region-p)
+      (setq point (list page (org-ilm--pdf-region-normalized))))
+     (t
+      (let* ((mouse-pos (org-ilm--pdf-mouse-position-relative))
+             (mouse-y (or (cdr mouse-pos) 0.0)))
+        (setq point (list page (list 0 mouse-y 1 mouse-y))))))
+
+    (when point
+      (org-ilm--org-with-point-at id
+        (org-entry-put nil org-ilm-property-point
+                       (format "%s" point))
+        (save-buffer))
+      (org-mem-updater-update t)
+      (pdf-view-redisplay))))
+
+(cl-defmethod org-ilm--point (&context (ilm-attachment pdf))
+  (org-ilm--pdf-point-set))
+
 ;;;; Setup
 
 ;; Setup on ilm minor mode 
@@ -1531,12 +1590,33 @@ With prefix arg, use mouse position as bottom cutoff point."
   (cond
    (org-ilm-global-minor-mode
     (advice-add #'pdf-view-create-page
-                :override #'org-ilm--advice--pdf-view-create-page))
+                :override #'org-ilm--advice--pdf-view-create-page)
+    (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
+    (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-menu)
+    (advice-add 'pdf-annot-create-context-menu
+                :around #'org-ilm--pdf-annot-create-context-menu-advice)
+    )
    (t
     (advice-remove #'pdf-view-create-page
-                   #'org-ilm--advice--pdf-view-create-page))))
+                   #'org-ilm--advice--pdf-view-create-page)
+    (define-key pdf-view-mode-map (kbd "A") nil)
+    (define-key pdf-view-mode-map (kbd "e") nil)
+    (advice-remove 'pdf-annot-create-context-menu
+                   #'org-ilm--pdf-annot-create-context-menu-advice)
+    )))
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-ilm-hook)
+
+;; Buffer setup
+(cl-defmethod org-ilm--attachment-setup (&context (ilm-attachment pdf))
+  ;; TODO What is this for???????????
+  (when (eq major-mode 'pdf-virtual-view-mode)
+    (setq-local default-directory ""))
+
+  (when-let* ((point (org-ilm--pdf-point-get))
+              (page (car point))
+              (page (org-ilm--pdf-page-denormalized page)))
+    (pdf-view-goto-page page)))
 
 ;; Setup individual ilm pdf buffers
 (defun org-ilm--pdf-ilm-after-attachment-setup-hook (buf)

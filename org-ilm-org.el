@@ -1009,15 +1009,25 @@ A cloze is made automatically of the element at point or active region."
 
 ;;;; Setup
 
-;; Prepare attachment buffer
-(defun org-ilm--org-setup-buffer ()
-  (org-ilm--org-point-make-ov)
-  (add-hook 'kill-buffer-hook
-            #'org-ilm--org-point-match-ov
-            nil 'local))
-
 (cl-defmethod org-ilm--attachment-setup (&context (ilm-attachment org))
-  (org-ilm--org-setup-buffer))
+  (cursor-intangible-mode 1)
+  (org-ilm-recreate-overlays)
+
+  (when-let ((point (org-ilm--org-point-get)))
+    (org-ilm--org-point-make-ov point)
+    (goto-char point)
+    ;; Save place mode uses find-file-hook to jump to point after opening file,
+    ;; which happens after major mode hook which is responsible for calling this
+    ;; function. Our jump to point is therefore ovewritten by jump to hist
+    ;; point, so we use the following hook to jump back yet again.
+    (when (bound-and-true-p save-place-mode)
+      (add-hook 'save-place-after-find-file-hook
+                (lambda (&rest _)
+                  (goto-char point))
+                nil 'local))
+    (add-hook 'kill-buffer-hook
+              #'org-ilm--org-point-match-ov
+              nil 'local)))
 
 ;; Setup on ilm minor mode 
 (defun org-ilm--org-ilm-hook ()
