@@ -57,7 +57,9 @@ One of:
   `((car (org-ilm--where-am-i)) (eql ,var)))
 
 (cl-generic-define-context-rewriter ilm-attachment (var)
-  `((nth 3 (org-ilm--attachment-data)) (eql ,var)))
+  `((when (bound-and-true-p org-ilm--data)
+      (plist-get org-ilm--data :attach-type)) (eql ,var)))
+  ;; `((nth 3 (org-ilm--attachment-data)) (eql ,var)))
 
 (defun org-ilm-midnight-shift-minutes ()
   "Midnight shift as number of minutes past (or before) midnight."

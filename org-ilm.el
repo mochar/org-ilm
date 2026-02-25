@@ -83,6 +83,7 @@
   ;; "c" #'org-ilm-cloze-toggle
   "c" #'org-ilm-clozeify
   "t" #'org-ilm-attachment-transclude
+  "." #'org-ilm-point
   ";" org-ilm-context-map
   "n" org-ilm-concept-map
   "g" org-ilm-registry-prefix-map
@@ -254,6 +255,11 @@
        ((org-ilm--pdf-mode-p)
         (call-interactively #'org-ilm-pdf-split)))
     (user-error "Splitting can only be done from within an attachment")))
+
+(defun org-ilm-point ()
+  "Mark location as reading point."
+  (interactive)
+  (org-ilm--point))
 
   
 ;;;; Footer

@@ -36,14 +36,23 @@ holding headline is an ilm element."
 (defvar-local org-ilm--data nil
   "Buffer-local ilm data stored in element attachment buffers.")
 
-;; TODO org-attach-delete-all
+(defun org-ilm--attachment-element-id ()
+  (file-name-base
+   ;; Allow for non-file buffer: pdf virtual view
+   (or buffer-file-name (buffer-name))))
+
+(defun org-ilm--attachment-element-entry ()
+  (-some-> (org-ilm--attachment-element-id)
+    org-mem-entry-by-id))
+
+(defun org-ilm--attachment-element ()
+  (-some-> (org-ilm--attachment-element-id)
+    org-ilm--element-by-id))
 
 (defun org-ilm--attachment-data ()
   "Returns (org-id collection file type) if current buffer is collection attachment file."
-  (when-let* ((file-title (file-name-base
-                           ;; Allow for non-file buffer: pdf virtual view
-                           (or buffer-file-name (buffer-name))))
-              (entry (org-mem-entry-by-id file-title))
+  (when-let* ((entry (org-ilm--attachment-element-entry))
+              (id (org-mem-entry-id entry))
               (element (org-ilm--element-from-entry entry))
               (src-file (org-mem-entry-file entry))
               (src-file (expand-file-name src-file)) ;; sep line, else err
@@ -57,7 +66,7 @@ holding headline is an ilm element."
     ;; Exclude registries
     (when (and (member (oref element type) '(material card))
                (not (string= src-file (org-ilm--collection-registry-path collection))))
-      (list file-title collection src-file type))))
+      (list id collection src-file type))))
 
 (defun org-ilm--attachment-extension ()
   "Return the extension of the attachment at point, assuming in collection."
@@ -150,6 +159,9 @@ holding headline is an ilm element."
     (org-with-wide-buffer
      (org-ilm--attachment-open))))
 
+(cl-defgeneric org-ilm--attachment-setup ()
+  (message ""))
+
 (defun org-ilm--attachment-prepare-buffer ()
   "Prepare ilm attachment buffers."
   (when-let ((data (org-ilm--attachment-data)))
@@ -162,12 +174,12 @@ holding headline is an ilm element."
       (setq-local
        org-ilm--data
        (list :id id
-             :type (org-ilm-element--type element)
+             :type (oref element type)
              :collection collection
-             ;; TODO porbably remove and just use `org-ilm--element-by-id' to
-             ;; get most recent
-             :element element
+             :attach-type attach-type
              ))
+
+      (org-ilm--attachment-setup)
 
       (when (eq major-mode 'org-mode)
          (cursor-intangible-mode 1)

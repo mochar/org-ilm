@@ -42,11 +42,29 @@ here."
   :type 'directory
   :group 'org-ilm)
 
+(defface org-ilm-pulse
+  '((default :extend t)
+    (t :background "MistyRose3")
+    (t :inverse-video t))
+  "Face used to pulse line.")
+
+(defface org-ilm-point
+  '((t
+     ;; :background unspecified
+     ;; :inherit default
+     :extend t
+     :stipple "Stipple"
+     ;; :background "pink"
+     ;; :box (:line-width (-2 . -2) :color "blue")
+     ))
+  "Face used to highlight reading point.")
+
 ;;;; Variables
 
 (defconst org-ilm-log-drawer-name "ILM")
 (defconst org-ilm-property-type "ILM_TYPE")
 (defconst org-ilm-property-collection "ILM_COLLECTION")
+(defconst org-ilm-property-point "ILM_POINT")
 (defconst org-ilm-property-ext "ILM_EXT")
 
 (defconst org-ilm-element-types '(material card concept task queue))
@@ -58,6 +76,9 @@ here."
 
 (cl-defgeneric org-ilm--cloze ()
   (user-error "Cannot cloze here"))
+
+(cl-defgeneric org-ilm--point ()
+  (user-error "Cannot set point here"))
 
 ;;; Footer
 
