@@ -60,7 +60,7 @@ in the ILM_EXT property.")
   (content nil :documentation "String with attachment contents.
 Assumes Org unless EXT is specified.")
   (bibtex nil :documentation "Bibtex string.")
-  props priority scheduled template state
+  props priority scheduled template state bqueue
   on-success on-abort capture-kwargs)
 
 (defun org-ilm-capture-ensure (&rest data)
@@ -90,7 +90,7 @@ The callback ON-ABORT is called when capture is cancelled."
   (with-slots
       (type parent title id ext content props file attach-method
             priority scheduled template collection state bibtex
-            target on-success on-abort capture-kwargs)
+            target bqueue on-success on-abort capture-kwargs)
 
       (if (and (= 1 (length data)) (org-ilm-capture-p (car data)))
           (car data)
@@ -134,6 +134,13 @@ The callback ON-ABORT is called when capture is cancelled."
                  collection)
       (setq target (org-ilm--collection-property collection :import))))
 
+    ;; Make sure bqueue is valid
+    (when bqueue
+      (cl-assert (org-ilm-bqueue-p bqueue))
+      (if collection
+          (cl-assert (eq collection (oref bqueue collection)))
+        (setq collection (oref bqueue collection))))
+
     ;; Make sure there is a collection
     (setq collection (or collection (org-ilm--active-collection)))
 
@@ -173,7 +180,7 @@ The callback ON-ABORT is called when capture is cancelled."
      :parent parent :target target :type type :title title :id id :ext ext
      :content content :props props :file file :attach-method attach-method
      :priority priority :scheduled scheduled :template template
-     :state state :on-success on-success :on-abort on-abort
+     :state state :on-success on-success :on-abort on-abort :bqueue bqueue
      :bibtex bibtex :collection collection :capture-kwargs capture-kwargs)))
 
 (defun org-ilm--capture (&rest data)
@@ -342,8 +349,16 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                  (org-ilm--org-mem-update-cache-after-capture 'entry))
                (run-hook-with-args 'org-ilm-capture-hook
                                    type id collection parent)
+               
+               (when-let ((bqueue (org-ilm-capture--bqueue capture)))
+                 ;; TODO Do this in seperate thread?
+                 (org-mem-updater-update t)
+                 (let ((element (org-ilm--element-by-id id)))
+                   (org-ilm-bqueue--insert bqueue element))) 
+
                (when-let ((on-success (org-ilm-capture--on-success capture)))
-                 (funcall on-success id attach-dir collection)))
+                 (dolist (callback (ensure-list on-success))
+                   (funcall callback id attach-dir collection))))
 
              ) ; end :after-finalize lambda
            

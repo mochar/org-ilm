@@ -443,16 +443,16 @@ If the bqueue has a query, run it again. Else re-parse elements."
     (org-ilm-bqueue--sort org-ilm-bqueue key reversed randomness)
     org-ilm-bqueue))
 
-(defun org-ilm--bqueue-completing-read (&optional new-name require-match)
+(defun org-ilm--bqueue-completing-read (&optional new-name require-match collection)
   "Choose a bqueue buffer or make a new one."
   (let* ((bqueue-buffers (mapcar (lambda (b) (cons (buffer-name b) b))
-                                 (org-ilm--bqueue-buffers)))
+                                 (org-ilm--bqueue-buffers collection)))
          (bqueue (completing-read "Select queue or create new: "
                                   bqueue-buffers nil require-match)))
     (or (cdr (assoc bqueue bqueue-buffers))
         (org-ilm--bqueue-buffer-create
          (org-ilm--bqueue-create
-          (org-ilm--active-collection)
+          (or collection (org-ilm--select-collection))
           :name (if (string-empty-p bqueue) new-name bqueue))))))
 
 (cl-defun org-ilm--bqueue-insert (element &key buffer exists-ok)

@@ -102,11 +102,14 @@ See `org-ilm--citation-get-zotero'"))
 
 (cl-defgeneric org-ilm--import-process ((import org-ilm-capture) args)
   "Fill in capture data in IMPORT using transient state ARGS."
-  (map-let (title collection location priority scheduled cite-key) args
+  (map-let (title collection location queue-buffer priority scheduled cite-key) args
     (oset import title title)
     (oset import priority priority)
     (oset import scheduled scheduled)
     (oset import collection collection)
+    (when queue-buffer
+      (with-current-buffer queue-buffer
+        (oset import bqueue org-ilm-bqueue)))
     (pcase location
       ((or 'default 'custom)
        ;; We by default set the parent slot to the element at point in the
@@ -158,8 +161,8 @@ See `org-ilm--citation-get-zotero'"))
          collection
          (org-ilm--collection-property (org-ilm--active-collection) :path)))
       (unless (eq collection cur-collection)
-        (org-ilm--transient-set-target-value "p" nil)
-        (org-ilm--transient-set-target-value "s" nil))
+        (dolist (key '("p" "s" "q"))
+          (org-ilm--transient-set-target-value key nil)))
       collection)))
 
 (transient-define-infix org-ilm--import-suffix-location ()
@@ -191,6 +194,23 @@ See `org-ilm--citation-get-zotero'"))
            ("heading"
             (let ((entry (org-ilm--collection-select-entry collection)))
               (oset (transient-scope) target (list 'id (oref entry id)))))))))))
+
+(transient-define-infix org-ilm--import-suffix-queue ()
+  :class 'org-ilm-transient-cons-option
+  :transient 'transient--do-call
+  :always-read t
+  :allow-empty nil
+  :key "q"
+  :description "Queue"
+  :argument 'queue-buffer
+  :reader
+  (lambda (&rest _)
+    (let* ((collection (alist-get 'collection (org-ilm--transient-parse)))
+           (bqueue-buf (org-ilm--bqueue-completing-read nil nil collection)))
+      (unless collection
+        (with-current-buffer bqueue-buf
+          (org-ilm--transient-set-target-value "c" (oref org-ilm-bqueue collection))))
+      bqueue-buf)))
 
 (transient-define-infix org-ilm--import-suffix-scheduled ()
   :class 'org-ilm-transient-cons-option
@@ -238,29 +258,31 @@ See `org-ilm--citation-get-zotero'"))
 
 (transient-define-group org-ilm--import-group-main
   [
-   ("x" "X"
-    (lambda ()
-      (interactive)
-      (setq x (cons (transient-scope) (org-ilm--transient-parse)))
-      (message "%s" x))
-    :transient t)
+   ;; ("x" "X"
+   ;;  (lambda ()
+   ;;    (interactive)
+   ;;    (setq x (cons (transient-scope) (org-ilm--transient-parse)))
+   ;;    (message "%s" x))
+   ;;  :transient t)
    (org-ilm--import-suffix-collection)
    (org-ilm--import-suffix-location)
    (:info
     (lambda ()
       (map-let (location collection) (org-ilm--transient-parse)
-      (pcase location
-        ('default
-         (let ((target (org-ilm--collection-property collection :import)))
-           (concat
-            (propertize (format "%s" target) 'face 'Info-quoted))))
-        ('child
-         (let ((parent (oref (transient-scope) parent)))
-           (propertize (org-ilm-element--title parent) 'face 'Info-quoted)))
-        ('custom
-         (let ((target (oref (transient-scope) target)))
-           (concat
-            (propertize (format "%s" target) 'face 'Info-quoted))))))))
+        (pcase location
+          ('default
+           (let ((target (org-ilm--collection-property collection :import)))
+             (concat
+              (propertize (format "%s" target) 'face 'Info-quoted))))
+          ('child
+           (let ((parent (oref (transient-scope) parent)))
+             (propertize (org-ilm-element--title parent) 'face 'Info-quoted)))
+          ('custom
+           (let ((target (oref (transient-scope) target)))
+             (concat
+              (propertize (format "%s" target) 'face 'Info-quoted))))))))
+   (org-ilm--import-suffix-queue)
+   (:info (lambda () ""))
    (org-ilm--import-suffix-priority)
    (org-ilm--import-suffix-scheduled)
    (org-ilm--import-suffix-title)
@@ -594,10 +616,11 @@ by default will be the child of this parent element."
 
     ;; After capture, download the media file or subtitles.
     (when (or media-download media-subs)
-      (oset import on-success
-            (lambda (id attach-dir collection)
-              (org-ilm--convert-transient-media-run
-               url attach-dir id t args))))))
+      (push
+       (lambda (id attach-dir collection)
+         (org-ilm--convert-transient-media-run
+          url attach-dir id t args))
+       (oref import on-success)))))
 
 (transient-define-prefix org-ilm--import-media-transient (import)
   :refresh-suffixes t
@@ -675,39 +698,40 @@ by default will be the child of this parent element."
 
       ;; Convert to org after capture if specified
       (when (and buffer-download buffer-orgify)
-        (oset import on-success
-              (lambda (id attach-dir collection)
-                (make-directory attach-dir t)
-                (let ((tmp-file (make-temp-file nil)))
-                  (with-current-buffer buffer
-                    (if-let ((html-buf (ignore-errors (hfy-fontify-buffer))))
-                        (progn
-                          (with-current-buffer html-buf
-                            (write-region nil nil tmp-file))
-                          (kill-buffer html-buf))
-                      (user-error "Failed to html fontify buffer")))
-                  (org-ilm-convert--convert-multi
-                   :process-name "buffer"
-                   :process-id id
-                   :converters
-                   (list
-                    (cons #'org-ilm-convert--convert-with-marker
-                          (list
-                           :input-path tmp-file
-                           :format "markdown"
-                           :output-dir attach-dir
-                           :move-content-out t
-                           :flags '("--disable_ocr")))
-                    (cons #'org-ilm-convert--convert-with-pandoc
-                          (list
-                           :input-path (expand-file-name (concat (file-name-base tmp-file) ".md") attach-dir)
-                           :input-format "markdown"
-                           :output-name id)))
-                   :on-error nil
-                   :on-final-success
-                   (lambda (proc buf id)
-                     (message "[Org-Ilm-Convert] Buffer conversion completed")
-                     (org-ilm--org-with-point-at id (org-attach-sync)))))))))))
+        (push
+         (lambda (id attach-dir collection)
+           (make-directory attach-dir t)
+           (let ((tmp-file (make-temp-file nil)))
+             (with-current-buffer buffer
+               (if-let ((html-buf (ignore-errors (hfy-fontify-buffer))))
+                   (progn
+                     (with-current-buffer html-buf
+                       (write-region nil nil tmp-file))
+                     (kill-buffer html-buf))
+                 (user-error "Failed to html fontify buffer")))
+             (org-ilm-convert--convert-multi
+              :process-name "buffer"
+              :process-id id
+              :converters
+              (list
+               (cons #'org-ilm-convert--convert-with-marker
+                     (list
+                      :input-path tmp-file
+                      :format "markdown"
+                      :output-dir attach-dir
+                      :move-content-out t
+                      :flags '("--disable_ocr")))
+               (cons #'org-ilm-convert--convert-with-pandoc
+                     (list
+                      :input-path (expand-file-name (concat (file-name-base tmp-file) ".md") attach-dir)
+                      :input-format "markdown"
+                      :output-name id)))
+              :on-error nil
+              :on-final-success
+              (lambda (proc buf id)
+                (message "[Org-Ilm-Convert] Buffer conversion completed")
+                (org-ilm--org-with-point-at id (org-attach-sync))))))
+         (oref import on-success))))))
 
 (transient-define-prefix org-ilm--import-buffer-transient (import)
   :refresh-suffixes t
@@ -782,30 +806,31 @@ by default will be the child of this parent element."
       (setf (plist-get (oref import props) :ROAM_REFS) roam-refs))
 
     ;; After capture, download the webpage if requested.
-    (oset import on-success
-          (lambda (id attach-dir collection)
-            (when (or webpage-download webattach-download)
-              (make-directory attach-dir t))
+    (push
+     (lambda (id attach-dir collection)
+       (when (or webpage-download webattach-download)
+         (make-directory attach-dir t))
 
-            ;; TODO Make converter
-            (when webattach-download
-              (make-thread
-               (lambda ()
-                 (condition-case nil
-                     (progn
-                       (url-copy-file
-                        webattach-download
-                        (expand-file-name (concat id ".pdf") attach-dir)
-                        'ok-if-exists)
-                       (org-ilm--org-with-point-at id
-                         (org-attach-sync)
-                         (when (or webattach-main (and (not webpage-download)))
-                           (org-entry-put nil org-ilm-property-ext "pdf"))))
-                   (error (message "Failed to download paper for %s" title))))))
+       ;; TODO Make converter
+       (when webattach-download
+         (make-thread
+          (lambda ()
+            (condition-case nil
+                (progn
+                  (url-copy-file
+                   webattach-download
+                   (expand-file-name (concat id ".pdf") attach-dir)
+                   'ok-if-exists)
+                  (org-ilm--org-with-point-at id
+                    (org-attach-sync)
+                    (when (or webattach-main (and (not webpage-download)))
+                      (org-entry-put nil org-ilm-property-ext "pdf"))))
+              (error (message "Failed to download paper for %s" title))))))
 
-            (when webpage-download
-              (org-ilm--convert-transient-webpage-run
-               url id attach-dir id))))))
+       (when webpage-download
+         (org-ilm--convert-transient-webpage-run
+          url id attach-dir id)))
+     (oref import on-success))))
 
 (transient-define-prefix org-ilm--import-webpage-transient (import)
   :refresh-suffixes t
@@ -871,7 +896,7 @@ by default will be the child of this parent element."
   (cond-let*
     ([media-title (org-ilm-convert--ytdlp-title-from-url url)]
      (org-ilm--import-media-transient
-      (make-org-ilm-media-import :url url :ref url :title media-title)))
+      (make-org-ilm-media-import :source url :ref url :title media-title)))
     (t
      (org-ilm--import-webpage-transient
       (make-org-ilm-webpage-import :url url :ref url)))))
