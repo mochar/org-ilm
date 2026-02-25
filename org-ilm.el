@@ -256,9 +256,9 @@
         (call-interactively #'org-ilm-pdf-split)))
     (user-error "Splitting can only be done from within an attachment")))
 
-(defun org-ilm-point ()
+(defun org-ilm-point (&optional arg)
   "Mark location as reading point."
-  (interactive)
+  (interactive "P")
   (org-ilm--point))
 
   

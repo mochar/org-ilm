@@ -83,8 +83,12 @@ is quite slow (~3 sec)"
   "Parse the ILM_MEDIA property MEDIA and return (source start end)."
   (org-media-note--split-link media))
 
-(defun org-ilm--media-compile (entry)
+(defun org-ilm--media-compile (&optional entry)
   "Return (source start end)"
+  (unless entry
+    (if-let* ((element (org-ilm--element-from-context)))
+        (setq entry (org-ilm-element--entry element))
+      (error "Media compile entry not found")))
   (let ((media (org-mem-entry-property-with-inheritance org-ilm-property-media entry))
         (media2 (org-mem-entry-property-with-inheritance org-ilm-property-media+ entry)))
     (when media
@@ -95,14 +99,40 @@ is quite slow (~3 sec)"
                 end (if start2 end2 end))
           (list source start end))))))
 
+(defun org-ilm--media-live-p ()
+  "Returns t if media of context element is playing."
+  (when (mpv-live-p)
+    (when-let* ((media (org-ilm--media-compile))
+                (media-path (car media))
+                (mpv-path (mpv-get-property "path")))
+      (if (file-exists-p media-path)
+          (string= (file-name-nondirectory media-path)
+                   (file-name-nondirectory mpv-path))
+        ;; Path is URL
+        (string= media-path mpv-path)))))
+
 (defun org-ilm--media-open (&optional entry)
   "Open the media of ENTRY (or at point) with `org-media-note'."
   (when-let* ((entry (or entry (org-node-at-point)))
               (media (org-ilm--media-compile entry)))
-    (cl-destructuring-bind (source start end) media
+    (pcase-let* ((`(,source ,start ,end) media)
+                 (point (org-mem-entry-property org-ilm-property-point entry)))
       (setq source (org-ilm--source-recover
                     source (org-mem-entry-id entry)
                     (org-mem-entry-property-with-inheritance "REGISTRY" entry)))
+      (when point
+        ;; MPV opens async so playback-time property might not be writable yet,
+        ;; so do it on start hook.
+        (let ((hook (org-ilm--add-hook-once
+                     'mpv-on-start-hook
+                     (lambda (&rest _)
+                       (message "%s" _)
+                       (ignore-errors 
+                         (mpv-set-property "playback-time" point))))))
+          (org-ilm--add-hook-once
+           'mpv-on-exit-hook
+           (lambda (&rest _)
+             (remove-hook 'mpv-on-start-hook hook)))))
       (org-media-note--follow-link source start end)
       (list source start end))))
 
@@ -218,8 +248,7 @@ the ytdlp flags which I don't care to do atm."
 ;; [[ilmmedia:ts(-ts)]] or [[ilmmedia:#ts(-ts)]] to deal with org-media-note #
 
 (defun org-ilm--media-link-folow (link)
-  (if-let* ((element-id (car (org-ilm--attachment-data)))
-            (entry (org-mem-entry-by-id element-id))
+  (if-let* ((entry (org-ilm--attachment-element-entry))
             (source (car (org-ilm--media-compile entry))))
       (pcase-let* ((ts (car (nreverse (string-split link "#"))))
                    (`(,start ,end) (string-split ts "-")))
@@ -346,6 +375,28 @@ the ytdlp flags which I don't care to do atm."
 ;;          (org-attach-sync)
 ;;          (when on-success
 ;;            (funcall on-success id output-path)))))))
+
+;;;; Point
+
+(defun org-ilm--media-point-set (&optional point)
+  "Set the ILM_POINT property to be the current media playback position."
+  (unless (org-ilm--media-live-p) (user-error "Media not open"))
+  (when-let* ((id (org-ilm--attachment-element-id))
+              (point (or point (mpv-get-playback-position))))
+    (org-ilm--org-with-point-at id
+      (org-entry-put nil org-ilm-property-point (number-to-string point))
+      (save-buffer))))
+
+(cl-defmethod org-ilm--point (&context (ilm-attachment media))
+  (org-ilm--media-point-set))
+
+;;;; Setup
+
+(defun org-ilm--media-setup-buffer ()
+  )
+
+(cl-defmethod org-ilm--attachment-setup (&context (ilm-attachment media))
+  (org-ilm--media-setup-buffer))
 
 ;;; Footer
 

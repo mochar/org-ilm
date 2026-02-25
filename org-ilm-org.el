@@ -978,16 +978,16 @@ A cloze is made automatically of the element at point or active region."
   "Create an overlay with face `org-ilm-point' covering the ilm point line."
   (remove-overlays (point-min) (point-max) org-ilm--org-point-ov-property t)
   (setq point (or point (org-ilm--org-point-get)))
-  (unless point (error "No point property found for element"))
-  (let (beg end)
-    (save-excursion
-      (goto-char point)
-      (setq beg (line-beginning-position)
-            end (max (line-end-position) (1+ (pos-bol)))))
-    (let ((ov (make-overlay beg end)))
-      (overlay-put ov org-ilm--org-point-ov-property t)
-      (overlay-put ov 'face 'org-ilm-point)
-      (setf (plist-get org-ilm--data :point-ov) ov))))
+  (when point
+    (let (beg end)
+      (save-excursion
+        (goto-char point)
+        (setq beg (line-beginning-position)
+              end (max (line-end-position) (1+ (pos-bol)))))
+      (let ((ov (make-overlay beg end)))
+        (overlay-put ov org-ilm--org-point-ov-property t)
+        (overlay-put ov 'face 'org-ilm-point)
+        (setf (plist-get org-ilm--data :point-ov) ov)))))
 
 (defun org-ilm--org-point-set (&optional point)
   "Set the ILM_POINT property to be the current point."
@@ -1001,13 +1001,11 @@ A cloze is made automatically of the element at point or active region."
 (cl-defmethod org-ilm--point (&context (ilm-attachment org))
   (org-ilm--org-point-set))
 
-(cl-defmethod org-ilm--point (&context (ilm-attachment media))
-  (org-ilm--org-point-set))
-
 (defun org-ilm--org-point-match-ov ()
-  (when-let* ((ov (plist-get org-ilm--data :point-ov))
-              (point (overlay-start ov)))
-    (org-ilm--org-point-set point)))
+  (when (bound-and-true-p org-ilm--data)
+    (when-let* ((ov (plist-get org-ilm--data :point-ov))
+                (point (overlay-start ov)))
+      (org-ilm--org-point-set point))))
 
 ;;;; Setup
 
@@ -1019,9 +1017,6 @@ A cloze is made automatically of the element at point or active region."
             nil 'local))
 
 (cl-defmethod org-ilm--attachment-setup (&context (ilm-attachment org))
-  (org-ilm--org-setup-buffer))
-
-(cl-defmethod org-ilm--attachment-setup (&context (ilm-attachment media))
   (org-ilm--org-setup-buffer))
 
 ;; Setup on ilm minor mode 
