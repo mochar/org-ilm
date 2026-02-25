@@ -150,7 +150,7 @@ An empty log implies a new card, so step is 0."
     current-step))
 
 (cl-defmethod org-ilm--element-review ((type (eql 'card)) element duration &rest args)
-  "Rate a card element with RATING, update log and scheduled date."
+  "Rate a card ELEMENT with RATING, update log and scheduled date."
   (org-ilm--element-with-point-at element
     (let* ((priority (org-ilm-element--priority element))
            (scheduled (org-ilm-element--sched element))

@@ -320,7 +320,12 @@ COLLECTION specifies in which queue to look at."
                         (ts-parse timestamp)
                         :reschedule)
       (org-ilm--schedule :timestamp timestamp))
-    (save-buffer)))
+    (save-buffer)
+
+    ;; Setting the schedule will log a schedule event, so if we are reviewing,
+    ;; dont update priority and schedule.
+    (when (org-ilm-reviewing-p (oref element id))
+      (oset org-ilm--review update-p nil))))
 
 (defun org-ilm-element-set-priority (element)
   "Set the priority of an ilm element."
@@ -410,12 +415,8 @@ COLLECTION specifies in which queue to look at."
 
         ;; When this is the element being reviewed, move on to review the next
         ;; element in the queue.
-        (when (and (org-ilm-reviewing-p)
-                   org-ilm--review
-                   (equal (oref org-ilm--review id) (org-ilm-element--id element)))
-          (let ((org-ilm--review-update-schedule nil))
-            (org-ilm--review-next)))
-        ))))
+        (when (org-ilm-reviewing-p (oref element id))
+          (org-ilm--review-next 'dont-update))))))
 
 (defun org-ilm-element-undone (element)
   "Undo done on ilm element at point."

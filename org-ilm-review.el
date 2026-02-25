@@ -68,7 +68,8 @@ The attachment's buffer is current.")
 (cl-defstruct (org-ilm-review
                (:conc-name org-ilm-review--))
   "Review data."
-  id type buffer start card-revealed rating)
+  id type buffer start card-revealed rating
+  (update-p t :description "Whether to update priority and schedule after review"))
 
 (defun org-ilm--review-element ()
   (org-ilm--element-by-id (oref org-ilm--review id)))
@@ -110,14 +111,11 @@ The attachment's buffer is current.")
 
     (setq org-ilm--review nil))))
 
-(defun org-ilm-reviewing-p ()
+(defun org-ilm-reviewing-p (&optional element-id)
   "Return t when currently reviewing."
-  org-ilm-review-mode)
-
-(defun org-ilm-reviewing-id-p (id)
-  "Return t when currently reviewing element with id ID."
-  (when (org-ilm-reviewing-p)
-    (equal id (oref org-ilm--review id))))
+  (and org-ilm-review-mode
+       (or (null element-id)
+           (equal element-id (oref org-ilm--review id)))))
 
 (defun org-ilm--review-confirm-quit ()
   "Confirmation before killing the active attachment buffer or queue buffer
@@ -233,15 +231,14 @@ Return t if already ready."
   (interactive)
   (org-ilm-review-next :again))
 
-(defvar org-ilm--review-update-schedule t)
-
-(defun org-ilm--review-next ()
+(defun org-ilm--review-next (&optional dont-update)
   (when org-ilm--review
     ;; Update priority and schedule
     (let* ((element (org-ilm--review-element))
            duration)
       
-      (when org-ilm--review-update-schedule
+      (when (and (oref org-ilm--review update-p)
+                 (not dont-update))
         (when-let* ((start (oref org-ilm--review start))
                     (end (current-time))
                     (diff (float-time (time-subtract end start)))
@@ -415,8 +412,7 @@ needs the attachment buffer."
       (sleep-for 1.))
     (org-ilm-element-set-schedule
      (org-ilm--review-element) date)
-    (let ((org-ilm--review-update-schedule nil))
-      (org-ilm--review-next))))
+    (org-ilm--review-next 'dont-update)))
 
 (defun org-ilm-review-done ()
   "Apply done on current element."
