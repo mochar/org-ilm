@@ -183,8 +183,8 @@ See `org-ilm--citation-get-zotero'"))
   :choices
   (lambda ()
     (if (oref (transient-scope) parent)
-        '(default child custom)
-      '(default custom)))
+        '(default child concept custom)
+      '(default concept custom)))
   :on-change
   (lambda (location)
     (let* ((args (org-ilm--transient-parse))
@@ -195,11 +195,17 @@ See `org-ilm--citation-get-zotero'"))
          (oset (transient-scope) target nil))
         ('child
          (oset (transient-scope) target nil))
+        ('concept
+         (let ((entry (org-ilm--concept-select-entry collection)))
+           (oset (transient-scope) target (list 'id (oref entry id)))))
         ('custom
-         (pcase (completing-read "Type: " '("file" "heading"))
+         (pcase (completing-read "Type: " '("file" "heading" "concept"))
            ("file"
             (let ((file (org-ilm--select-collection-file collection 'relative)))
               (oset (transient-scope) target (list 'file (expand-file-name file)))))
+           ("concept"
+            (let ((entry (org-ilm--concept-select-entry collection)))
+              (oset (transient-scope) target (list 'id (oref entry id)))))
            ("heading"
             (let ((entry (org-ilm--collection-select-entry collection)))
               (oset (transient-scope) target (list 'id (oref entry id)))))))))))
@@ -352,13 +358,20 @@ See `org-ilm--citation-get-zotero'"))
           ('child
            (let ((parent (oref (transient-scope) parent)))
              (propertize (org-ilm-element--title parent) 'face 'Info-quoted)))
+          ('concept
+           (let ((target (oref (transient-scope) target)))
+             (propertize
+              (if target
+                  (org-ilm--org-mem-title-full
+                   (org-mem-entry-by-id (nth 1 target)))
+                "nil")
+              'face 'Info-quoted)))
           ('custom
            (let ((target (oref (transient-scope) target)))
              (concat
               (propertize (format "%s" target) 'face 'Info-quoted))))))))
    (org-ilm--import-suffix-queue
     :if-not (lambda () (eq (oref (transient-scope) type) 'concept)))
-
    ])   
 
 (transient-define-group org-ilm--import-group-element
