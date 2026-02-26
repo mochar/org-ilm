@@ -110,12 +110,11 @@ See `org-ilm--citation-get-zotero'"))
 
 (cl-defgeneric org-ilm--import-process ((import org-ilm-capture) args)
   "Fill in capture data in IMPORT using transient state ARGS."
-  (map-let (title collection location queue-buffer priority scheduled concepts cite-key) args
+  (map-let (title collection location queue-buffer priority scheduled cite-key) args
     (oset import title title)
     (oset import priority priority)
     (oset import scheduled scheduled)
     (oset import collection collection)
-    (oset import concepts concepts)
     (when queue-buffer
       (with-current-buffer queue-buffer
         (oset import bqueue org-ilm-bqueue)))
@@ -227,18 +226,13 @@ See `org-ilm--citation-get-zotero'"))
           (org-ilm--transient-set-target-value "c" (oref org-ilm-bqueue collection))))
       bqueue-buf)))
 
-(transient-define-infix org-ilm--import-suffix-concepts ()
-  :class 'org-ilm-transient-cons-option
-  :transient 'transient--do-call
-  :always-read t
-  :allow-empty nil
+(transient-define-suffix org-ilm--import-suffix-concepts ()
+  :transient 'transient--do-stack
   :key "n"
-  :argument 'concepts
   :inapt-if-not (lambda () (alist-get 'collection (org-ilm--transient-parse)))
-  :format " %k %d"
   :description
   (lambda ()
-    (map-let (collection concepts) (org-ilm--transient-parse)
+    (with-slots (concepts) (transient-scope)
       (concat
        "Concepts: "
        (if concepts
@@ -250,17 +244,36 @@ See `org-ilm--citation-get-zotero'"))
             concepts
             " ")
          (propertize "nil" 'face 'transient-inactive-value)))))
-  :reader
-  (lambda (&rest _)
-    (map-let (collection concepts) (org-ilm--transient-parse)
-      (mapcar
-       #'org-mem-entry-by-id
-       (org-ilm--concept-edit-selection
-        :collection collection
-        :parent (when-let ((target (oref (transient-scope) target)))
-                  (when (eq (car target) 'id)
-                    (nth 1 target)))
-        :selection (mapcar #'org-mem-entry-id concepts))))))
+  
+  (interactive)
+  (pcase-let* (((map collection) (org-ilm--transient-parse))
+               (target (oref (transient-scope) target))
+               (parent (when (and target (eq (car target) 'id)) (nth 1 target)))
+               (new-concept))
+    (setq new-concept
+          (catch 'new-concept
+            (while t
+              (let ((selection (org-ilm--concept-edit-selection
+                                :collection collection
+                                :parent parent
+                                :throw-new t
+                                :selection
+                                (mapcar #'org-mem-entry-id
+                                        (oref (transient-scope) concepts)))))
+                (oset (transient-scope) concepts
+                      (mapcar #'org-mem-entry-by-id selection))))))
+    (when new-concept
+      (let ((this-import (transient-scope)))
+        (org-ilm--import-concept-transient
+         (make-org-ilm-concept-import
+          :collection collection
+          :title new-concept
+          :on-success
+          (lambda (concept-import)
+            (when (eq collection (oref concept-import collection))
+              (when-let ((entry (org-ilm--org-mem-get-entry-ensured (oref concept-import id))))
+                (push entry (oref this-import concepts)))))))))))
+                 
 
 (transient-define-infix org-ilm--import-suffix-scheduled ()
   :class 'org-ilm-transient-cons-option
@@ -539,9 +552,12 @@ by default will be the child of this parent element."
 
 ;;;; Concept import
 
+;; NOTE The import process for concepts does not go through the usual
+;; org-ilm-capture process!
+
 (cl-defstruct (org-ilm-concept-import
                (:conc-name org-ilm-concept-import--)
-               (:include org-ilm-import)))
+               (:include org-ilm-import (type 'concept))))
 
 (cl-defmethod org-ilm--import-process ((import org-ilm-concept-import) args)
   (cl-call-next-method import args))
@@ -563,12 +579,17 @@ by default will be the child of this parent element."
       (interactive)
       (let ((import (transient-scope)))
         (org-ilm--import-process import (org-ilm--transient-parse))
-        (with-slots (collection title target concepts) import
+        (with-slots (collection id title target concepts on-success) import
           (org-ilm--concept-new
            collection title
            :target target
+           :id id
            :parent-concepts concepts
-           :mem-ensure t)))))
+           :mem-ensure t)
+          (when on-success
+            (funcall on-success import))
+          )))
+    :transient transient--do-return)
    ]
   
   (interactive "P")
@@ -584,7 +605,7 @@ by default will be the child of this parent element."
   "Create a new concept"
   (interactive "sTitle: ")
   (org-ilm--import-concept-transient
-   (make-org-ilm-concept-import :type 'concept :title title)))
+   (make-org-ilm-concept-import :title title)))
 
 
 ;;;; File import

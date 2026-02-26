@@ -90,6 +90,12 @@ org-mem-entry object."
        (error "Invalid parent concept value %s" concept))))
    (ensure-list concepts) " "))
 
+;; TODO Should this happen through org-ilm-capture?
+;; Eventhough i classify concept as an ilm type, their behavior currently is too
+;; different to elegantly merge the capture functionality with that of cards and
+;; materials. This function is sufficient for now, but if later i want to
+;; concepts to have priorities, schedules, and be part of queues, then I can
+;; merge this functionality with org-ilm-capture.
 (cl-defun org-ilm--concept-new (collection title &key id target parent-id parent-concepts mem-ensure)
   "Create a new concept in COLLECTION with TITLE.
 
@@ -126,7 +132,7 @@ is available after capture."
      'entry)
     (when mem-ensure (org-ilm--org-mem-ensure))))
 
-(cl-defun org-ilm--concept-edit-selection (&key collection this parent selection)
+(cl-defun org-ilm--concept-edit-selection (&key collection this parent selection narrow throw-new)
   "Add or remove concepts to or from a SELECTION of an existing or new concept.
 Returns the new selection.
 
@@ -134,7 +140,10 @@ For an existing concept (THIS), SELECTION are the concepts in its
 property, and must therefore not be passed. For new concepts, SELECTION is interactive, and must thus be passed explicitely.
 
 If a new concept is placed as an outline child of another concept,
-PARENT should be specified to determine what concepts will be inherited."
+PARENT should be specified to determine what concepts will be inherited.
+
+With THROW-NEW, user is able to input a new name, which will then be
+`throw'n with the tag `new-concept'."
   ;; Get the concept in the property of THIS, if specified
   (when this
     (when selection
@@ -145,7 +154,8 @@ PARENT should be specified to determine what concepts will be inherited."
   ;; THIS or PARENT determine what concepts are inherited (i.e. concepts in
   ;; outline and their properties), so its useful to have a name for both of
   ;; them (reference).
-  (let ((reference (or this parent)))
+  (let ((reference (or this parent))
+        inherited)
 
     ;; Get collection from reference if not specified explicitely
     (unless collection
@@ -156,16 +166,19 @@ PARENT should be specified to determine what concepts will be inherited."
                                    file-truename))))
       (unless collection
         (error "Could not find COLLECTION of %s" reference)))
+
+    ;; Inherited concepts from either reference or selection
+    (when (or reference selection)
+      (setq inherited
+            (seq-difference
+             (apply #'seq-concatenate 'list
+                    (mapcar 
+                     (lambda (id)
+                       (car (org-ilm--concept-cache-gather id)))
+                     (append (ensure-list reference) selection)))
+             selection)))
     
-    (let* ((inherited (when (or reference selection)
-                        (seq-difference
-                         (apply #'seq-concatenate 'list
-                                (mapcar 
-                                 (lambda (id)
-                                   (car (org-ilm--concept-cache-gather id)))
-                                 (cons reference selection)))
-                         selection)))
-           (choice (consult--multi
+    (let* ((choice (consult--multi
                     (list
                      ;; The concepts already in the selection.
                      (list
@@ -214,19 +227,29 @@ PARENT should be specified to determine what concepts will be inherited."
                              (propertize
                               (org-ilm--org-mem-title-full entry)
                               :entry entry))))
-                       (org-mem-entries-in-files
+                       (org-ilm--org-mem-entries-in-files
                         (org-ilm--collection-files collection)))))
-                    :require-match t
+                    :require-match (not throw-new)
+                    :initial-narrow narrow
                     :prompt "Concept: "))
-           (concept (get-text-property 0 :entry (car choice))))
+           (candidate (car choice))
+           (choice-source (cdr choice))
+           ;; Match: nil if candidate does not exist, t if candidate exists, new
+           ;; if the candidate has been created.
+           (match (plist-get choice-source :match))
+           (concept (get-text-property 0 :entry candidate)))
       (cond
-       ((get-text-property 0 :inherited (car choice))
+       ((not concept)
+        (when throw-new
+          (throw 'new-concept candidate))
+        selection)
+       ((get-text-property 0 :inherited candidate)
         ;; I think we should allow to add inherited if the user wants to, there
         ;; might be a reason for it.
         ;; (message "Inherited concepts cannot be added explicitly")
         ;; selection
         (cons (oref concept id) selection))
-       ((get-text-property 0 :selected (car choice))
+       ((get-text-property 0 :selected candidate)
         (seq-filter
          (lambda (e)
            (not (string= e (oref concept id))))
@@ -264,31 +287,20 @@ PARENT should be specified to determine what concepts will be inherited."
     (org-id-get-create)
     (save-buffer))))
 
-(defun org-ilm-concept-remove ()
-  "Remove concept from CONCEPTS property for element at point."
+(defun org-ilm-concept-set ()
+  "Add or remove concepts from the CONCEPTS property."
   (interactive)
-  (unless (org-ilm--element-type)
-    (user-error "Not on an element heading"))
-  (let* ((concepts-str (org-entry-get nil "CONCEPTS"))
-         (concepts (org-ilm--concept-parse-property concepts-str))
-         (entries (seq-keep
-                   (lambda (c)
-                     (when-let* ((entry (org-mem-entry-by-id (car c)))
-                                 (title (org-ilm--org-mem-title-full entry)))
-                       (cons title entry)))
-                   concepts))
-         (entry-title (completing-read "Remove concept: " entries nil t)))
-    (setf (alist-get entry-title entries nil 'remove #'string=) nil)
-    (setq concepts-str (string-join (mapcar (lambda (entry)
-                                              (format "[[id:%s][%s]]"
-                                                      (org-mem-entry-id (cdr entry))
-                                                      (org-mem-entry-title (cdr entry))))
-                                            entries)
-                                    " "))
-    (if (string-empty-p concepts-str)
-        (org-entry-delete nil "CONCEPTS+")
-      (org-entry-put nil "CONCEPTS+" concepts-str))
-    (save-buffer)))
+  (-> (catch 'new-concept
+        (while t
+          (let ((selection (org-ilm--concept-edit-selection
+                            :collection (org-ilm--collection-from-context)
+                            :this (org-id-get)
+                            :throw-new t)))
+            (if selection
+                (org-entry-put nil "CONCEPTS+"
+                               (org-ilm--concept-property-prepare selection))
+              (org-entry-delete nil "CONCEPTS+")))))
+      org-ilm-concept-new))
 
 (defun org-ilm-concept-add (&optional concept-entry)
   "Add concept to CONCEPTS property for element at point."
@@ -599,11 +611,12 @@ Gets reset after org-mem refreshes.")
 (defun org-ilm-concept-cache-reset ()
   (setq org-ilm-concept-cache (make-hash-table :test 'equal)))
 
-(defun org-ilm--concept-cache-gather (&optional headline-or-id)
+;; NOTE This parameter should not be optional with fallback to org-id-get, as
+;; buggy behavior such as out of date org-mem cache can lead to passing nil
+;; unexpectedly as argument.
+(defun org-ilm--concept-cache-gather (headline-or-id)
   "Gather recursively headline's concepts. Headline may itself be a concept."
   (let ((id (cond
-             ((null headline-or-id)
-              (org-id-get))
              ((stringp headline-or-id)
               headline-or-id)
              (t

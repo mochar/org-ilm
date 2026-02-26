@@ -98,8 +98,6 @@
 ;; TODO This hook is called not just after file save but on a timer as well. Do
 ;; we want the timer to reset cache?
 (defun org-ilm--org-mem-hook (parse-results)
-  ;; (seq-let (bad-paths file-data entries) parse-results
-  ;;   )
   (org-ilm-concept-cache-reset))
 
 ;;;###autoload

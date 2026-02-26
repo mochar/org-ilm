@@ -708,6 +708,14 @@ trying again."
      (delq nil (append (list url path) refs attachments))
      :test #'string=)))
 
+(defun org-ilm--org-mem-entries-in-files (files)
+  "Copy of `org-mem-entries-in-files' without memoization.
+
+See: https://github.com/meedstrom/org-mem/issues/41"
+  (cl-loop for file in (delete-dups (mapcar #'org-mem--truename-maybe files))
+           when (stringp file)
+           append (gethash file org-mem--truename<>entries)))
+
 ;;;; Bibtex
 
 (defcustom org-ilm-bibtex-fields nil
