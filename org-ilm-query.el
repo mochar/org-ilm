@@ -96,7 +96,7 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive concept
 ;; query if they dont
 (defun org-ilm--queries-concepts (collection)
   ;; `(ilm-element ,collection (concept)))
-  `(and (property "ID")
+  `(and (property "ID")))
 
 (defun org-ilm--queries-query-all (collection)
   "Query for org-ql to retrieve all elements."

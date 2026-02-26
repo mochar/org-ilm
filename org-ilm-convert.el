@@ -1260,7 +1260,7 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
 ;;;;; Main transient
 
 (cl-defstruct (org-ilm-convert-menu-data
-               (:conc org-ilm-convert-menu-data--))
+               (:conc-name org-ilm-convert-menu-data--))
   type title source)
                
 
