@@ -619,15 +619,14 @@ PROPERTIES is an optional plist of extra behavior (e.g., '(:prepend t))."
 
 (defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
   "Return org ids of ancestors of entry."
-  (when-let ((entry (if (stringp entry-or-id)
-                        (org-mem-entry-by-id entry-or-id)
-                      entry-or-id)))
-    (let ((ancestry
-           (delq nil ;; Delete nils returned when no org-id
-                 (mapcar (lambda (x)
-                           (car (last x)))
-                         ;; cdr to skip itself
-                         (cdr (org-mem-entry-crumbs entry))))))
+  (when-let* ((entry (if (stringp entry-or-id)
+                         (org-mem-entry-by-id entry-or-id)
+                       entry-or-id)))
+    (let ((ancestry (seq-keep
+                     (lambda (x)
+                       (car (last x)))
+                     ;; cdr to skip itself
+                     (cdr (org-mem-entry-crumbs entry)))))
       (if with-root-str (cons "ROOT" ancestry) ancestry))))
 
 (defun org-ilm--org-mem-ensure (&optional full-reset)

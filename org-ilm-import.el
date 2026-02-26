@@ -234,6 +234,7 @@ See `org-ilm--citation-get-zotero'"))
   :allow-empty nil
   :key "n"
   :argument 'concepts
+  :inapt-if-not (lambda () (alist-get 'collection (org-ilm--transient-parse)))
   :format " %k %d"
   :description
   (lambda ()
@@ -252,49 +253,14 @@ See `org-ilm--citation-get-zotero'"))
   :reader
   (lambda (&rest _)
     (map-let (collection concepts) (org-ilm--transient-parse)
-      (let* ((cur-ids (mapcar #'org-mem-entry-id concepts))
-             (choice (consult--multi
-                      (list
-                       (list
-                        :name "Selected"
-                        :items
-                        (mapcar
-                         (lambda (entry)
-                           (propertize
-                            (org-ilm--org-mem-title-full entry)
-                            :entry entry :selected t))
-                         concepts)
-                        )
-                       (list
-                        :name "Concepts"
-                        :items
-                        (seq-keep
-                         (lambda (entry)
-                           (when (and (eq 'concept (org-ilm--element-type entry))
-                                      (not (member (oref entry id) cur-ids)))
-                             (propertize
-                              (org-ilm--org-mem-title-full entry)
-                              :entry entry)))
-                         (org-mem-entries-in-files
-                          (org-ilm--collection-files collection)))))
-                      :require-match t
-                      :prompt "Concept: "))
-             (concept (get-text-property 0 :entry (car choice)))
-             (selected (get-text-property 0 :selected (car choice))))
-        (if selected
-            (seq-filter
-             (lambda (e)
-               (not (string= (oref e id) (oref concept id))))
-             concepts)
-          (unless collection
-            (let ((collections (org-ilm--collection-file
-                                (org-mem-entry-file concept))))
-              (org-ilm--transient-set-target-value
-               "c" (if (= 1 (length collections))
-                       (car collections)
-                     (intern
-                      (completing-read "Collection: " collections))))))
-          (cons concept concepts))))))
+      (mapcar
+       #'org-mem-entry-by-id
+       (org-ilm--concept-edit-selection
+        :collection collection
+        :parent (when-let ((target (oref (transient-scope) target)))
+                  (when (eq (car target) 'id)
+                    (nth 1 target)))
+        :selection (mapcar #'org-mem-entry-id concepts))))))
 
 (transient-define-infix org-ilm--import-suffix-scheduled ()
   :class 'org-ilm-transient-cons-option
