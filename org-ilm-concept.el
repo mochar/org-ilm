@@ -200,8 +200,11 @@ With THROW-NEW, user is able to input a new name, which will then be
                        (lambda (id)
                          (let ((entry (org-mem-entry-by-id id)))
                            (propertize
-                            (org-ilm--org-mem-title-full entry)
-                            :entry entry :selected t)))
+                            (if entry
+                                (org-ilm--org-mem-title-full entry)
+                              id)
+                            ;; Add id in case entry not found
+                            :entry entry :id id :selected t)))
                        selection))
                      ;; Inherited concepts, hidden by default.
                      (list
@@ -214,8 +217,10 @@ With THROW-NEW, user is able to input a new name, which will then be
                        (lambda (id)
                          (let ((entry (org-mem-entry-by-id id)))
                            (propertize
-                            (org-ilm--org-mem-title-full entry)
-                            :entry entry :inherited t)))
+                            (if entry
+                                (org-ilm--org-mem-title-full entry)
+                              id)
+                            :entry entry :id id :inherited t)))
                        inherited))
                      ;; Descendant concepts, hidden by default, and unselectable
                      (list
@@ -229,7 +234,7 @@ With THROW-NEW, user is able to input a new name, which will then be
                          (let ((entry (org-mem-entry-by-id id)))
                            (propertize
                             (org-ilm--org-mem-title-full entry)
-                            :entry entry :descendant t)))
+                            :entry entry :id id :descendant t)))
                        descendants))
                      ;; The concepts that can be added to the selection must not
                      ;; be in the selection, inherited, or descendant concepts,
@@ -253,7 +258,7 @@ With THROW-NEW, user is able to input a new name, which will then be
                                         t))
                              (propertize
                               (org-ilm--org-mem-title-full entry)
-                              :entry entry))))
+                              :entry entry :id id))))
                        (org-ilm--org-mem-entries-in-files
                         (org-ilm--collection-files collection)))))
                     :require-match (not throw-new)
@@ -264,9 +269,10 @@ With THROW-NEW, user is able to input a new name, which will then be
            ;; Match: nil if candidate does not exist, t if candidate exists, new
            ;; if the candidate has been created.
            (match (plist-get choice-source :match))
+           (id (get-text-property 0 :id candidate))
            (concept (get-text-property 0 :entry candidate)))
       (cond
-       ((not concept)
+       ((null id)
         (when throw-new
           (throw 'new-concept candidate))
         selection)
@@ -282,11 +288,30 @@ With THROW-NEW, user is able to input a new name, which will then be
        ((get-text-property 0 :selected candidate)
         (seq-filter
          (lambda (e)
-           (not (string= e (oref concept id))))
+           ;; Use id in case entry not found
+           (not (string= e id)))
          selection))
        (t
         (cons (oref concept id) selection))))))
 
+(defun org-ilm--concept-set (id on-select &optional on-success)
+  (let* ((collection (org-ilm--org-with-point-at id
+                       (car (org-ilm--collection-file
+                             (org-ilm--buffer-file-name)))))
+         (new-concept
+          (catch 'new-concept
+            (while t
+              (let ((selection (org-ilm--concept-edit-selection
+                                :collection collection
+                                :this id
+                                :throw-new t)))
+                (funcall on-select selection))))))
+    (when new-concept
+      (org-ilm--import-concept-transient
+       (make-org-ilm-concept-import
+        :collection collection
+        :title new-concept
+        :on-success on-success)))))
 
 ;;;; Commands
 
@@ -298,7 +323,7 @@ With THROW-NEW, user is able to input a new name, which will then be
              (ilm-type (org-ilm--element-type)))
         (cond
          (ilm-type
-          (call-interactively #'org-ilm-concept-add))
+          (call-interactively #'org-ilm-concept-set))
          ((and at-heading-p (null ilm-type))
           (call-interactively #'org-ilm-concept-into))
          (t (call-interactively #'org-ilm-concept-new))))
@@ -310,8 +335,6 @@ With THROW-NEW, user is able to input a new name, which will then be
   (cond
    ((not (and (eq major-mode 'org-mode) (org-at-heading-p)))
     (user-error "Point not on a headline!"))
-   ((org-get-todo-state)
-    (user-error "Headline already has a TODO state!"))
    (t
     (org-entry-put nil org-ilm-property-type "concept")
     (org-id-get-create)
@@ -320,57 +343,28 @@ With THROW-NEW, user is able to input a new name, which will then be
 (defun org-ilm-concept-set ()
   "Add or remove concepts from the CONCEPTS property."
   (interactive)
-  (-> (catch 'new-concept
-        (while t
-          (let ((selection (org-ilm--concept-edit-selection
-                            :collection (org-ilm--collection-from-context)
-                            :this (org-id-get)
-                            :throw-new t)))
-            (if selection
-                (org-entry-put nil "CONCEPTS+"
-                               (org-ilm--concept-property-prepare selection))
-              (org-entry-delete nil "CONCEPTS+")))))
-      org-ilm-concept-new))
-
-(defun org-ilm-concept-add (&optional concept-entry)
-  "Add concept to CONCEPTS property for element at point."
-  (interactive)
-  (let* ((org-id (org-id-get))
-         (concepts-str (org-entry-get nil "CONCEPTS"))
-         (cur-concepts (mapcar #'car (org-ilm--concept-parse-property nil 'inherit)))
-         (concept-entry
-          (or concept-entry
-              (org-ilm--concept-select-entry
-               nil "Add concept: " t
-               (lambda (entry) ;; predicate
-                 (not (member (org-mem-entry-id entry) cur-concepts))))))
-         concept-id)
-
-    (if (null concept-entry)
-        (org-ilm-concept-new
-         nil
-         :on-success
-         (lambda (id &rest _)
-           (org-ilm--org-with-point-at org-id
-             (org-ilm-concept-add (org-mem-entry-by-id id)))))
-      (setq concept-id (org-mem-entry-id concept-entry))
-      (cond
-       ((string= (org-id-get) concept-id)
-        (user-error "Cannot add concept to itself"))
-       ((member concept-id cur-concepts)
-        ;; TODO offer option to remove
-        (user-error "Concept already added"))
-       (t
-        (let* ((concept-desc (org-ilm--org-mem-title-full concept-entry))
-               (concept-link (org-link-make-string
-                              (concat "id:" concept-id) concept-desc)))
-          (org-entry-put nil "CONCEPTS+"
-                         (concat concepts-str " " concept-link))
-          (save-buffer)))))))
+  (org-ilm--concept-set
+   (org-id-get)
+   (lambda (selection)
+     (if selection
+         (org-entry-put nil "CONCEPTS+"
+                        (org-ilm--concept-property-prepare selection))
+       (org-entry-delete nil "CONCEPTS+"))
+     (save-buffer)
+     (org-ilm--org-mem-ensure))
+   (lambda (new-concept-import)
+     (let ((concepts (cons (oref new-concept-import id)
+                           (mapcar #'car (org-ilm--concept-parse-property)))))
+       (org-entry-put nil "CONCEPTS+"
+                      (org-ilm--concept-property-prepare concepts))
+       (save-buffer)
+       (org-ilm--org-mem-ensure)
+       (org-ilm-concept-set)))))
 
 ;;;; Transient
 
-(defun org-ilm-concepts ()
+(defun org-ilm-concept-menu ()
+  "Menu for concepts."
   (interactive)
   (org-ilm--concept-transient))
 
@@ -433,27 +427,19 @@ outline, and/or property concept."
    ]
 
   [
-   ("a" "Add"
-    (lambda ()
-      (interactive)
-      ;; TODO This leads to error when creating a new concept from within
-      ;; (org-ilm-concepts-add), happens when capture buffer opens.
-      (let ((id (plist-get (transient-scope) :id)))
-        (org-ilm--org-with-point-at id
-          (org-ilm-concept-add)
-          (org-ilm--org-mem-ensure)))
-      (org-ilm--concept-transient-rebuild-scope))
-    :transient t
-    )
-   ("r" "Remove"
+   ("RET" "Add or remove"
     (lambda ()
       (interactive)
       (let ((id (plist-get (transient-scope) :id)))
-        (org-ilm--org-with-point-at id
-          (org-ilm-concept-remove)
-          (org-ilm--org-mem-ensure)))
-      (org-ilm--concept-transient-rebuild-scope))
-    :transient t
+        (condition-case err
+            (org-ilm--org-with-point-at id
+              (org-ilm-concept-set))
+          (quit
+           (message "REBUILD")
+           (org-ilm--org-mem-ensure)
+           (org-ilm--concept-transient-rebuild-scope)))))
+    ;; :transient transient--do-stack
+    :transient transient--do-stay
     )
    ]
   
@@ -461,7 +447,12 @@ outline, and/or property concept."
   (transient-setup
    'org-ilm--concept-transient nil nil
    :scope (org-ilm--concept-transient-data
-           (or (-some-> (transient-scope) (oref id)) (org-id-get)))))
+           (cond-let*
+             ([scope (transient-scope)]
+              [id (ignore-errors (oref scope id))]
+              id)
+             (t
+              (org-id-get))))))
   
 ;;;; Parsing
 
@@ -482,102 +473,103 @@ parents, which is defined differently for concepts and extracts/cards:
 - Others: First outline parent + property links of itself or inherited from
           _non-concept_ ancestors only"
   (unless id (setq id (org-id-get)))
-  (let* ((entry (org-mem-entry-by-id id))
-         (ancestry (org-ilm--org-mem-ancestry-ids entry))
-         (is-concept (eq (org-ilm--element-type entry) 'concept))
-         (property-concepts-str "")
-         outline-parent-concept
-         concept-ids)
+  (when-let ((entry (org-mem-entry-by-id id)))
+    (let* ((ancestry (org-ilm--org-mem-ancestry-ids entry))
+           (is-concept (eq (org-ilm--element-type entry) 'concept))
+           (property-concepts-str "")
+           outline-parent-concept
+           concept-ids)
 
-    ;; Check for ancestor concept headline in outline hierarchy. As we explore
-    ;; up the hierarchy, store linked concepts of extracts.
-    (cl-block nil
-      (dolist (ancestor (org-mem-entry-crumbs entry))
-        (let* ((ancestor-id (nth 4 ancestor))
-               (is-self (string= ancestor-id id))
-               (ancestor-entry (org-mem-entry-by-id ancestor-id))
-               (ancestor-state (when ancestor-entry
-                                 (org-mem-entry-todo-state ancestor-entry)))
-               (ancestor-type (when ancestor-entry
-                                (org-ilm--element-type ancestor-entry))))
-          (cond
-           ;; Headline is self or incremental ancestor, store linked concepts
-           ((or is-self
-                (and (not is-concept) ; Concept never inherit!
-                     (or (eq ancestor-type 'material)
-                         (string= ancestor-state "DONE"))))
-            (when-let ((prop (org-mem-entry-property "CONCEPTS+" ancestor-entry)))
-              (setq property-concepts-str
-                    (concat property-concepts-str " " prop))))
-           
-           ;; Headline is concept, store as outline parent concept
-           ((eq ancestor-type 'concept)
-            (cl-pushnew ancestor-id concept-ids :test #'equal)
-            (unless outline-parent-concept
-              (setq outline-parent-concept ancestor-id))
-            (unless all-ancestors (cl-return)))))))
+      ;; Check for ancestor concept headline in outline hierarchy. As we explore
+      ;; up the hierarchy, store linked concepts of extracts.
+      (cl-block nil
+        (dolist (ancestor (org-mem-entry-crumbs entry))
+          (let* ((ancestor-id (nth 4 ancestor))
+                 (is-self (string= ancestor-id id))
+                 (ancestor-entry (org-mem-entry-by-id ancestor-id))
+                 (ancestor-state (when ancestor-entry
+                                   (org-mem-entry-todo-state ancestor-entry)))
+                 (ancestor-type (when ancestor-entry
+                                  (org-ilm--element-type ancestor-entry))))
+            (cond
+             ;; Headline is self or incremental ancestor, store linked concepts
+             ((or is-self
+                  (and (not is-concept) ; Concept never inherit!
+                       (or (eq ancestor-type 'material)
+                           (string= ancestor-state "DONE"))))
+              (when-let ((prop (org-mem-entry-property "CONCEPTS+" ancestor-entry)))
+                (setq property-concepts-str
+                      (concat property-concepts-str " " prop))))
+             
+             ;; Headline is concept, store as outline parent concept
+             ((eq ancestor-type 'concept)
+              (cl-pushnew ancestor-id concept-ids :test #'equal)
+              (unless outline-parent-concept
+                (setq outline-parent-concept ancestor-id))
+              (unless all-ancestors (cl-return)))))))
 
-    ;; Process inherited CONCEPTS property.
+      ;; Process inherited CONCEPTS property.
 
-    ;; This is tricky because linked concepts may themselves link to other
-    ;; concepts, requiring this to be done recursively if we need all
-    ;; concepts. Furthermore test for invalid linking, eg to a descendant or
-    ;; circular links.
-    (let ((link-match-pos 0)
-          property-concept-ids property-concept-ancestors)
-      (while-let ((_ (string-match org-link-any-re property-concepts-str link-match-pos))
-                  (concept-string (match-string 1 property-concepts-str)))
-        (setq link-match-pos (match-end 1))
+      ;; This is tricky because linked concepts may themselves link to other
+      ;; concepts, requiring this to be done recursively if we need all
+      ;; concepts. Furthermore test for invalid linking, eg to a descendant or
+      ;; circular links.
+      (let ((link-match-pos 0)
+            property-concept-ids property-concept-ancestors)
+        (while-let ((_ (string-match org-link-any-re property-concepts-str link-match-pos))
+                    (concept-string (match-string 1 property-concepts-str)))
+          (setq link-match-pos (match-end 1))
 
-        ;; First we gather valid concept-ids as well as their individual
-        ;; ancestries
-        (when-let* ((concept-id (org-ilm--org-id-from-string concept-string))
-                    ;; Skip if linked to itself
-                    (_ (not (string= concept-id id)))
-                    ;; Skip if ancestor of headline
-                    ;; TODO we do this later again as post-processing stop, so
-                    ;; remove?
-                    (_ (not (member concept-id ancestry)))
-                    ;; Should have org id and therefore cached by org-mem
-                    (concept-entry (org-mem-entry-by-id concept-id))
-                    ;; Should be concept todo state
-                    (_ (eq (org-ilm--element-type concept-entry) 'concept))
-                    ;; Skip if is concept is descendant of headline - this
-                    ;; will lead to circular DAG, causing infinite loops, and
-                    ;; doesn't make sense anyway. Add a root string so
-                    ;; concepts with no concept-id parents don't return nil,
-                    ;; terminating the when-let.
-                    (concept-ancestry (org-ilm--org-mem-ancestry-ids concept-entry 'with-root-str))
-                    (_ (not (member id concept-ancestry))))
-          (cl-pushnew concept-id property-concept-ids :test #'equal)
-          (cl-pushnew concept-ancestry property-concept-ancestors)
+          ;; First we gather valid concept-ids as well as their individual
+          ;; ancestries
+          (when-let* ((concept-id (org-ilm--org-id-from-string concept-string))
+                      ;; Skip if linked to itself
+                      (_ (not (string= concept-id id)))
+                      ;; Skip if ancestor of headline
+                      ;; TODO we do this later again as post-processing stop, so
+                      ;; remove?
+                      (_ (not (member concept-id ancestry)))
+                      ;; Should have org id and therefore cached by org-mem
+                      (concept-entry (org-mem-entry-by-id concept-id))
+                      ;; Should be concept todo state
+                      (_ (eq (org-ilm--element-type concept-entry) 'concept))
+                      ;; Skip if is concept is descendant of headline - this
+                      ;; will lead to circular DAG, causing infinite loops, and
+                      ;; doesn't make sense anyway. Add a root string so
+                      ;; concepts with no concept-id parents don't return nil,
+                      ;; terminating the when-let.
+                      (concept-ancestry (org-ilm--org-mem-ancestry-ids concept-entry 'with-root-str))
+                      (_ (not (member id concept-ancestry))))
+            (cl-pushnew concept-id property-concept-ids :test #'equal)
+            (cl-pushnew concept-ancestry property-concept-ancestors)
 
-          ;; Recursively handle case where property derived concepts
-          ;; themselves might link to other concepts in their properties.
-          ;; Note, no need to do this for outline ancestors (previous step),
-          ;; as properties are inherited.
-          (when all-ancestors
-            (dolist (parent-id (org-ilm--concepts-get-parent-concepts concept-id all-ancestors))
-              (cl-pushnew parent-id property-concept-ids :test #'equal)
-              (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-concept-ancestors))))
+            ;; Recursively handle case where property derived concepts
+            ;; themselves might link to other concepts in their properties.
+            ;; Note, no need to do this for outline ancestors (previous step),
+            ;; as properties are inherited.
+            (when all-ancestors
+              (dolist (parent-id (org-ilm--concepts-get-parent-concepts concept-id all-ancestors))
+                (cl-pushnew parent-id property-concept-ids :test #'equal)
+                (cl-pushnew (org-ilm--org-mem-ancestry-ids parent-id) property-concept-ancestors))))
 
-        ;; Filter if concept-id is ancestor of any other concept-id
-        (let ((ancestries (apply #'append property-concept-ancestors)))
-          (dolist (concept-id property-concept-ids)
-            (unless (member concept-id ancestries)
-              (cl-pushnew concept-id concept-ids :test #'equal))))))
+          ;; Filter if concept-id is ancestor of any other concept-id
+          (let ((ancestries (apply #'append property-concept-ancestors)))
+            (dolist (concept-id property-concept-ids)
+              (unless (member concept-id ancestries)
+                (cl-pushnew concept-id concept-ids :test #'equal))))))
 
-    concept-ids))
+      concept-ids)))
 
-(defun org-ilm--concepts-get-with-descendant-concepts (concept)
-  "Retrieve descendant concepts of a headline.
+;; TODO Use `org-mem-entry-children' ?
+(defun org-ilm--concepts-descendants (id collection)
+  "Retrieve descendant concepts of a headline with ID.
 Descendants can be directly in outline or indirectly through property linking."
-  (let ((id (plist-get concept :id)))
-    (seq-filter
-     (lambda (concept)
-       (let ((ancestory (nth 2 (org-ilm--concept-cache-gather (plist-get concept :id)))))
-         (member id ancestory)))
-     (org-ilm--query-concepts))))
+  (seq-filter
+   (lambda (concept-id)
+     (member id (car (org-ilm--concept-cache-gather concept-id))))
+   (org-ilm-query-collection
+    (lambda (c) `(and (property "ID") (property "ILM_TYPE" "concept")))
+    collection nil #'org-id-get)))
 
 (defun org-ilm--concepts-get-with-descendant-concepts--deprecated (concept)
   "DEPRECATED now that we save full ancestor list in cache.
