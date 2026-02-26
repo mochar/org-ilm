@@ -35,7 +35,7 @@
 ;; + Prefer query over custom predicate
 ;; + Use regex preambles to quickly filter candidates
 
-(defun org-ilm-query-collection (query collection &optional hash-table-p)
+(defun org-ilm-query-collection (query collection &optional hash-table-p action)
   "Apply org-ql QUERY on COLLECTION, parse org-ilm data, and return the results.
 With HASH-TABLE-P, place each element in a hash table with ID as key."
   (unless (functionp query)
@@ -54,7 +54,7 @@ With HASH-TABLE-P, place each element in a hash table with ID as key."
           h)
       (org-ql-select files
         query
-        :action #'org-ilm--element-at-point))))
+        :action (or action #'org-ilm--element-at-point)))))
 
 (defun org-ilm-query-buffer (query collection buffer &optional narrow)
   "Apply org-ql QUERY on buffer, parse org-ilm data, and return the results."
@@ -65,22 +65,23 @@ With HASH-TABLE-P, place each element in a hash table with ID as key."
     :action #'org-ilm--element-at-point
     :narrow narrow))
 
-(defun org-ilm--query-concepts (&optional collection)
+(defun org-ilm--query-concepts (collection)
   "Return list of concepts from COLLECTION.
 
 TODO parse-headline pass arg to not sample priority to prevent recusrive concept search?"
-  (let ((collection (or collection (plist-get org-ilm-queue :collection))))
-    (cl-assert collection)
-    (org-ilm-query-collection #'org-ilm--queries-concepts collection)))
+  (org-ilm-query-collection #'org-ilm--queries-concepts collection))
 
 (org-ql-defpred ilm-element (&optional collection types)
   ""
-  :normalizers ((`(ilm-element ,collection ,types)
+  :normalizers (
+                (`(ilm-element ,collection ,types)
+                ;; ((seq ilm-element collection types)
                  `(and
                    (property "ID")
                    (property ,org-ilm-property-collection ,collection :inherit t)
                    (or ,@(cl-loop for type-sym in (or types org-ilm-element-types)
-                                  collect `(property ,org-ilm-property-type ,(symbol-name type-sym)))))))
+                                  collect `(property ,org-ilm-property-type
+                                                     ,(symbol-name type-sym)))))))
   :body (and
          (property "ID")
          (property org-ilm-property-collection collection :inherit t)
@@ -88,11 +89,14 @@ TODO parse-headline pass arg to not sample priority to prevent recusrive concept
                       collect `(property ,org-ilm-property-type ,(symbol-name type))))))
 
 ;; (org-ql--normalize-query `(ilm-element))
-;; (org-ql--normalize-query `(ilm-element "test") ())
+;; (org-ql--normalize-query `(ilm-element "test" nil))
 ;; (org-ql--normalize-query `(ilm-element "test" (material card)))
-  
+
+;; TODO Concepts don't need a ilm-collection property but are ignored by the
+;; query if they dont
 (defun org-ilm--queries-concepts (collection)
-  `(ilm-element ,collection (concept)))
+  ;; `(ilm-element ,collection (concept)))
+  `(and (property "ID")
 
 (defun org-ilm--queries-query-all (collection)
   "Query for org-ql to retrieve all elements."

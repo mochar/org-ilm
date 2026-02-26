@@ -155,7 +155,8 @@ With THROW-NEW, user is able to input a new name, which will then be
   ;; outline and their properties), so its useful to have a name for both of
   ;; them (reference).
   (let ((reference (or this parent))
-        inherited)
+        inherited
+        descendants)
 
     ;; Get collection from reference if not specified explicitely
     (unless collection
@@ -167,16 +168,26 @@ With THROW-NEW, user is able to input a new name, which will then be
       (unless collection
         (error "Could not find COLLECTION of %s" reference)))
 
-    ;; Inherited concepts from either reference or selection
     (when (or reference selection)
+      ;; Inherited concepts are redundant 
       (setq inherited
             (seq-difference
-             (apply #'seq-concatenate 'list
+             (apply #'append
                     (mapcar 
                      (lambda (id)
                        (car (org-ilm--concept-cache-gather id)))
                      (append (ensure-list reference) selection)))
-             selection)))
+             selection))
+
+      ;; Descendants should be omited as they can lead to circular DAGs
+      (setq descendants
+            (delete-dups
+             (apply #'append
+                    (mapcar
+                     (lambda (id)
+                       (org-ilm--concepts-descendants id collection))
+                     (append (ensure-list reference) selection))))))
+    
     
     (let* ((choice (consult--multi
                     (list
@@ -196,7 +207,7 @@ With THROW-NEW, user is able to input a new name, which will then be
                      (list
                       :name "Inherited"
                       :narrow ?i
-                      :face '(:inherit Info-quoted :strike-through t)
+                      :face '(:inherit Info-quoted)
                       :hidden t
                       :items
                       (mapcar
@@ -206,9 +217,24 @@ With THROW-NEW, user is able to input a new name, which will then be
                             (org-ilm--org-mem-title-full entry)
                             :entry entry :inherited t)))
                        inherited))
+                     ;; Descendant concepts, hidden by default, and unselectable
+                     (list
+                      :name "Descendant"
+                      :narrow ?d
+                      :face '(:inherit Info-quoted :strike-through t)
+                      :hidden t
+                      :items
+                      (mapcar
+                       (lambda (id)
+                         (let ((entry (org-mem-entry-by-id id)))
+                           (propertize
+                            (org-ilm--org-mem-title-full entry)
+                            :entry entry :descendant t)))
+                       descendants))
                      ;; The concepts that can be added to the selection must not
-                     ;; be in the selection or inherited concepts, cannot be THIS
-                     ;; or PARENT, and cannot be children of THIS.
+                     ;; be in the selection, inherited, or descendant concepts,
+                     ;; cannot be THIS or PARENT, and cannot be children of
+                     ;; THIS.
                      (list
                       :name "Add"
                       :narrow ?a
@@ -219,6 +245,7 @@ With THROW-NEW, user is able to input a new name, which will then be
                            (when (and (eq 'concept (org-ilm--element-type entry))
                                       (not (member id selection))
                                       (not (member id inherited))
+                                      (not (member id descendants))
                                       (if reference
                                           (and
                                            (not (string= reference id))
@@ -242,6 +269,9 @@ With THROW-NEW, user is able to input a new name, which will then be
        ((not concept)
         (when throw-new
           (throw 'new-concept candidate))
+        selection)
+       ((get-text-property 0 :descendant candidate)
+        (message "Cannot add a descendant concept")
         selection)
        ((get-text-property 0 :inherited candidate)
         ;; I think we should allow to add inherited if the user wants to, there
