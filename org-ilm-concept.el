@@ -294,7 +294,8 @@ With THROW-NEW, user is able to input a new name, which will then be
        (t
         (cons (oref concept id) selection))))))
 
-(defun org-ilm--concept-set (id on-select &optional on-success)
+(defun org-ilm--concept-set (id &optional on-success)
+  "Add or remove concepts from the CONCEPTS property of element with ID."
   (let* ((collection (org-ilm--org-with-point-at id
                        (car (org-ilm--collection-file
                              (org-ilm--buffer-file-name)))))
@@ -305,13 +306,28 @@ With THROW-NEW, user is able to input a new name, which will then be
                                 :collection collection
                                 :this id
                                 :throw-new t)))
-                (funcall on-select selection))))))
+                (org-ilm--org-with-point-at id
+                  (if selection
+                      (org-entry-put nil "CONCEPTS+"
+                                     (org-ilm--concept-property-prepare selection))
+                    (org-entry-delete nil "CONCEPTS+"))
+                  (save-buffer)
+                  (org-ilm--org-mem-ensure)))))))
     (when new-concept
       (org-ilm--import-concept-transient
        (make-org-ilm-concept-import
         :collection collection
         :title new-concept
-        :on-success on-success)))))
+        :on-success
+        (lambda (new-concept-import)
+          (org-ilm--org-with-point-at id
+            (let ((concepts (cons (oref new-concept-import id)
+                                  (mapcar #'car (org-ilm--concept-parse-property)))))
+              (org-entry-put nil "CONCEPTS+"
+                             (org-ilm--concept-property-prepare concepts))
+              (save-buffer)
+              (org-ilm--org-mem-ensure)
+              (org-ilm-concept-set)))))))))
 
 ;;;; Commands
 
@@ -343,23 +359,7 @@ With THROW-NEW, user is able to input a new name, which will then be
 (defun org-ilm-concept-set ()
   "Add or remove concepts from the CONCEPTS property."
   (interactive)
-  (org-ilm--concept-set
-   (org-id-get)
-   (lambda (selection)
-     (if selection
-         (org-entry-put nil "CONCEPTS+"
-                        (org-ilm--concept-property-prepare selection))
-       (org-entry-delete nil "CONCEPTS+"))
-     (save-buffer)
-     (org-ilm--org-mem-ensure))
-   (lambda (new-concept-import)
-     (let ((concepts (cons (oref new-concept-import id)
-                           (mapcar #'car (org-ilm--concept-parse-property)))))
-       (org-entry-put nil "CONCEPTS+"
-                      (org-ilm--concept-property-prepare concepts))
-       (save-buffer)
-       (org-ilm--org-mem-ensure)
-       (org-ilm-concept-set)))))
+  (org-ilm--concept-set (org-id-get)))
 
 ;;;; Transient
 
@@ -432,8 +432,7 @@ outline, and/or property concept."
       (interactive)
       (let ((id (plist-get (transient-scope) :id)))
         (condition-case err
-            (org-ilm--org-with-point-at id
-              (org-ilm-concept-set))
+            (org-ilm--concept-set id)
           (quit
            (message "REBUILD")
            (org-ilm--org-mem-ensure)
