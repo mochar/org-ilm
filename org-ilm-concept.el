@@ -20,6 +20,9 @@
 
 ;;;; Variables
 
+(defvar org-ilm-concept-change-hook nil
+  "Hook run when concept of an element or concept changed.")
+
 ;;;; Functions
 
 (defun org-ilm--concept-select-entry (&optional collection prompt blank-ok predicate)
@@ -82,6 +85,17 @@ org-mem-entry object."
       (t
        (error "Invalid parent concept value %s" concept))))
    (ensure-list concepts) " "))
+
+(defun org-ilm--concept-property-set (concepts)
+  "Set the concept property of node at point to match CONCEPTS.
+For value of CONCEPTS, see `org-ilm--concept-property-prepare'."
+  (let ((value (org-ilm--concept-property-prepare concepts)))
+    (if value
+        (org-entry-put nil "CONCEPTS+" value)
+      (org-entry-delete nil "CONCEPTS+"))
+    (save-buffer)
+    (org-ilm--org-mem-ensure)
+    (run-hooks 'org-ilm-concept-change-hook)))
 
 ;; TODO Should this happen through org-ilm-capture?
 ;; Eventhough i classify concept as an ilm type, their behavior currently is too
@@ -301,12 +315,7 @@ With THROW-NEW, user is able to input a new name, which will then be
                                     :this id
                                     :throw-new t)))
                     (org-ilm--org-with-point-at id
-                      (if selection
-                          (org-entry-put nil "CONCEPTS+"
-                                         (org-ilm--concept-property-prepare selection))
-                        (org-entry-delete nil "CONCEPTS+"))
-                      (save-buffer)
-                      (org-ilm--org-mem-ensure)))))
+                      (org-ilm--concept-property-set selection)))))
             (quit 'done))))
     (cond
      ((eq result 'done)
@@ -323,10 +332,7 @@ With THROW-NEW, user is able to input a new name, which will then be
           (org-ilm--org-with-point-at id
             (let ((concepts (cons (oref new-concept-import id)
                                   (mapcar #'car (org-ilm--concept-parse-property)))))
-              (org-entry-put nil "CONCEPTS+"
-                             (org-ilm--concept-property-prepare concepts))
-              (save-buffer)
-              (org-ilm--org-mem-ensure)))
+              (org-ilm--concept-property-set concepts)))
           (org-ilm--concept-set id on-done)
           )))))))
 

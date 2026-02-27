@@ -394,7 +394,7 @@ This does not fill the buffer with the queue elements! For this run
                     (org-ilm--bqueue-set-active-buffer nil)))
                 nil 'local)
 
-      ;; Refresh when queue during changes that effect queue
+      ;; Refresh queue during changes that effect queue
       (add-hook 'org-ilm-review-next-hook
                 #'org-ilm-queue-revert nil t)
       (add-hook 'org-ilm-review-quit-hook
@@ -402,6 +402,7 @@ This does not fill the buffer with the queue elements! For this run
       (add-hook 'org-ilm-bqueue-active-buffer-change-hook
                 #'org-ilm-queue-revert nil t)
       
+      ;; Populate
       (org-ilm--bqueue-buffer-build :buffer buffer :switch-p switch-p)
 
       ;; This doesn't seem to activate when called in `org-ilm--bqueue-buffer-build'
@@ -434,6 +435,31 @@ This does not fill the buffer with the queue elements! For this run
     (goto-char (point-min))
     (when switch-p
       (switch-to-buffer buffer))))
+
+;;;; Update hooks
+
+(defun org-ilm--bqueue-on-element-update (element)
+  "Push element updates to all active queue buffers."
+  (dolist (buf (org-ilm--bqueue-buffers (oref element collection)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((id (oref element id))
+              (elements (oref org-ilm-bqueue elements)))
+          (when (gethash id elements)
+            (puthash id element elements)
+            (vtable-revert-command)))))))
+
+(add-hook 'org-ilm-element-update-hook #'org-ilm--bqueue-on-element-update)
+
+(defun org-ilm--bqueue-on-concept-change ()
+  "Rebuild all active queue buffers when concept changes."
+  (dolist (buf (org-ilm--bqueue-buffers))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (org-ilm--bqueue-rebuild)
+        (vtable-revert-command)))))
+
+(add-hook 'org-ilm-concept-change-hook #'org-ilm--bqueue-on-concept-change)
 
 ;;;; Actions
 

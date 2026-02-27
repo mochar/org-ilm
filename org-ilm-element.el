@@ -41,6 +41,10 @@
 
 ;;;; Variables
 
+(defvar org-ilm-element-update-hook nil
+  "Hook run when an element has been updated.
+Hook is passed the element object.")
+
 (defvar org-ilm-element-delete-hook nil
   "Hook run when an element has been deleted.
 
@@ -485,6 +489,13 @@ COLLECTION specifies in which queue to look at."
 
 ;;;; Transient
 
+(defun org-ilm--element-transient-update-scope ()
+  "Update the transient scope and run element update hook."
+  (org-ilm--org-mem-ensure)
+  (let ((element (org-ilm--element-from-context)))
+    (org-ilm--transient-set-scope element)
+    (run-hook-with-args 'org-ilm-element-update-hook element)))
+
 (transient-define-suffix org-ilm--element-transient-schedule ()
   :key "s"
   :description
@@ -500,8 +511,7 @@ COLLECTION specifies in which queue to look at."
   :inapt-if (lambda () (oref (transient-scope) done))
   (interactive)
   (call-interactively #'org-ilm-element-set-schedule)
-  (org-ilm--org-mem-ensure)
-  (org-ilm--transient-set-scope (org-ilm--element-from-context)))
+  (org-ilm--element-transient-update-scope))
 
 (transient-define-suffix org-ilm--element-transient-priority ()
   :key "p"
@@ -521,7 +531,7 @@ COLLECTION specifies in which queue to look at."
   ;; :inapt-if (lambda () (org-ilm-element--done (transient-scope)))
   (interactive)
   (call-interactively #'org-ilm-element-set-priority)
-  (org-ilm--transient-set-scope (org-ilm--element-from-context)))
+  (org-ilm--element-transient-update-scope))
 
 (transient-define-suffix org-ilm--element-transient-collection ()
   :key "c"
@@ -551,7 +561,7 @@ COLLECTION specifies in which queue to look at."
   (org-ilm--concept-set
    (oref (transient-scope) id)
    (lambda ()
-     (org-ilm--transient-set-scope (org-ilm--element-from-context))
+     (org-ilm--element-transient-update-scope)
      (unless (eq transient-current-command 'org-ilm--element-transient)
        (org-ilm--element-transient (org-ilm--element-from-context))))))
 
@@ -744,8 +754,7 @@ COLLECTION specifies in which queue to look at."
         (org-ilm--org-with-point-at (oref element id)
           (org-entry-put nil org-ilm-property-media+ range)
           (save-buffer)
-          (org-ilm--org-mem-ensure)
-          (org-ilm--transient-set-scope (org-ilm--element-at-point)))))
+          (org-ilm--element-transient-update-scope))))
     :transient transient--do-call)
    ("s" "Set"
     (lambda ()
