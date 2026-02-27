@@ -20,13 +20,6 @@
 
 ;;;; Variables
 
-(defvar-keymap org-ilm-concept-map
-  :doc "Keymap for concept actions."
-  "a" #'org-ilm-concept-add
-  "r" #'org-ilm-concept-remove
-  "." #'org-ilm-concept-into
-  "n" #'org-ilm-concept-new)
-
 ;;;; Functions
 
 (defun org-ilm--concept-select-entry (&optional collection prompt blank-ok predicate)
@@ -79,7 +72,7 @@ org-mem-entry object."
         concept
         (or (-some-> (org-mem-entry-by-id concept)
               org-ilm--org-mem-title-full)
-            " ")))
+            "???")))
       ((consp concept)
        (format "[[id:%s][%s]]" (car concept) (cdr concept)))
       ((org-mem-entry-p concept)
@@ -294,30 +287,37 @@ With THROW-NEW, user is able to input a new name, which will then be
        (t
         (cons (oref concept id) selection))))))
 
-(defun org-ilm--concept-set (id &optional on-success)
+(defun org-ilm--concept-set (id &optional on-done)
   "Add or remove concepts from the CONCEPTS property of element with ID."
   (let* ((collection (org-ilm--org-with-point-at id
                        (car (org-ilm--collection-file
                              (org-ilm--buffer-file-name)))))
-         (new-concept
-          (catch 'new-concept
-            (while t
-              (let ((selection (org-ilm--concept-edit-selection
-                                :collection collection
-                                :this id
-                                :throw-new t)))
-                (org-ilm--org-with-point-at id
-                  (if selection
-                      (org-entry-put nil "CONCEPTS+"
-                                     (org-ilm--concept-property-prepare selection))
-                    (org-entry-delete nil "CONCEPTS+"))
-                  (save-buffer)
-                  (org-ilm--org-mem-ensure)))))))
-    (when new-concept
+         (result
+          (condition-case nil
+              (catch 'new-concept
+                (while t
+                  (let ((selection (org-ilm--concept-edit-selection
+                                    :collection collection
+                                    :this id
+                                    :throw-new t)))
+                    (org-ilm--org-with-point-at id
+                      (if selection
+                          (org-entry-put nil "CONCEPTS+"
+                                         (org-ilm--concept-property-prepare selection))
+                        (org-entry-delete nil "CONCEPTS+"))
+                      (save-buffer)
+                      (org-ilm--org-mem-ensure)))))
+            (quit 'done))))
+    (cond
+     ((eq result 'done)
+      (if on-done
+          (funcall on-done)
+        (signal 'quit nil)))
+     (result ; new-concept
       (org-ilm--import-concept-transient
        (make-org-ilm-concept-import
         :collection collection
-        :title new-concept
+        :title result
         :on-success
         (lambda (new-concept-import)
           (org-ilm--org-with-point-at id
@@ -326,8 +326,9 @@ With THROW-NEW, user is able to input a new name, which will then be
               (org-entry-put nil "CONCEPTS+"
                              (org-ilm--concept-property-prepare concepts))
               (save-buffer)
-              (org-ilm--org-mem-ensure)
-              (org-ilm-concept-set)))))))))
+              (org-ilm--org-mem-ensure)))
+          (org-ilm--concept-set id on-done)
+          )))))))
 
 ;;;; Commands
 
@@ -359,7 +360,9 @@ With THROW-NEW, user is able to input a new name, which will then be
 (defun org-ilm-concept-set ()
   "Add or remove concepts from the CONCEPTS property."
   (interactive)
-  (org-ilm--concept-set (org-id-get)))
+  (if-let ((id (ignore-errors (and (eq major-mode 'org-mode) (org-id-get)))))
+      (org-ilm--concept-set id)
+    (user-error "Cannot set concepts here")))
 
 ;;;; Transient
 
@@ -427,17 +430,17 @@ outline, and/or property concept."
    ]
 
   [
-   ("RET" "Add or remove"
+   ("n" "Concepts"
     (lambda ()
       (interactive)
       (let ((id (plist-get (transient-scope) :id)))
-        (condition-case err
-            (org-ilm--concept-set id)
-          (quit
-           (message "REBUILD")
-           (org-ilm--org-mem-ensure)
-           (org-ilm--concept-transient-rebuild-scope)))))
-    ;; :transient transient--do-stack
+        (org-ilm--concept-set
+         id
+         (lambda ()
+           (org-ilm--concept-transient-rebuild-scope)
+           (unless (eq transient-current-command 'org-ilm--concept-transient)
+             (org-ilm--concept-transient))
+           ))))
     :transient transient--do-stay
     )
    ]

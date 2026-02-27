@@ -537,6 +537,24 @@ COLLECTION specifies in which queue to look at."
   (funcall-interactively #'org-ilm-element-set-collection
                          (transient-scope)))
 
+(transient-define-suffix org-ilm--element-transient-concepts ()
+  :key "n"
+  :transient 'transient--do-stay
+  :description
+  (lambda ()
+    (concat
+     "Concepts "
+     (unless (oref (transient-scope) concepts)
+       (propertize "nil" 'face 'transient-inactive-value))))
+  
+  (interactive)
+  (org-ilm--concept-set
+   (oref (transient-scope) id)
+   (lambda ()
+     (org-ilm--transient-set-scope (org-ilm--element-from-context))
+     (unless (eq transient-current-command 'org-ilm--element-transient)
+       (org-ilm--element-transient (org-ilm--element-from-context))))))
+
 (transient-define-prefix org-ilm--element-transient (element)
   :refresh-suffixes t
   
@@ -546,14 +564,38 @@ COLLECTION specifies in which queue to look at."
    (:info*
     (lambda ()
       (propertize (oref (transient-scope) title) 'face 'italic)))
-   (:info "")
+   ]
+  
+  [
+   :setup-children
+   (lambda (children)
+     (append
+      children
+      (pcase-let ((`(,concepts . ,n-direct) (oref (transient-scope) concepts))) 
+        (seq-map
+         (lambda (concept-id)
+           (let* ((entry (org-mem-entry-by-id concept-id))
+                  (title (org-ilm--org-mem-title-full entry))
+                  (keymap (make-sparse-keymap)))
+             ;; TODO Clicking doesnt work
+             (define-key keymap [mouse-1]
+                         (lambda ()
+                           (interactive)
+                           (org-ilm--org-goto-id concept-id)))
+             (transient-parse-suffix
+              'org-ilm--element-transient
+              (list :info
+                    (propertize title 'face 'transient-value
+                                'mouse-face 'highlight
+                                'keymap keymap)))))
+         (last concepts n-direct)))))
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
    (org-ilm--element-transient-collection)
+   (org-ilm--element-transient-concepts)
    ]
 
   [
-   ("n" "Concepts..." org-ilm--concept-transient :transient t)
    ("a" "Attachment..." org-ilm--element-attachment-transient :transient t)
    ("q" "Queue..." org-ilm--element-queue-transient :transient t)
    ("m" "Media..." org-ilm--element-media-transient :transient t
@@ -600,14 +642,18 @@ COLLECTION specifies in which queue to look at."
 (defun org-ilm-element-menu (&optional arg id)
   "Open menu to apply an action on an element."
   (interactive "P")
-  (let ((element (if id (org-ilm--element-by-id id) (org-ilm--element-from-context))))
-    (cond
-     ((null element)
-      (user-error "No ilm element!"))
-     ((not (member (oref element type) '(card material)))
-      (user-error "Element actions not available for type %s" (oref element type)))
-     (t
-      (org-ilm--element-transient element)))))
+  (cond-let*
+    ([element (if id (org-ilm--element-by-id id) (org-ilm--element-from-context))]
+     (if (member (oref element type) '(card material))
+         (org-ilm--element-transient element)
+       (user-error "Element actions not available for type %s" (oref element type))))
+    ([entry (and (eq major-mode 'org-mode)
+                 (if id (org-mem-entry-by-id id) (org-mem-entry-at-point)))]
+     [_ (eq 'concept (org-ilm--element-type entry))]
+     ;; TODO This only works on concept at point
+     (org-ilm-concept-menu))
+    (t
+     (user-error "Ilm element not found"))))
 
 ;;;;; Attachment
 

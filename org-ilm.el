@@ -85,7 +85,7 @@
   "t" #'org-ilm-attachment-transclude
   "." #'org-ilm-point
   ";" org-ilm-context-map
-  "n" org-ilm-concept-map
+  "n" #'org-ilm-concept-set
   "g" org-ilm-registry-prefix-map
   "k" #'org-ilm-element-delete
   "r" #'org-ilm-review
