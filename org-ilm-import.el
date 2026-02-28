@@ -131,15 +131,7 @@ See `org-ilm--citation-get-zotero'"))
         (oset import bibtex (org-ilm--format-bibtex-entry bib-alist cite-key))
         (setf (plist-get (oref import props) :ROAM_REFS) (concat "@" cite-key))))))
 
-;;;; Main suffixes
-
-(transient-define-infix org-ilm--import-suffix-title ()
-  :class org-ilm-transient-cons-option
-  :key "t"
-  :description "Title"
-  :argument 'title
-  :prompt "Title: "
-  :always-read t :allow-empty nil :transient t)
+;;;; Location suffixes
 
 (transient-define-infix org-ilm--import-suffix-collection ()
   :class 'org-ilm-transient-cons-option
@@ -225,6 +217,50 @@ See `org-ilm--citation-get-zotero'"))
         (with-current-buffer bqueue-buf
           (org-ilm--transient-set-target-value "c" (oref org-ilm-bqueue collection))))
       bqueue-buf)))
+
+(transient-define-group org-ilm--import-group-location
+  [
+   (org-ilm--import-suffix-collection)
+   (org-ilm--import-suffix-location)
+   (:info
+    (lambda ()
+      (map-let (location collection) (org-ilm--transient-parse)
+        (pcase location
+          ('default
+           (let* ((el-type (org-ilm-import--type (transient-scope)))
+                  (target (org-ilm--collection-property
+                           collection
+                           (if (eq el-type 'concept) :concept :import))))
+             (concat
+              (propertize (format "%s" target) 'face 'Info-quoted))))
+          ('child
+           (let ((parent (oref (transient-scope) parent)))
+             (propertize (org-ilm-element--title parent) 'face 'Info-quoted)))
+          ('concept
+           (let ((target (oref (transient-scope) target)))
+             (propertize
+              (if target
+                  (org-ilm--org-mem-title-full
+                   (org-mem-entry-by-id (nth 1 target)))
+                "nil")
+              'face 'Info-quoted)))
+          ('custom
+           (let ((target (oref (transient-scope) target)))
+             (concat
+              (propertize (format "%s" target) 'face 'Info-quoted))))))))
+   (org-ilm--import-suffix-queue
+    :if-not (lambda () (eq (oref (transient-scope) type) 'concept)))
+   ])
+
+;;;; Element suffixes
+
+(transient-define-infix org-ilm--import-suffix-title ()
+  :class org-ilm-transient-cons-option
+  :key "t"
+  :description "Title"
+  :argument 'title
+  :prompt "Title: "
+  :always-read t :allow-empty nil :transient t)
 
 (transient-define-suffix org-ilm--import-suffix-concepts ()
   :transient 'transient--do-stack
@@ -317,41 +353,7 @@ See `org-ilm--citation-get-zotero'"))
                       1))
            (sched (org-ilm--initial-schedule-from-priority (cdr priority))))
       (org-ilm--transient-set-target-value "s" (ts-format "%Y-%m-%d" sched))
-      priority)))
-
-(transient-define-group org-ilm--import-group-location
-  [
-   (org-ilm--import-suffix-collection)
-   (org-ilm--import-suffix-location)
-   (:info
-    (lambda ()
-      (map-let (location collection) (org-ilm--transient-parse)
-        (pcase location
-          ('default
-           (let* ((el-type (org-ilm-import--type (transient-scope)))
-                  (target (org-ilm--collection-property
-                           collection
-                           (if (eq el-type 'concept) :concept :import))))
-             (concat
-              (propertize (format "%s" target) 'face 'Info-quoted))))
-          ('child
-           (let ((parent (oref (transient-scope) parent)))
-             (propertize (org-ilm-element--title parent) 'face 'Info-quoted)))
-          ('concept
-           (let ((target (oref (transient-scope) target)))
-             (propertize
-              (if target
-                  (org-ilm--org-mem-title-full
-                   (org-mem-entry-by-id (nth 1 target)))
-                "nil")
-              'face 'Info-quoted)))
-          ('custom
-           (let ((target (oref (transient-scope) target)))
-             (concat
-              (propertize (format "%s" target) 'face 'Info-quoted))))))))
-   (org-ilm--import-suffix-queue
-    :if-not (lambda () (eq (oref (transient-scope) type) 'concept)))
-   ])   
+      priority)))   
 
 (transient-define-group org-ilm--import-group-element
   [
@@ -363,8 +365,9 @@ See `org-ilm--citation-get-zotero'"))
   )
   
 (transient-define-group org-ilm--import-group-main
+  [:class transient-subgroups
    org-ilm--import-group-location
-   org-ilm--import-group-element)
+   org-ilm--import-group-element])
 
 
 ;;;; Citation suffixes
@@ -485,9 +488,11 @@ See `org-ilm--citation-get-zotero'"))
   :refresh-suffixes t
   
   ["Import"
-   org-ilm--import-group-main
+   :class transient-subgroups
+   org-ilm--import-group-location
+   org-ilm--import-group-element
    ]
-  
+
   ["Actions"
    (org-ilm--import-suffix-import)
    ]
@@ -659,9 +664,12 @@ by default will be the child of this parent element."
   :refresh-suffixes t
   
   ["Import file"
-   org-ilm--import-group-main
+   :class transient-subgroups
+   org-ilm--import-group-location
+   org-ilm--import-group-element
    ]
-  
+
+
   ["File"
    ("a" "Attachment method"
     :cons 'attach-method
@@ -763,7 +771,9 @@ by default will be the child of this parent element."
   :refresh-suffixes t
   
   ["Import media"
-   org-ilm--import-group-main
+   :class transient-subgroups
+   org-ilm--import-group-location
+   org-ilm--import-group-element
    ]
 
   org-ilm--convert-media-transient-group
@@ -874,7 +884,9 @@ by default will be the child of this parent element."
   :refresh-suffixes t
   
   ["Import buffer"
-   org-ilm--import-group-main
+   :class transient-subgroups
+   org-ilm--import-group-location
+   org-ilm--import-group-element
    ]
 
   ["Buffer"
@@ -973,7 +985,9 @@ by default will be the child of this parent element."
   :refresh-suffixes t
   
   ["Import webpage"
-   org-ilm--import-group-main
+   :class transient-subgroups
+   org-ilm--import-group-location
+   org-ilm--import-group-element
    ]
 
   org-ilm--convert-webpage-transient-group
