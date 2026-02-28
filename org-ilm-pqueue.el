@@ -125,7 +125,8 @@ With POSITION, set the new position in the queue, or insert there if not exists.
          (bqueue (make-org-ilm-bqueue
                  :name "Priority queue"
                  :collection collection
-                 :type 'pqueue))
+                 :type 'pqueue
+                 :key :priority))
          (query (or query #'org-ilm--queries-query-active))
          (element-map (org-ilm-query-collection query collection 'hash-table-p)))
 

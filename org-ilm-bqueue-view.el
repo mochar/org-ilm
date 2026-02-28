@@ -260,10 +260,8 @@
                      (rank (car priority))
                      (quantile (cdr priority)))
           (org-ilm--bqueue-vtable-format-cell
-           (if missing
-               "NA"
-             (propertize (format "%.2f" (* 100 quantile))
-                         'face 'shadow))
+           (propertize (format "%.2f" (* 100 quantile))
+                       'face 'shadow)
            marked missing))))
      (:name
       "Type"
@@ -374,6 +372,7 @@
            (pcase (vtable-column vtable column)
              ("Index" (list marked rank t))
              ("Title" (list marked id t))
+             ("Priority" (list marked priority t))
              (_ (list marked nil t))))
           (t ; Placeholder
            (pcase (vtable-column vtable column)
@@ -613,14 +612,22 @@ DAYS can be specified as numeric prefix arg."
      ((and previous-p (= current-rank 0))
       (user-error "Already at first element"))
      (t
-      (let* (;; TODO Handle queue being reversed
-             (reversed (org-ilm-bqueue--reversed org-ilm-bqueue))
-             (start-rank (if previous-p 0 (1+ current-rank)))
-             (end-rank (if previous-p current-rank nil)))
+      (let* ((reversed (org-ilm-bqueue--reversed org-ilm-bqueue))
+             (size (ost-size org-ilm-bqueue))
+             ;; Map the current visual rank back to its original tree rank
+             (tree-rank (if reversed (- size 1 current-rank) current-rank))
+             ;; Determine traversal direction. If reversed, next visually is
+             ;; previous in the tree.
+             (traverse-reversed (if previous-p (not reversed) reversed))
+             ;; Setup the boundary variables in tree rank coordinates
+             (start-rank (if traverse-reversed 0 (1+ tree-rank)))
+             (end-rank (if traverse-reversed tree-rank nil))
+             )
         (catch 'found
-          (ost-do-in-order (node rank org-ilm-bqueue previous-p start-rank end-rank)
+          (ost-do-in-order (node rank org-ilm-bqueue traverse-reversed start-rank end-rank)
             (when (member (ost-node-id node) org-ilm--bqueue-marked-objects)
-              (let ((page (org-ilm-bqueue--pos-page org-ilm-bqueue rank)))
+              (let* ((visual-rank (if reversed (- size 1 rank) rank))
+                     (page (org-ilm-bqueue--pos-page org-ilm-bqueue visual-rank)))
                 (unless (= page (oref org-ilm-bqueue page))
                   (setf (org-ilm-bqueue--page org-ilm-bqueue) page)
                   (org-ilm-queue-revert)))
@@ -810,26 +817,27 @@ DAYS can be specified as numeric prefix arg."
 
 (transient-define-prefix org-ilm--bqueue-settings-transient (bqueue-buffer)
   :refresh-suffixes t
-  :value
-  (lambda ()
-    (org-ilm--bqueue-with-buffer (transient-scope)
-      (append
-       (pcase (oref org-ilm-bqueue key)
-         ("prank" '("--key=priority"))
-         ("sched" '("--key=schedule")))
-       (when (oref org-ilm-bqueue reversed)
-         '("--reversed"))
-       (when-let ((randomness (oref org-ilm-bqueue randomness)))
-         (list (format "--randomness=%s" (org-ilm--round-float randomness 3))))
-       (when-let ((page-size (oref org-ilm-bqueue page-size)))
-         (list (format "--page-size=%s" page-size)))
-       )))
 
   ["Settings"
-   ("k" "Key" "--key=" :choices ("priority" "schedule") :always-read t :transient t)
-   ("r" "Reversed" "--reversed" :transient t)
-   ("m" "Randomness" "--randomness=" :always-read t :prompt "Randomness: " :transient t)
-   ("p" "Page size" "--page-size="
+   ("k" "Key"
+    :cons 'key
+    :class org-ilm-transient-cons-switches
+    :choices (:priority :scheduled)
+    :always-read t
+    :transient t)
+   ("r" "Reversed"
+    :cons 'reversed
+    :class org-ilm-transient-cons-switch
+    :transient t)
+   ("m" "Randomness"
+    :cons 'randomness
+    :class org-ilm-transient-cons-option
+    :always-read t
+    :prompt "Randomness: "
+    :transient t)
+   ("p" "Page size"
+    :cons 'page-size
+    :class org-ilm-transient-cons-option
     :always-read t
     :transient t
     :prompt "Page size: "
@@ -848,17 +856,12 @@ DAYS can be specified as numeric prefix arg."
    ("RET" "Apply"
     (lambda ()
       (interactive)
-      (let* ((args (transient-args transient-current-command))
-             (reversed (transient-arg-value "--reversed" args))
-             (key (transient-arg-value "--key=" args))
-             (randomness (string-to-number (transient-arg-value "--randomness=" args)))
-             (page-size (-some-> (transient-arg-value "--page-size=" args)
-                          string-to-number)))
+      (map-let (reversed key randomness page-size) (org-ilm--transient-parse)
+        (when page-size (setq page-size (string-to-number page-size)))
+        (when randomness (setq randomness (string-to-number randomness)))
         (org-ilm--bqueue-with-buffer (transient-scope)
           (setf (oref org-ilm-bqueue page-size) page-size)
-          (pcase key
-            ("priority" (org-ilm--bqueue-sort "prank" reversed randomness))
-            ("schedule" (org-ilm--bqueue-sort "sched" reversed randomness)))
+          (when key (org-ilm--bqueue-sort key reversed randomness))
           (org-ilm-queue-revert))))
     ;; :inapt-if-not
     ;; (lambda ()
@@ -867,7 +870,21 @@ DAYS can be specified as numeric prefix arg."
    ]
 
   (interactive)
-  (transient-setup 'org-ilm--bqueue-settings-transient nil nil :scope bqueue-buffer))
+  (transient-setup
+   'org-ilm--bqueue-settings-transient
+   nil nil
+   :scope bqueue-buffer
+   :value
+   (lambda ()
+     (org-ilm--bqueue-with-buffer (transient-scope)
+       `((key . ,(oref org-ilm-bqueue key))
+         (reversed . ,(oref org-ilm-bqueue reversed))
+         (randomness . ,(-some-> (oref org-ilm-bqueue randomness)
+                          (org-ilm--round-float 3)
+                          number-to-string))
+         (page-size . ,(-some-> (oref org-ilm-bqueue page-size)
+                         number-to-string)))))
+   ))
 
 (defun org-ilm-queue-settings ()
   (interactive)

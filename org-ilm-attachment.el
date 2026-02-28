@@ -111,7 +111,7 @@ holding headline is an ilm element."
     ;; First check if attachment is in the process of being generated with a
     ;; conversion tool.
     ([org-id (org-id-get)]
-     [conversion (org-ilm-convert--conversion-by-id org-id)]
+     [conversion (gethash org-id org-ilm-convert--jobs)]
      [state (plist-get conversion :state)]
      [_ (eq state 'busy)]
      (let ((message (pcase state

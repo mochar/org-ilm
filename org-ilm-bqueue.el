@@ -131,22 +131,22 @@ The end index is exclusive to match `ost-map-in-order'."
   "Return the hightes 0-based page index based on the queue- and page size."
   (org-ilm-bqueue--pos-page bqueue (1- (ost-size bqueue))))
 
-(defun org-ilm-bqueue--element-value (bqueue element &optional no-key)
+(defun org-ilm-bqueue--element-value (bqueue element &optional ignore-key)
   "Return the value of ELEMENT by which it is sorted in BQUEUE."
   (cond-let*
     ;; First check the node key in the ost: A custom value might have been set
     ;; for an element even though the queue sort is based on a key.
-    ([_ (not no-key)]
+    ([_ (not ignore-key)]
      [node (ost-tree-node-by-id bqueue (org-ilm-element--id element))]
      [key (ost-node-key node)]
      key)
     ([key (org-ilm-bqueue--key bqueue)]
-     [getter (intern (concat "org-ilm-element--" key))]
-     (cl-assert (functionp getter))
-     (when-let ((value (funcall getter element)))
-       (cl-typecase value
-         (ts (ts-unix value))
-         (t value))))))
+     (pcase key
+       (:priority
+        (car (org-ilm-element--priority element)))
+       (:scheduled
+        (ts-unix (org-ilm-element--sched element)))
+       (_ (error "Unknown key %s" key))))))
 
 (defun org-ilm-bqueue--insert (bqueue element &optional value)
   "Insert ELEMENT into BQUEUE.
@@ -154,7 +154,7 @@ The end index is exclusive to match `ost-map-in-order'."
 VALUE may be passed, which is used to determine the position in the queue.
 If nil, `org-ilm-bqueue--key' will be used to determine the value."
   (let ((id (org-ilm-element--id element))
-        (value (or value (org-ilm-bqueue--element-value bqueue element 'no-key))))
+        (value (or value (org-ilm-bqueue--element-value bqueue element 'ignore-key))))
     (ost-tree-insert bqueue value id)))
 
 ;; TODO Some type of caching so that repeated selects doesnt search tree again
@@ -197,29 +197,62 @@ the queue and shuffling it afterwards. To achieve the latter, call
   (cl-assert (<= 0 randomness 1) nil "Queue shuffle RANDOMNESS must be between 0 and 1.")
   (setf (org-ilm-bqueue--randomness bqueue) randomness)
   (unless (= randomness 0)
-    (let ((ost (org-ilm-queue--as-tree bqueue)))
+    (let ((ost (make-ost-tree)))
+      (ost-do-in-order (node rank bqueue)
+        (let* ((quantile (ost-tree-quantile bqueue rank))
+               ;; New score mixing current rank and noise
+               (new-score (+ (* (- 1.0 randomness) quantile)
+                             (* randomness (org-ilm--random-uniform)))))
+          (ost-tree-insert ost new-score (ost-node-id node))))
       (org-ilm-queue--tree-clear bqueue)
-      (ost-map-in-order
-       (lambda (node rank)
-         (let* ((element (org-ilm--element-by-id (ost-node-id node)))
-                (quantile (ost-tree-quantile ost rank))
-                ;; New score mixing current rank and noise
-                (new-score (+ (* (- 1.0 randomness) quantile)
-                              (* randomness (org-ilm--random-uniform)))))
-           (org-ilm-bqueue--insert bqueue element new-score)))
-       ost))))
+      (setf (ost-tree-nodes bqueue) (ost-tree-nodes ost)
+            (ost-tree-root bqueue) (ost-tree-root ost)))))
 
 (defun org-ilm-bqueue--sort (bqueue key reversed &optional randomness)
   (unless (and (string= (org-ilm-bqueue--key bqueue) key)
                (= (org-ilm-bqueue--randomness bqueue) randomness))
-    (org-ilm-queue--tree-clear bqueue)
-    (setf (org-ilm-bqueue--key bqueue) key)
-    ;; TODO Deal with error when key=nil. Take note of elements where key=nil,
-    ;; and add it them in the end with value max+i so that they show up in
-    ;; bottom of queue view.
-    (dolist (id (hash-table-keys (org-ilm-bqueue--nodes bqueue)))
-      (let ((element (org-ilm--element-by-id id)))
-        (org-ilm-bqueue--insert bqueue element))))
+    (let ((ids (copy-sequence (hash-table-keys (oref bqueue nodes))))
+          missing-ids)
+      (org-ilm-queue--tree-clear bqueue)
+      (setf (org-ilm-bqueue--key bqueue) key)
+      
+      (dolist (id ids)
+        ;; Handle the case where we sort on priority, as that information is
+        ;; available in the priority queue with just an id, so if element is
+        ;; missing we can still sort by priority.
+        (pcase key
+          (:priority
+           (ost-tree-insert
+            bqueue
+            (car
+             (org-ilm--pqueue-priority
+              id nil nil (oref bqueue collection)))
+            id))
+          (_
+           (if-let ((element (org-ilm--element-by-id id)))
+               (org-ilm-bqueue--insert bqueue element)
+             (push id missing-ids)))))
+
+      ;; Process missing elements so they appear at the bottom of the view
+      (when missing-ids
+        (let* ((size (ost-tree-size bqueue))
+               (base-key
+                (if (= size 0)
+                    0.0
+                  (if reversed
+                      ;; If reversed, visual bottom is the START of the tree
+                      ;; (smallest keys)
+                      (ost-node-key (ost-select bqueue 0))
+                    ;; If normal, visual bottom is the END of the tree (largest
+                    ;; keys)
+                    (ost-node-key (ost-select bqueue (1- size)))))))
+          
+          ;; Reverse to maintain their original relative order
+          (dolist (id (nreverse missing-ids))
+            ;; Step the key further outward so they don't clash and stay ordered
+            (setq base-key (if reversed (- base-key 1.0) (+ base-key 1.0)))
+            (ost-tree-insert bqueue base-key id))))))
+
   (setf (org-ilm-bqueue--reversed bqueue) reversed)
   (when randomness (org-ilm-bqueue--shuffle bqueue randomness)))
 
