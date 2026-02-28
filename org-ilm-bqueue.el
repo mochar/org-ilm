@@ -260,7 +260,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
 
 (cl-defun org-ilm--bqueue-create (collection &key elements query name key reversed randomness type)
   "Create a new bqueue object."
-  (setq key (or key "prank")
+  (setq key (or key :priority)
         randomness (or randomness 0))
   (let ((bqueue (make-org-ilm-bqueue
                  :name (or name

@@ -204,7 +204,7 @@ To safely include the children in the migration, call
                                       new-collection)))
                 (if exists-p
                     (org-ilm-queue--move pqueue id new-priority)
-                  (org-ilm-queue--insert pqueue new-priority id)))
+                  (org-ilm-queue--insert pqueue id new-priority)))
               
               ;; If inherited collection property matches new, no need to set
               ;; the property.
@@ -223,7 +223,7 @@ To safely include the children in the migration, call
            ;; happen.
            (when (and current-priority (not done-p))
              (org-ilm-queue--insert
-              (org-ilm--pqueue current-collection) current-priority id))
+              (org-ilm--pqueue current-collection) id current-priority))
            ;; Put back property if it was there when we found it.
            (when property-collection
              (org-entry-put nil org-ilm-property-collection property-collection))
