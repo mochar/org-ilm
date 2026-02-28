@@ -210,31 +210,26 @@
         (setq tree-start (max 0 (- size v-end)))
         (setq tree-end (max 0 (- size v-start))))
 
-      (ost-map-in-order
-       (lambda (node rank)
-         (let* ((display-rank (if reversed (- size 1 rank) rank))
-                (id (ost-node-id node))
-                ;; In the bqueue select, placeholder items are added by giving
-                ;; the rank (integer) as id. We therefore check if the id is a
-                ;; string to make sure it refers to an element id.
-                (is-element (stringp id))
-                ;; Element can be nil when removed without updating ost
-                (element (when is-element (org-ilm--element-by-id id)))
-                ;; TODO If the ost is already sorted by priority, we can save
-                ;; time by reusing display-rank
-                (priority (when is-element
-                            (org-ilm--pqueue-priority
-                             id nil nil collection))))
-           (push (make-org-ilm-bqueue-object
-                  :id (when is-element id)
-                  :rank display-rank
-                  :priority priority
-                  :element element)
-                 objects)))
-       org-ilm-bqueue
-       (not reversed) 
-       tree-start
-       tree-end)
+      (ost-do-in-order (node rank org-ilm-bqueue (not reversed) tree-start tree-end)
+        (let* ((display-rank (if reversed (- size 1 rank) rank))
+               (id (ost-node-id node))
+               ;; In the bqueue select, placeholder items are added by giving
+               ;; the rank (integer) as id. We therefore check if the id is a
+               ;; string to make sure it refers to an element id.
+               (is-element (stringp id))
+               ;; Element can be nil when removed without updating ost
+               (element (when is-element (org-ilm--element-by-id id)))
+               ;; TODO If the ost is already sorted by priority, we can save
+               ;; time by reusing display-rank
+               (priority (when is-element
+                           (org-ilm--pqueue-priority
+                            id nil nil collection))))
+          (push (make-org-ilm-bqueue-object
+                 :id (when is-element id)
+                 :rank display-rank
+                 :priority priority
+                 :element element)
+                objects)))
       objects)))
   
 (cl-defun org-ilm--bqueue-make-vtable (&key keymap)
@@ -250,7 +245,9 @@
       (lambda (data)
         (pcase-let* ((`(,marked ,index ,missing) data)
                      (index-str (format "%4d" (1+ index))))
-          (org-ilm--bqueue-vtable-format-cell index-str marked missing))))
+          ;; Don't pass missing, since index should have the same face
+          ;; regardless
+          (org-ilm--bqueue-vtable-format-cell index-str marked))))
      (:name
       "Priority"
       :width 6
@@ -260,8 +257,10 @@
                      (rank (car priority))
                      (quantile (cdr priority)))
           (org-ilm--bqueue-vtable-format-cell
-           (propertize (format "%.2f" (* 100 quantile))
-                       'face 'shadow)
+           (if missing
+               "NA"
+             (propertize (format "%.2f" (* 100 quantile))
+                         'face 'shadow))
            marked missing))))
      (:name
       "Type"
