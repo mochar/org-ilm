@@ -120,11 +120,7 @@ With POSITION, set the new position in the queue, or insert there if not exists.
 ;; calling `ost-rank' for each. This can be much faster then
 ;; `org-ilm--bqueue-build' when we want to sort by priority.
 (defun org-ilm-pqueue--bqueue (pqueue &optional query)
-  "Build an `org-ilm-bqueue' from all elements in PQUEUE.
-
-Because element headlines might be deleted, their ids will map to the id
-itself in `org-ilm-bqueue--elements', rather than `org-ilm-element'
-object."
+  "Build an `org-ilm-bqueue' from all elements in PQUEUE."
   (let* ((collection (org-ilm-pqueue--collection pqueue))
          (bqueue (make-org-ilm-bqueue
                  :name "Priority queue"
@@ -134,23 +130,12 @@ object."
          (element-map (org-ilm-query-collection query collection 'hash-table-p)))
 
     ;; Map over OST
-    (ost-map-in-order
-     (lambda (node rank)
-       (let* ((id (ost-node-id node))
-              (element (gethash id element-map)))
-
-         (if element
-             (org-ilm-bqueue--insert bqueue element rank)
-           ;; For ids that have not been found by querying the collection but are
-           ;; present in the priority queue, put them in the queue as normal, but
-           ;; in the node map use the id also as value.
-           (puthash id id (org-ilm-bqueue--elements bqueue))
-           (org-ilm-queue--insert bqueue id rank))
-
-         ;; Remove from map so that we are left with elements missing in the
-         ;; priority queue.
-         (remhash id element-map)))
-     pqueue)
+    (ost-do-in-order (node rank pqueue)
+      (let* ((id (ost-node-id node)))
+        (org-ilm-queue--insert bqueue id rank)
+        ;; Remove from map so that we are left with elements missing in the
+        ;; priority queue.
+        (remhash id element-map)))
 
     ;; Handle elements that were found by querying the collection, but are
     ;; missing in the priority queue.

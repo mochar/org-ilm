@@ -66,10 +66,6 @@ This can be nil when the queue was build interactively.")
    :documentation
    "A symbol used to identify different types of bqueues.
 For example, \'pqueue is used to identify queues dervied from the priority queue.")
-  (elements
-   (make-hash-table :test #'equal)
-   :documentation
-   "Map id to `org-ilm-element' object.")
   (key
    nil
    :documentation
@@ -108,16 +104,7 @@ The OST remains the same, but operations will instead adjust their calculations.
           (org-ilm-bqueue--key bqueue) key
           (org-ilm-bqueue--reversed bqueue) reversed
           (org-ilm-bqueue--randomness bqueue) randomness
-          (org-ilm-bqueue--page-size bqueue) page-size))
-
-  ;; Reconstruct the elements hash table
-  (let ((elements (make-hash-table :test #'equal)))
-    (dolist (id (hash-table-keys (org-ilm-bqueue--nodes bqueue)))
-      ;; Try to fetch the full element object. If not found, store ID as
-      ;; fallback (Matches `org-ilm-pqueue--bqueue').
-      (let ((element (or (org-ilm--element-by-id id) id)))
-        (puthash id element elements)))
-    (setf (org-ilm-bqueue--elements bqueue) elements)))
+          (org-ilm-bqueue--page-size bqueue) page-size)))
 
 (defun org-ilm-bqueue--pagination-range (bqueue)
   "Return (start . end) indices of the elements in the current page.
@@ -168,20 +155,19 @@ VALUE may be passed, which is used to determine the position in the queue.
 If nil, `org-ilm-bqueue--key' will be used to determine the value."
   (let ((id (org-ilm-element--id element))
         (value (or value (org-ilm-bqueue--element-value bqueue element 'no-key))))
-    (puthash id element (org-ilm-bqueue--elements bqueue))
     (ost-tree-insert bqueue value id)))
 
 ;; TODO Some type of caching so that repeated selects doesnt search tree again
 ;; Should be implemented in `ost-tree-select'.
 (defun org-ilm-bqueue--select (bqueue index)
-  "Return the element with the INDEX-th smallest key in BQUEUE (0-based)."
+  "Return id of element with the INDEX-th smallest key in BQUEUE (0-based)."
   (when (org-ilm-bqueue--reversed bqueue)
     (setq index (- (ost-size bqueue) 1 index)))
-  (let ((node (ost-select bqueue index)))
-    (gethash (ost-node-id node) (org-ilm-bqueue--elements bqueue))))
+  (ost-node-id (ost-select bqueue index)))
 
 (defun org-ilm-bqueue--top (bqueue &optional n)
-  "Return the first N elements in BQUEUE."
+  "Return the first N element ids in BQUEUE."
+  ;; TODO We can use ost-tree-map for better performance
   (unless (ost-tree-empty-p bqueue)
     (mapcar
      (lambda (index)
@@ -189,13 +175,11 @@ If nil, `org-ilm-bqueue--key' will be used to determine the value."
      (number-sequence 0 (or n (1- (ost-size bqueue)))))))
 
 (defun org-ilm-bqueue--head (bqueue)
-  "Return the first element in BQUEUE."
+  "Return id of first element in BQUEUE."
   (org-ilm-bqueue--select bqueue 0))
 
 (cl-defmethod org-ilm-queue--remove ((bqueue org-ilm-bqueue) element-or-id)
-  (let ((id (cl-call-next-method)))
-    (remhash id (org-ilm-bqueue--elements bqueue))
-    id))
+  (cl-call-next-method bqueue element-or-id))
 
 (defun org-ilm-bqueue--pop (bqueue)
   "Remove the top most element in BQUEUE."
@@ -217,8 +201,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
       (org-ilm-queue--tree-clear bqueue)
       (ost-map-in-order
        (lambda (node rank)
-         (let* ((element (gethash (ost-node-id node)
-                                  (org-ilm-bqueue--elements bqueue)))
+         (let* ((element (org-ilm--element-by-id (ost-node-id node)))
                 (quantile (ost-tree-quantile ost rank))
                 ;; New score mixing current rank and noise
                 (new-score (+ (* (- 1.0 randomness) quantile)
@@ -231,10 +214,12 @@ the queue and shuffling it afterwards. To achieve the latter, call
                (= (org-ilm-bqueue--randomness bqueue) randomness))
     (org-ilm-queue--tree-clear bqueue)
     (setf (org-ilm-bqueue--key bqueue) key)
-    ;; TODO Take note of elements where key=nil, and add it them in the end
-    ;; with value max+i so that they show up in bottom of queue view.
-    (dolist (element (hash-table-values (org-ilm-bqueue--elements bqueue)))
-      (org-ilm-bqueue--insert bqueue element)))
+    ;; TODO Deal with error when key=nil. Take note of elements where key=nil,
+    ;; and add it them in the end with value max+i so that they show up in
+    ;; bottom of queue view.
+    (dolist (id (hash-table-keys (org-ilm-bqueue--nodes bqueue)))
+      (let ((element (org-ilm--element-by-id id)))
+        (org-ilm-bqueue--insert bqueue element))))
   (setf (org-ilm-bqueue--reversed bqueue) reversed)
   (when randomness (org-ilm-bqueue--shuffle bqueue randomness)))
 
@@ -421,15 +406,9 @@ If the bqueue has a query, run it again. Else re-parse elements."
             ([query (org-ilm-bqueue--query org-ilm-bqueue)]
              (org-ilm--bqueue-build
               (org-ilm-bqueue--collection org-ilm-bqueue) query))
-            ;; If no query, go through the ids and simply recreate the element
-            ;; objects.
+            ;; TODO Do we want to do something when there is no query?
             (t
-             (let ((bqueue (copy-org-ilm-bqueue org-ilm-bqueue))
-                   (elements (make-hash-table :test #'equal)))
-               (dolist (id (hash-table-keys (org-ilm-bqueue--elements org-ilm-bqueue)))
-                 (puthash id (or (org-ilm--element-by-id id) id) elements))
-               (setf (org-ilm-bqueue--elements bqueue) elements)
-               bqueue))))
+             (message "Nothing to rebuild for queryless queue"))))
     (current-buffer)))
 
 (defun org-ilm--bqueue-shuffle (randomness &optional buffer)
@@ -491,7 +470,7 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
   (org-ilm--bqueue-with-buffer buffer
     (if ordered
         (org-ilm--bqueue-top :buffer buffer)
-      (hash-table-values (org-ilm-bqueue--elements org-ilm-bqueue)))))
+      (hash-table-keys (ost-tree-nodes org-ilm-bqueue)))))
 
 (cl-defun org-ilm--bqueue-remove (element-or-id &key buffer)
   (org-ilm--bqueue-with-buffer buffer

@@ -318,11 +318,11 @@ With RELATIVE-P non-nil, return path truncated relative to collection directory.
 
 (defun org-ilm--collection-tags (collection)
   "List of tags used in COLLECTION."
-  (cl-remove-duplicates
-   (apply #'append
-          (mapcar #'org-mem-entry-tags
-                  (org-ilm--collection-entries collection)))
-   :test #'string=))
+  (->> collection
+       org-ilm--collection-element-entries
+       (mapcar #'org-mem-entry-tags)
+       (apply #'append)
+       delete-dups))
 
 ;;;; Annotations
 

@@ -74,27 +74,40 @@
   "M ?" #'org-ilm-queue-mark-missing
   )
 
+;;;; Table
+
+(cl-defstruct (org-ilm-bqueue-object
+               (:conc-name org-ilm-bqueue-object--))
+  id ; Org-id of element, or rank (int) if placeholder
+  rank ; Rank in bqueue
+  priority ; Prefetch so that getter doesnt need to
+  element ; Nil if missing
+  )
+
 (defvar-local org-ilm--bqueue-marked-objects nil
-  "Org id of marked objects in the bqueue.")
+  "The ids of the marked objects in the bqueue.")
 
-;;;; Functions
-
-(defun org-ilm--bqueue-object-id (object)
-  (org-ilm--element-id object))
+(defun org-ilm--bqueue-object-id (object-or-id)
+  (if (org-ilm-bqueue-object-p object-or-id)
+      (org-ilm-bqueue-object--id object-or-id)
+    object-or-id))
 
 (defun org-ilm--bqueue-mark-objects (objects)
+  "Mark OBJECTS."
   (dolist (object (ensure-list objects))
     (let ((id (org-ilm--bqueue-object-id object)))
       (unless (member id org-ilm--bqueue-marked-objects)
         (push id org-ilm--bqueue-marked-objects)))))
 
 (defun org-ilm--bqueue-unmark-objects (objects)
+  "Unmark OBJECTS."
   (dolist (object (ensure-list objects))
     (let ((id (org-ilm--bqueue-object-id object)))
       (setq org-ilm--bqueue-marked-objects
             (delete id org-ilm--bqueue-marked-objects)))))
 
 (defun org-ilm--bqueue-mark-toggle-objects (objects)
+  "Toggle mark of OBJECTS."
   (dolist (object (ensure-list objects))
     (let ((id (org-ilm--bqueue-object-id object)))
       (if (member id org-ilm--bqueue-marked-objects)
@@ -103,17 +116,15 @@
         (push id org-ilm--bqueue-marked-objects)))))
 
 (defun org-ilm--bqueue-vtable-get-object ()
-  "Return (index . queue object) at point."
-  ;; when-let because index can be nil when out of table bounds
-  ;; (pcase-let ((`(,rank ,id) (vtable-current-object)))
-  ;;   (cons rank (gethash id (org-ilm-bqueue--elements org-ilm-bqueue)))))
+  "Return org-ilm-bqueue-object at point."
   (vtable-current-object))
 
 (defun org-ilm--bqueue-vtable-get-object-id ()
-  (org-ilm--bqueue-object-id
-   (cdr (org-ilm--bqueue-vtable-get-object))))
+  "Return ID of object at point."
+  (oref (org-ilm--bqueue-vtable-get-object) id))
 
 (defun org-ilm--bqueue-set-header (&optional title)
+  "Sets the buffer header of the bqueue view buffer."
   (let* ((left-segment
           (or title
               (concat
@@ -173,8 +184,10 @@
       (propertize string 'face face))))
 
 (defun org-ilm--bqueue-vtable-objects-func ()
+  "Return the list of objects to display in the table."
   (unless (org-ilm--bqueue-empty-p)
-    (let* ((range (org-ilm-bqueue--pagination-range org-ilm-bqueue))
+    (let* ((collection (org-ilm-bqueue--collection org-ilm-bqueue))
+           (range (org-ilm-bqueue--pagination-range org-ilm-bqueue))
            (reversed (org-ilm-bqueue--reversed org-ilm-bqueue))
            (size (ost-size org-ilm-bqueue))
            (v-start (car range))
@@ -194,15 +207,29 @@
 
       (ost-map-in-order
        (lambda (node rank)
-         (let* ((element (gethash (ost-node-id node)
-                                  (org-ilm-bqueue--elements org-ilm-bqueue)))
-                (display-rank (if reversed (- size 1 rank) rank)))
-           (push (cons display-rank element) objects)))
+         (let* ((display-rank (if reversed (- size 1 rank) rank))
+                (id (ost-node-id node))
+                ;; In the bqueue select, placeholder items are added by giving
+                ;; the rank (integer) as id. We therefore check if the id is a
+                ;; string to make sure it refers to an element id.
+                (is-element (stringp id))
+                ;; Element can be nil when removed without updating ost
+                (element (when is-element (org-ilm--element-by-id id)))
+                ;; TODO If the ost is already sorted by priority, we can save
+                ;; time by reusing display-rank
+                (priority (when is-element
+                            (org-ilm--pqueue-priority
+                             id nil nil collection))))
+           (push (make-org-ilm-bqueue-object
+                  :id (when is-element id)
+                  :rank display-rank
+                  :priority priority
+                  :element element)
+                 objects)))
        org-ilm-bqueue
        (not reversed) 
        tree-start
        tree-end)
-      
       objects)))
   
 (cl-defun org-ilm--bqueue-make-vtable (&key keymap)
@@ -319,21 +346,11 @@
            marked missing)))))
    :objects-function #'org-ilm--bqueue-vtable-objects-func
    :getter
-   (lambda (row column vtable)
-     (let* (
-            (rank (car row))
-            (object (cdr row))
-            ;; See `org-ilm--pqueue-bqueue'. Missing elements are mapped back to id.
-            ;; When nil, this is a placeholder element.
-            (id (org-ilm--element-id object))
-            (priority (when id
-                        (org-ilm--pqueue-priority id nil nil
-                                                  (oref org-ilm-bqueue collection))))
-            (marked (and id (member id org-ilm--bqueue-marked-objects))))
-       (cond
-        ((org-ilm-element-p object)
-         (let* ((element object)
-                (concepts (org-ilm-element--concepts element)))
+   (lambda (object column vtable)
+     (with-slots (id rank priority element) object
+       (let ((marked (when id (member id org-ilm--bqueue-marked-objects))))
+         (cond
+          (element
            (pcase (vtable-column vtable column)
              ("Index" (list marked rank))
              ("Type" (list marked (org-ilm-element--type element)))
@@ -343,22 +360,21 @@
              ("Due" (list marked (org-ilm-element--schedrel element)))
              ;; ("Tags" (list marked (org-ilm-element--tags element)))
              ("Concepts"
-              (list marked
-                    (mapcar #'org-mem-entry-by-id
-                            ;; Only direct concepts
-                            (last (car concepts) (cdr concepts))))))))
-        ((stringp object)
-         (pcase (vtable-column vtable column)
-           ("Index" (list marked rank t))
-           ("Title" (list marked id t))
-           (_ (list marked nil t))))
-        ((null object)
-         (pcase (vtable-column vtable column)
-           ("Index" (list marked rank t))
-           ("Title" (list marked "<empty>" t))
-           (_ (list marked nil t))))
-        (t (error "wrong object value in table row: %s" object)))))
-         
+              (let ((concepts (org-ilm-element--concepts element)))
+                (list marked
+                      (mapcar #'org-mem-entry-by-id
+                              ;; Only direct concepts
+                              (last (car concepts) (cdr concepts))))))))
+          (id ; Element not found
+           (pcase (vtable-column vtable column)
+             ("Index" (list marked rank t))
+             ("Title" (list marked id t))
+             (_ (list marked nil t))))
+          (t ; Placeholder
+           (pcase (vtable-column vtable column)
+             ("Index" (list marked rank t))
+             ("Title" (list marked "<empty>" t))
+             (_ (list marked nil t))))))))
    :keymap (or keymap org-ilm-queue-map)
    :actions '("S" ignore)))
 
@@ -475,7 +491,7 @@ This does not fill the buffer with the queue elements! For this run
 
 (defun org-ilm-queue-element-mark (object &optional action)
   "Mark the object at point."
-  (interactive (list (cdr (org-ilm--bqueue-vtable-get-object))))
+  (interactive (list (org-ilm--bqueue-vtable-get-object)))
   (unless action (setq action 'toggle))
   (cl-assert (member action '(mark unmark toggle)))
   (pcase action
@@ -492,7 +508,9 @@ This does not fill the buffer with the queue elements! For this run
   (interactive)
   (unless (bobp)
     (forward-line -1)
-    (org-ilm-queue-element-mark (cdr (org-ilm--bqueue-vtable-get-object)) 'unmark)))
+    (org-ilm-queue-element-mark
+     (org-ilm--bqueue-vtable-get-object)
+     'unmark)))
 
 (defun org-ilm-queue-mark-by-concept (concept-id)
   "Mark all elements in queue that are part of concept with id CONCEPT-ID."
@@ -504,11 +522,11 @@ This does not fill the buffer with the queue elements! For this run
   ;; `org-ilm--concepts-get-with-descendant-concepts' to precompute the
   ;; descendancy, but this would require a list-to-list comparison eg with
   ;; `seq-some' per object, instead of just an `assoc'.
-  (dolist (object (org-ilm--bqueue-elements))
-    (when (org-ilm-element-p object)
-      (let ((ancestor-ids (car (org-ilm-element--concepts object))))
-        (when (member concept-id ancestor-ids)
-          (org-ilm--bqueue-mark-objects object)))))
+  (dolist (id (org-ilm--bqueue-elements))
+    (when-let* ((element (org-ilm--element-by-id id))
+                (ancestor-ids (car (org-ilm-element--concepts element))))
+      (when (member concept-id ancestor-ids)
+        (org-ilm--bqueue-mark-objects id))))
   (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-by-tag (tag)
@@ -518,29 +536,29 @@ This does not fill the buffer with the queue elements! For this run
     (completing-read
      "Tag: "
      (org-ilm--collection-tags (org-ilm-queue--collection org-ilm-bqueue)))))
-  (dolist (object (org-ilm--bqueue-elements))
-    (when (and (org-ilm-element-p object)
-               (member tag (org-ilm-element--tags object)))
-      (org-ilm--bqueue-mark-objects object)))
+  (dolist (id (org-ilm--bqueue-elements))
+    (when-let ((entry (org-mem-entry-by-id id)))
+      (when (member tag (org-mem-entry-tags entry))
+        (org-ilm--bqueue-mark-objects id))))
   (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-by-scheduled (days)
   "Mark all elements in queue that are scheduled in DAYS days.
 DAYS can be specified as numeric prefix arg."
   (interactive "NNumber of days: ")
-  (dolist (object (org-ilm--bqueue-elements))
-    (when (org-ilm-element-p object)
-      (when-let ((due (* -1 (org-ilm-element--schedrel object))))
-        (when (<= (round due) days) 
-          (org-ilm--bqueue-mark-objects object)))))
+  (dolist (id (org-ilm--bqueue-elements))
+    (when-let* ((element (org-ilm--element-by-id id))
+                (due (* -1 (org-ilm-element--schedrel element))))
+      (when (<= (round due) days) 
+        (org-ilm--bqueue-mark-objects id))))
   (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-missing ()
   "Mark all elements that are missing, i.e. do not have an ilm-element."
   (interactive)
-  (dolist (object (org-ilm--bqueue-elements))
-    (unless (org-ilm-element-p object)
-      (org-ilm--bqueue-mark-objects object)))
+  (dolist (id (org-ilm--bqueue-elements))
+    (unless (org-ilm--element-by-id id)
+      (org-ilm--bqueue-mark-objects id)))
   (org-ilm-queue-revert))
 
 (defun org-ilm-queue-mark-invert ()
@@ -548,9 +566,8 @@ DAYS can be specified as numeric prefix arg."
   (interactive)
   (let* ((marked org-ilm--bqueue-marked-objects)
          (unmarked (seq-keep
-                    (lambda (element)
-                      (let ((id (org-ilm-element--id element)))
-                        (when (not (member id marked)) id)))
+                    (lambda (id)
+                      (when (not (member id marked)) id))
                     (org-ilm--bqueue-elements))))
     (setq-local org-ilm--bqueue-marked-objects unmarked)
     (org-ilm-queue-revert)))
@@ -571,41 +588,62 @@ DAYS can be specified as numeric prefix arg."
   (forward-line -1)
   (unless (vtable-current-object) (forward-line)))
 
+(defun org-ilm--bqueue-vtable-go-to (object-or-id)
+  "Move point to object in table, returns point if found."
+  (let ((target-id (org-ilm--bqueue-object-id object-or-id))
+        done point)
+    (save-excursion
+      (save-restriction
+        (vtable-beginning-of-table)
+        (narrow-to-region (point) (save-excursion (vtable-end-of-table)))
+        (while (not done)
+          (if-let* ((id (org-ilm--bqueue-vtable-get-object-id)))
+              (when (equal id target-id)
+                (setq done t
+                      point (point)))
+            (setq done t))
+          (forward-line))))
+    (when point (goto-char point))
+    point))
+
+(defun org-ilm--bqueue-next-marked (&optional previous-p)
+  "Go to next or previous marked element, return id if found."
+  (let* ((object (org-ilm--bqueue-vtable-get-object))
+         (current-rank (oref object rank)))
+    (cond
+     ((null org-ilm--bqueue-marked-objects)
+      (user-error "No marked elements"))
+     ((and (not previous-p) (= current-rank (1- (ost-size org-ilm-bqueue))))
+      (user-error "Already at last element"))
+     ((and previous-p (= current-rank 0))
+      (user-error "Already at first element"))
+     (t
+      (let* (;; TODO Handle queue being reversed
+             (reversed (org-ilm-bqueue--reversed org-ilm-bqueue))
+             (start-rank (if previous-p 0 (1+ current-rank)))
+             (end-rank (if previous-p current-rank nil)))
+        (catch 'found
+          (ost-do-in-order (node rank org-ilm-bqueue previous-p start-rank end-rank)
+            (when (member (ost-node-id node) org-ilm--bqueue-marked-objects)
+              (let ((page (org-ilm-bqueue--pos-page org-ilm-bqueue rank)))
+                (unless (= page (oref org-ilm-bqueue page))
+                  (setf (org-ilm-bqueue--page org-ilm-bqueue) page)
+                  (org-ilm-queue-revert)))
+              (unless (org-ilm--bqueue-vtable-go-to (ost-node-id node))
+                (error "Could not move to %s" (ost-node-id node)))
+              (throw 'found (ost-node-id node))))))))))
+
 (defun org-ilm-queue-next-marked ()
   "Go to next marked element."
   (interactive)
-  (let (done point)
-    (when org-ilm--bqueue-marked-objects
-      (save-excursion
-        (while (not done)
-          (forward-line)
-          (if-let* ((id (org-ilm--bqueue-vtable-get-object-id)))
-              (when (member id org-ilm--bqueue-marked-objects)
-                (setq done t
-                      point (point)))
-            (setq done t)))))
-    (if point
-        (goto-char point)
-      (message "No marked element after this point"))))
+  (unless (org-ilm--bqueue-next-marked)
+    (user-error "No marked element after this point")))
 
 (defun org-ilm-queue-previous-marked ()
   "Go to previous marked element."
   (interactive)
-  (let (done point)
-    (when org-ilm--bqueue-marked-objects
-      (save-excursion
-        (while (not done)
-          (if (= 0 (current-line))
-              (setq done t)
-            (forward-line -1)
-            (if-let* ((id (org-ilm--bqueue-vtable-get-object-id)))
-                (when (member id org-ilm--bqueue-marked-objects)
-                  (setq done t
-                        point (point)))
-              (setq done t))))))
-    (if point
-        (goto-char point)
-      (message "No marked element before this point"))))
+  (unless (org-ilm--bqueue-next-marked 'previous-p)
+    (user-error "No marked element before this point")))
 
 (defun org-ilm-queue-next-page ()
   "View the elements of the next page."
@@ -691,33 +729,29 @@ DAYS can be specified as numeric prefix arg."
 (defun org-ilm-queue-element-schedule ()
   "Set the schedule of the element at point, or bulk set of marked elements."
   (interactive)
-  (let ((elements (org-ilm-bqueue--elements org-ilm-bqueue)))
-    (if org-ilm--bqueue-marked-objects
-        (let ((start-ts (ts-parse (org-read-date nil nil nil "Start date: ")))
-              end-ts)
-          (while (not end-ts)
-            (let ((ts (ts-parse (org-read-date nil nil nil "End date: "))))
-              (if (ts>= ts start-ts)
-                  (setq end-ts ts)
-                (message "End date must be after start date")
-                (sleep-for 1))))
-          (dolist (id org-ilm--bqueue-marked-objects)
-            (org-ilm--org-with-point-at id
-              (let* ((diff-days (plist-get
-                                 (ts-human-duration
-                                  (ts-difference end-ts start-ts))
-                                 :days))
-                     (rand-interval (random (1+ diff-days)))
-                     (ts (ts-adjust 'day rand-interval start-ts))
-                     (date (ts-format "%Y-%m-%d" ts)))
-                (org-ilm-element-set-schedule (org-ilm--element-from-context) date)
-                (puthash id (org-ilm--element-at-point) elements)))))
+  (if org-ilm--bqueue-marked-objects
+      (let ((start-ts (ts-parse (org-read-date nil nil nil "Start date: ")))
+            end-ts)
+        (while (not end-ts)
+          (let ((ts (ts-parse (org-read-date nil nil nil "End date: "))))
+            (if (ts>= ts start-ts)
+                (setq end-ts ts)
+              (message "End date must be after start date")
+              (sleep-for 1))))
+        (dolist (id org-ilm--bqueue-marked-objects)
+          (org-ilm--org-with-point-at id
+            (let* ((diff-days (plist-get
+                               (ts-human-duration
+                                (ts-difference end-ts start-ts))
+                               :days))
+                   (rand-interval (random (1+ diff-days)))
+                   (ts (ts-adjust 'day rand-interval start-ts))
+                   (date (ts-format "%Y-%m-%d" ts)))
+              (org-ilm-element-set-schedule (org-ilm--element-from-context) date)))))
 
-      ;; No marked elements, set schedule of element at point
-      (call-interactively #'org-ilm-element-set-schedule)
-      (let ((element (org-ilm--element-from-context)))
-        (puthash (org-ilm-element--id element) element elements)))
-    (org-ilm-queue-revert)))
+    ;; No marked elements, set schedule of element at point
+    (call-interactively #'org-ilm-element-set-schedule))
+  (org-ilm-queue-revert))
 
 (defun org-ilm-queue-element-remove ()
   "Remove current or selected elements from this queue."
@@ -1049,7 +1083,7 @@ that bqueue is changed."
             (setq init-position (ost-tree-position bqueue init-position))
 
             ;; When NUMNEW specified, add NUMNEW placeholder elements in the
-            ;; queue. These are removed in the unwindow forms of this
+            ;; queue. These are removed in the unwind forms of this
             ;; unwind-protect.
             (when (and numnew (>= numnew 0))
               (let* ((largest-node (ost-select bqueue (1- (ost-size bqueue))))

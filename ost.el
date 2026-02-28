@@ -564,46 +564,78 @@ starting from 0. Requires NODE to be a node within TREE."
   (let ((rank (ost-rank tree node-or-id)))
     (cdr (ost-tree-position tree rank))))
 
+(defmacro ost-do-in-order (spec &rest body)
+  "Evaluate BODY at each node in TREE in rank order.
+This is O(N), whereas calling `ost-select' in a loop is O(N log N).
+
+SPEC is a list of the form:
+  (NODE-VAR RANK-VAR TREE &optional REVERSE START END)
+
+START and END specify the range of ranks (0-based) to include.
+Defaults are 0 and size of tree respectively.
+If REVERSE is non-nil, iterate in descending order."
+  (declare (indent 1) (debug ((symbolp symbolp form &optional form form form) body)))
+  
+  (pcase-let* ((`(,node-var ,rank-var ,tree ,reverse ,start ,end) spec)
+               (g-tree (make-symbol "tree"))
+               (g-total (make-symbol "total-size"))
+               (g-start (make-symbol "start"))
+               (g-end (make-symbol "end"))
+               (g-reverse (make-symbol "reverse"))
+               (g-traverse (make-symbol "traverse"))
+               (g-node (make-symbol "node"))
+               (g-offset (make-symbol "offset"))
+               (g-left-size (make-symbol "left-size"))
+               (g-rank (make-symbol "rank"))
+               (g-subtree-size (make-symbol "subtree-size"))
+               (g-subtree-end (make-symbol "subtree-end")))
+    
+    `(let* ((,g-tree ,tree)
+            (,g-total (ost-size ,g-tree))
+            (,g-start (or ,start 0))
+            (,g-end (min (or ,end ,g-total) ,g-total))
+            (,g-reverse ,reverse))
+       
+       (cl-assert (>= ,g-start 0))
+       (cl-assert (<= ,g-end ,g-total))
+
+       (when (< ,g-start ,g-end)
+         (cl-labels ((,g-traverse (,g-node ,g-offset)
+                       (when ,g-node
+                         (let* ((,g-left-size (ost--node-size (ost-node-left ,g-node)))
+                                (,g-rank (+ ,g-offset ,g-left-size))
+                                (,g-subtree-size (ost-node-size ,g-node))
+                                (,g-subtree-end (+ ,g-offset ,g-subtree-size)))
+
+                           ;; Check if subtree overlaps with requested range
+                           (when (and (< ,g-offset ,g-end) (> ,g-subtree-end ,g-start))
+                             (if ,g-reverse
+                                 ;; Reverse traversal: Right -> Node -> Left
+                                 (progn
+                                   (,g-traverse (ost-node-right ,g-node) (1+ ,g-rank))
+                                   (when (and (>= ,g-rank ,g-start) (< ,g-rank ,g-end))
+                                     (let ((,node-var ,g-node)
+                                           (,rank-var ,g-rank))
+                                       ,@body))
+                                   (,g-traverse (ost-node-left ,g-node) ,g-offset))
+                               
+                               ;; Normal traversal: Left -> Node -> Right
+                               (progn
+                                 (,g-traverse (ost-node-left ,g-node) ,g-offset)
+                                 (when (and (>= ,g-rank ,g-start) (< ,g-rank ,g-end))
+                                   (let ((,node-var ,g-node)
+                                         (,rank-var ,g-rank))
+                                     ,@body))
+                                 (,g-traverse (ost-node-right ,g-node) (1+ ,g-rank)))))))))
+           
+           (,g-traverse (ost-tree-root ,g-tree) 0))))))
+
 (defun ost-map-in-order (func tree &optional reverse start end)
   "Apply FUNC to each node in TREE in rank order.
 FUNC is called with two arguments: (NODE RANK).
-
-Optional arguments START and END specify the range of ranks (0-based) to
-include. Defaults are 0 and size of tree respectively.
-
-If REVERSE is non-nil, iterate in descending order.
-
-This is O(N), whereas calling `ost-select' in a loop is O(N log N)."
-  (let* ((total-size (ost-size tree))
-         (start (or start 0))
-         (end (-> (or end total-size) (min total-size))))
-    (cl-assert (>= start 0))
-    (cl-assert (<= end total-size))
-
-    (when (< start end)
-      (cl-labels ((traverse (node offset)
-                    (when node
-                      (let* ((left-size (ost--node-size (ost-node-left node)))
-                             (node-rank (+ offset left-size))
-                             (subtree-size (ost-node-size node))
-                             (subtree-end (+ offset subtree-size)))
-                        
-                        ;; Check if subtree overlaps with requested range [start, end)
-                        (when (and (< offset end) (> subtree-end start))
-                          (if reverse
-                              ;; Reverse traversal: Right -> Node -> Left
-                              (progn
-                                (traverse (ost-node-right node) (1+ node-rank))
-                                (when (and (>= node-rank start) (< node-rank end))
-                                  (funcall func node node-rank))
-                                (traverse (ost-node-left node) offset))
-                            ;; Normal traversal: Left -> Node -> Right
-                            (progn
-                              (traverse (ost-node-left node) offset)
-                              (when (and (>= node-rank start) (< node-rank end))
-                                (funcall func node node-rank))
-                              (traverse (ost-node-right node) (1+ node-rank)))))))))
-        (traverse (ost-tree-root tree) 0)))))
+See `ost-do-in-order'"
+  (ost-do-in-order (node rank tree reverse start end)
+    (funcall func node rank)))
 
 ;;;; Insert
 
