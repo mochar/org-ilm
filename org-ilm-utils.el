@@ -44,13 +44,7 @@ One of:
          (cons 'registry collection)
        (cons 'collection collection)))
     ((bound-and-true-p org-ilm-bqueue)
-     (let* ((object (cdr (org-ilm--bqueue-vtable-get-object)))
-            ;; TODO Can't use cl-typecase here because org-ilm-element
-            ;; not yet defined
-            (id (cond
-                  ((stringp object) object)
-                  ((org-ilm-element-p object)
-                   (org-ilm-element--id object)))))
+     (let ((id (org-ilm--bqueue-vtable-get-object-id)))
        (list 'queue (org-ilm-queue--collection org-ilm-bqueue) id)))))
 
 (cl-generic-define-context-rewriter ilm-location (var)

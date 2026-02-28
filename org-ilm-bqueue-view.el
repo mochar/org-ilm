@@ -54,6 +54,7 @@
   :parent org-ilm-queue-base-map
   "M-n" #'org-ilm-queue-next-marked
   "M-p" #'org-ilm-queue-previous-marked
+  "J" #'org-ilm-queue-jump
   "r" #'org-ilm-queue-review
   "e" #'org-ilm-element-menu
   "v" #'org-ilm-queue-settings
@@ -121,7 +122,8 @@
 
 (defun org-ilm--bqueue-vtable-get-object-id ()
   "Return ID of object at point."
-  (oref (org-ilm--bqueue-vtable-get-object) id))
+  (when-let ((object (org-ilm--bqueue-vtable-get-object)))
+    (oref object id)))
 
 (defun org-ilm--bqueue-set-header (&optional title)
   "Sets the buffer header of the bqueue view buffer."
@@ -164,7 +166,10 @@
             (org-ilm--bqueue-empty-p)
             (not (vtable-current-table)))
         (org-ilm--bqueue-buffer-build)
-      (vtable-revert-command))
+      (let ((cur-id (org-ilm--bqueue-vtable-get-object-id)))
+        (vtable-revert-command)
+        (when cur-id
+          (org-ilm--bqueue-vtable-go-to cur-id))))
     (org-ilm--bqueue-set-header)))
 
 (defun org-ilm-queue-rebuild ()
@@ -452,41 +457,28 @@ This does not fill the buffer with the queue elements! For this run
     (when switch-p
       (switch-to-buffer buffer))))
 
-;;;; Update hooks
-
-(defun org-ilm--bqueue-on-element-update (element)
-  "Push element updates to all active queue buffers."
-  (dolist (buf (org-ilm--bqueue-buffers (oref element collection)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((id (oref element id))
-              (elements (oref org-ilm-bqueue elements)))
-          (when (gethash id elements)
-            (puthash id element elements)
-            (vtable-revert-command)))))))
-
-(add-hook 'org-ilm-element-update-hook #'org-ilm--bqueue-on-element-update)
+;;;; Hook triggers
 
 (defun org-ilm--bqueue-on-concept-change ()
   "Rebuild all active queue buffers when concept changes."
   (dolist (buf (org-ilm--bqueue-buffers))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (org-ilm--bqueue-rebuild)
-        (vtable-revert-command)))))
+        (org-ilm-queue-revert)))))
 
 (add-hook 'org-ilm-concept-change-hook #'org-ilm--bqueue-on-concept-change)
+
 
 ;;;; Actions
 
 (defun org-ilm-queue-open-attachment (object)
   "Open attachment of object at point."
-  (interactive (list (cdr (org-ilm--bqueue-vtable-get-object))))
+  (interactive (list (org-ilm--bqueue-vtable-get-object)))
   (org-ilm--attachment-open-by-id (org-ilm--bqueue-object-id object)))
 
 (defun org-ilm-queue-open-element (object)
   "Open attachment of object at point."
-  (interactive (list (cdr (org-ilm--bqueue-vtable-get-object))))
+  (interactive (list (org-ilm--bqueue-vtable-get-object)))
   (org-ilm--org-goto-id (org-ilm--bqueue-object-id object)))
 
 (defun org-ilm-queue-element-mark (object &optional action)
@@ -603,7 +595,10 @@ DAYS can be specified as numeric prefix arg."
                       point (point)))
             (setq done t))
           (forward-line))))
-    (when point (goto-char point))
+    (when point
+      (goto-char point)
+      (hl-line-highlight)
+      (recenter-top-bottom t))
     point))
 
 (defun org-ilm--bqueue-next-marked (&optional previous-p)

@@ -101,7 +101,7 @@ Parameters passed: id, type, collection")
 
        ;; Ilm stuff
        :collection (intern collection)
-       :sched (when-let ((s (org-mem-entry-scheduled entry))) (ts-parse s))
+       :sched (-some-> (org-mem-entry-scheduled entry) ts-parse)
        :type type
        :done (string= (org-mem-entry-todo-state entry) "DONE")
        ;; TODO Is this still used?!?!
