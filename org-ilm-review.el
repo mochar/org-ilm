@@ -231,6 +231,14 @@ Return t if already ready."
   (interactive)
   (org-ilm-review-next :again))
 
+(defun org-ilm--review-quit-if-done ()
+  "Quit review if queue is empty. Return t if quit."
+  (when (org-ilm--bqueue-empty-p)
+    (message "Finished reviewing queue!")
+    (org-ilm-review-quit)
+    (switch-to-buffer org-ilm-bqueue-active-buffer)
+    t))
+
 (defun org-ilm--review-next (&optional dont-update)
   (when org-ilm--review
     ;; Update priority and schedule
@@ -258,11 +266,7 @@ Return t if already ready."
     
     (org-ilm--review-cleanup-current-element))
   
-  (if (org-ilm--bqueue-empty-p)
-      (progn
-        (message "Finished reviewing queue!")
-        (org-ilm-review-quit)
-        (switch-to-buffer org-ilm-bqueue-active-buffer))
+  (unless (org-ilm--review-quit-if-done)
     (org-ilm--review-setup-current-element)
     (run-hooks 'org-ilm-review-next-hook)
     (org-ilm--review-open-current-element)))
@@ -287,36 +291,47 @@ The main job is to prepare the variable `org-ilm--review', which
 needs the attachment buffer."
   (cl-assert (not (org-ilm--bqueue-empty-p)))
 
-  (let* ((element (org-ilm--bqueue-head))
-         (id (org-ilm-element--id element)))
+  ;; Because the next element may not exist anymore, we have to keep popping the
+  ;; queue until we find one that exists.
+  (let (found)
+    (while (and (not found) (not (org-ilm--review-quit-if-done)))
+      (let* ((id (org-ilm--bqueue-head))
+             (element (org-ilm--element-by-id id)))
 
-    ;; Create this here already so that attachment buffers can use it when
-    ;; setting up for review.
-    (setq org-ilm--review
-          (make-org-ilm-review
-           :id (oref element id)
-           :type (oref element type)
-           :start (current-time)))
-    
-    (org-ilm--org-with-point-at id
-      (setf (oref org-ilm--review buffer)
-            ;; Don't yet switch to the buffer, just return it so we can do some
-            ;; processing first.
-            (save-window-excursion
-              (org-ilm--attachment-open :no-error t))))
+        (if (null element)
+            (progn
+              (warn "Element %s skipped because not found" id)
+              (org-ilm--bqueue-pop))
 
-    ;; Prepare the attachment buffer if exists
-    (when (oref org-ilm--review buffer)
-      (with-current-buffer (oref org-ilm--review buffer)
+          (setq found t)
 
-        ;; Ask to end the review when killing the buffer
-        (add-hook 'kill-buffer-hook
-                  #'org-ilm--review-confirm-quit
-                  nil t)
+          ;; Create this here already so that attachment buffers can use it when
+          ;; setting up for review.
+          (setq org-ilm--review
+                (make-org-ilm-review
+                 :id (oref element id)
+                 :type (oref element type)
+                 :start (current-time)))
+          
+          (org-ilm--org-with-point-at id
+            (setf (oref org-ilm--review buffer)
+                  ;; Don't yet switch to the buffer, just return it so we can do some
+                  ;; processing first.
+                  (save-window-excursion
+                    (org-ilm--attachment-open :no-error t))))
 
-        ;; Individual attachment types can run their preparation by attaching to
-        ;; this hook. Mainly for hiding clozes.
-        (run-hooks 'org-ilm-review-prepare-hook)))))
+          ;; Prepare the attachment buffer if exists
+          (when (oref org-ilm--review buffer)
+            (with-current-buffer (oref org-ilm--review buffer)
+
+              ;; Ask to end the review when killing the buffer
+              (add-hook 'kill-buffer-hook
+                        #'org-ilm--review-confirm-quit
+                        nil t)
+
+              ;; Individual attachment types can run their preparation by attaching to
+              ;; this hook. Mainly for hiding clozes.
+              (run-hooks 'org-ilm-review-prepare-hook))))))))
 
 (defun org-ilm-review-reveal ()
   "Reveal the cloze contents of the current element."

@@ -361,47 +361,50 @@ save-excursion."
   ;; If THING is id of headline at point, dont jump, for performance but also so
   ;; that org-mem is not required to have parsed the headline (useful in
   ;; capture).
-  `(if (or (null ,thing)
-           (and (stringp ,thing)
-                (eq major-mode 'org-mode)
-                (string= ,thing (org-id-get))))
-       ;; Reveal entry contents, otherwise run into problems parsing the
-       ;; metadata, such as with org-srs drawer.
-       (org-ilm--org-with-headline-contents-visible ,@body)
+  (let ((m-org-id (make-symbol "org-id"))
+        (m-entry (make-symbol "entry"))
+        (m-file (make-symbol "file"))
+        (m-buf (make-symbol "buf")))
+    `(if (or (null ,thing)
+             (and (stringp ,thing)
+                  (eq major-mode 'org-mode)
+                  (string= ,thing (org-id-get))))
+         ;; Reveal entry contents, otherwise run into problems parsing the
+         ;; metadata, such as with org-srs drawer.
+         (org-ilm--org-with-headline-contents-visible ,@body)
 
-     (let (org-id entry)
-       (cond
-        ((stringp ,thing)
-         (setq org-id ,thing
-               entry (org-ilm--org-mem-get-entry-ensured ,thing))
-         (unless entry
-           (error "Entry with ID %s not found" ,thing)))
-        ((org-mem-entry-p ,thing)
-         (setq org-id (org-mem-entry-id thing)
-               entry ,thing))
-        (t
-         (error "THING must be org-id string or org-mem-entry, got %s" ,thing)))
-       
-       (when-let* ((file (org-mem-entry-file-truename entry))
-                   (buf (or (find-buffer-visiting file)
-                            (find-file-noselect file))))
-         (with-current-buffer buf
-           ;; We need to widen the buffer because `find-buffer-visiting' might
-           ;; return an active, narrowed buffer.
-           (org-with-wide-buffer
-            ;; Jump to correct position
-            (goto-char (org-find-property "ID" org-id))
-            
-            ;; Reveal entry contents, otherwise run into problems parsing the
-            ;; metadata, such as with org-srs drawer.
-            (org-ilm--org-with-headline-contents-visible ,@body)))))))
+       (let (,m-org-id ,m-entry)
+         (cond
+          ((stringp ,thing)
+           (setq ,m-org-id ,thing
+                 ,m-entry (org-ilm--org-mem-get-entry-ensured ,thing))
+           (unless ,m-entry
+             (error "Entry with ID %s not found" ,thing)))
+          ((org-mem-entry-p ,thing)
+           (setq ,m-org-id (org-mem-entry-id ,thing)
+                 ,m-entry ,thing))
+          (t
+           (error "THING must be org-id string or org-mem-entry, got %s" ,thing)))
+         
+         (when-let* ((,m-file (org-mem-entry-file-truename ,m-entry))
+                     (,m-buf (or (find-buffer-visiting ,m-file)
+                                 (find-file-noselect ,m-file))))
+           (with-current-buffer ,m-buf
+             ;; We need to widen the buffer because `find-buffer-visiting' might
+             ;; return an active, narrowed buffer.
+             (org-with-wide-buffer
+              ;; Jump to correct position
+              (goto-char (org-find-property "ID" ,m-org-id))
+              
+              ;; Reveal entry contents, otherwise run into problems parsing the
+              ;; metadata, such as with org-srs drawer.
+              (org-ilm--org-with-headline-contents-visible ,@body))))))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
   (save-excursion
-    (org-ilm--org-with-point-at
-     org-id
-     (org-ilm--org-headline-at-point))))
+    (org-ilm--org-with-point-at org-id
+      (org-ilm--org-element-around-point 'headline))))
 
 (defun org-ilm--org-attach-dir-from-id (org-id)
   "Return the attachment directory of element with ORG-ID

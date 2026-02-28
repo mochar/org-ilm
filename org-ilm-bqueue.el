@@ -186,7 +186,7 @@ If nil, `org-ilm-bqueue--key' will be used to determine the value."
   (when (ost-tree-empty-p bqueue)
     (error "Tried popping an empty queue \"%s\"" (org-ilm-bqueue--name bqueue)))
   (let ((head (org-ilm-bqueue--head bqueue)))
-    (org-ilm-queue--remove bqueue (org-ilm-element--id head))))
+    (org-ilm-queue--remove bqueue head)))
 
 (defun org-ilm-bqueue--shuffle (bqueue randomness)
   "Shuffle the BQUEUE with a RANDOMNESS between 0 (no change) and 1 (complete randomness).

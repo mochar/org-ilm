@@ -723,7 +723,7 @@ DAYS can be specified as numeric prefix arg."
       (org-ilm--bqueue-spread-position)
     (ost-tree-move
      org-ilm-bqueue
-     (org-ilm-element--id (org-ilm--element-from-context))
+     (org-ilm--bqueue-vtable-get-object-id)
      ;; TODO Pass current position as initial position
      (car (org-ilm--bqueue-select-read (copy-org-ilm-bqueue org-ilm-bqueue))))
     (org-ilm-queue-revert)))
