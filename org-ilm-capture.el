@@ -68,6 +68,7 @@ For value see `org-ilm--concept-property-prepare'.")
   template
   bqueue
   state
+  jump-p
   on-success
   on-abort
   capture-kwargs)
@@ -98,7 +99,7 @@ The callback ON-ABORT is called when capture is cancelled."
   ;; org-ilm-capture object and immediately unpack it for processing.
   (with-slots
       (type parent title id ext content props file attach-method
-            priority scheduled template collection state bibtex
+            priority scheduled template collection state bibtex jump-p
             target bqueue concepts on-success on-abort capture-kwargs)
 
       (if (and (= 1 (length data)) (org-ilm-capture-p (car data)))
@@ -193,7 +194,7 @@ The callback ON-ABORT is called when capture is cancelled."
      :parent parent :target target :type type :title title :id id :ext ext
      :content content :props props :file file :attach-method attach-method
      :priority priority :scheduled scheduled :template template
-     :concepts concepts
+     :concepts concepts :jump-p jump-p
      :state state :on-success on-success :on-abort on-abort :bqueue bqueue
      :bibtex bibtex :collection collection :capture-kwargs capture-kwargs)))
 
@@ -377,7 +378,11 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
                (when-let ((on-success (org-ilm-capture--on-success capture)))
                  (dolist (callback (ensure-list on-success))
-                   (funcall callback id attach-dir collection))))
+                   (funcall callback id attach-dir collection)))
+
+               (when (oref capture jump-p)
+                 (org-ilm--org-goto-id id))
+               )
 
              ) ; end :after-finalize lambda
            

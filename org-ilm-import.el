@@ -110,11 +110,12 @@ See `org-ilm--citation-get-zotero'"))
 
 (cl-defgeneric org-ilm--import-process ((import org-ilm-capture) args)
   "Fill in capture data in IMPORT using transient state ARGS."
-  (map-let (title collection location queue-buffer priority scheduled cite-key) args
+  (map-let (title collection location queue-buffer priority scheduled cite-key jump-p) args
     (oset import title title)
     (oset import priority priority)
     (oset import scheduled scheduled)
     (oset import collection collection)
+    (oset import jump-p jump-p)
     (when queue-buffer
       (with-current-buffer queue-buffer
         (oset import bqueue org-ilm-bqueue)))
@@ -435,15 +436,6 @@ See `org-ilm--citation-get-zotero'"))
 
 ;;;; Action suffixes
 
-(transient-define-suffix org-ilm--import-suffix-import ()
-  :key "RET"
-  :description "Import"
-  (interactive)
-  (let ((import (transient-scope))
-        (args (org-ilm--transient-parse)))
-    (org-ilm--import-process import args)
-    (org-ilm--capture import)))
-
 (transient-define-suffix org-ilm--import-suffix-autoinfo ()
   :key "<tab>"
   :description "Auto retrieve info"
@@ -478,9 +470,27 @@ See `org-ilm--citation-get-zotero'"))
 (transient-define-group org-ilm--import-group-actions
   ["Actions"
    (org-ilm--import-suffix-autoinfo)
-   (org-ilm--import-suffix-import)
    ])
 
+;;;; Import suffixes
+
+(transient-define-suffix org-ilm--import-suffix-import ()
+  :key "RET"
+  :description "Import"
+  (interactive)
+  (let ((import (transient-scope))
+        (args (org-ilm--transient-parse)))
+    (org-ilm--import-process import args)
+    (org-ilm--capture import)))
+
+(transient-define-group org-ilm--import-group-import
+  ["Import"
+   ("j" "Jump to element"
+    :cons 'jump-p
+    :class org-ilm-transient-cons-switch
+    )
+   (org-ilm--import-suffix-import)
+   ])
 
 ;;;; Plain import
 
@@ -493,10 +503,8 @@ See `org-ilm--citation-get-zotero'"))
    org-ilm--import-group-element
    ]
 
-  ["Actions"
-   (org-ilm--import-suffix-import)
-   ]
-  
+  org-ilm--import-group-import
+
   (interactive "P")
   (transient-setup
    'org-ilm--import-plain-transient
@@ -692,6 +700,7 @@ by default will be the child of this parent element."
 
   org-ilm--import-group-citation
   org-ilm--import-group-actions
+  org-ilm--import-group-import
   
   (interactive "P")
   (transient-setup
@@ -779,6 +788,7 @@ by default will be the child of this parent element."
   org-ilm--convert-media-transient-group
   org-ilm--import-group-citation
   org-ilm--import-group-actions
+  org-ilm--import-group-import
   
   (interactive "P")
   (transient-setup
@@ -899,10 +909,8 @@ by default will be the child of this parent element."
     :if (lambda () (alist-get 'buffer-download (org-ilm--transient-parse))))
    ]
 
-  ["Actions"
-   (org-ilm--import-suffix-import)
-   ]
-  
+  org-ilm--import-group-import
+
   (interactive "P")
   (transient-setup
    'org-ilm--import-buffer-transient
@@ -1019,6 +1027,7 @@ by default will be the child of this parent element."
 
   org-ilm--import-group-citation
   org-ilm--import-group-actions
+  org-ilm--import-group-import
   
   (interactive "P")
   (transient-setup
