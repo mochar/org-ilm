@@ -655,7 +655,7 @@ A cloze is made automatically of the element at point or active region."
     (org-ilm--element-with-point-at element
       (call-interactively #'org-ilm-element-delete element))
     (save-excursion
-      (goto-char (ov-beg ov))
+      (goto-char (overlay-start ov))
       (save-match-data
         (re-search-forward org-ilm-target-regexp)
         (org-ilm-targets-remove-around-point)))))
@@ -687,8 +687,8 @@ A cloze is made automatically of the element at point or active region."
                             (org-ilm--org-add-todo-face (org-ilm-element--state element))
                             ": "
                             (org-ilm-element--title element)))
-                   (beg (ov-beg ov))
-                   (end (ov-end ov)))
+                   (beg (overlay-start ov))
+                   (end (overlay-end ov)))
          (add-text-properties 0 (length target) (list :id id :ov ov :element element) target)
          `(ilm-element ,target ,beg . ,end)))
      ovs)))
