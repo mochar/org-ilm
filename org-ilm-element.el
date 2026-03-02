@@ -730,7 +730,7 @@ With active region delete all in region."
      (lambda ()
        (interactive)
        (org-ilm--import-org 'card 'as-capture)))
-    ("M" "New material"
+    ("O" "New org"
      (lambda ()
        (interactive)
        (org-ilm--import-org 'material 'as-capture)))
@@ -915,7 +915,9 @@ With active region delete all in region."
     :always-read t
     :reader
     (lambda (&rest _)
-      (let ((buf (org-ilm--bqueue-completing-read (oref (transient-scope) title))))
+      (let ((buf (org-ilm--bqueue-completing-read
+                  (oref (transient-scope) title)
+                  nil (oref (transient-scope) collection))))
         buf)))
    (:info (lambda () ""))
    ("a" "Add to queue"
