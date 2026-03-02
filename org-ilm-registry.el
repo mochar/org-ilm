@@ -634,7 +634,13 @@ environment (multiline), paste it in headline body."
     ;; Current buffer is image.
     ([data (org-ilm-registry--type-image-from-path
             (buffer-file-name (buffer-base-buffer)))]
-     data)))
+     data)
+    ;; PDF page or active region
+    ((org-ilm--pdf-mode-p)
+     (let* ((region (when (pdf-view-active-region-p) (org-ilm--pdf-active-region)))
+            (img-path (org-ilm--pdf-image-export (buffer-name)
+                                                 :region region)))
+       (org-ilm-registry--type-image-from-path img-path)))))
      
 ;; TODO Deprecated for register function
 (defun org-ilm-registry--type-image-create (&optional data)
