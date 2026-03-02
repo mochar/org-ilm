@@ -157,6 +157,14 @@ The callback ON-ABORT is called when capture is cancelled."
 
     ;; Priority. We always need a priority value.
     (let ((pqueue (org-ilm--pqueue collection)))
+      
+      ;; Numeric prefixes can be used to overwrite the priority
+      (when (numberp current-prefix-arg)
+        (if (<= 1 current-prefix-arg (1+ (ost-size pqueue)))
+            (setq priority (1- current-prefix-arg))
+          (warn "Priority must be between 1 and %s, got %s"
+                (ost-size pqueue) current-prefix-arg)))
+
       (setq priority
             (if priority
                 (ost-tree-position pqueue priority)

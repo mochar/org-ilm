@@ -225,14 +225,18 @@
         (user-error "No ilm element derived from this registry entry!")))
      (_ (org-ilm-open-collection)))))
 
-(defun org-ilm-extract ()
-  "Extract region depending on file."
-  (interactive)
+(defun org-ilm-extract (&optional priority)
+  "Extract region.
+
+With numeric prefix arg, use as priority rank."
+  (interactive "P")
   (org-ilm--extract))
 
-(defun org-ilm-cloze ()
-  "Create a cloze card"
-  (interactive)
+(defun org-ilm-cloze (&optional priority)
+  "Create a cloze card
+
+With numeric prefix arg, use as priority rank."
+  (interactive "P")
   (org-ilm--cloze))
 
 (defun org-ilm-split ()

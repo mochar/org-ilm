@@ -555,10 +555,12 @@ by default will be the child of this parent element."
   (org-ilm--import-org 'card))
 
 (defun org-ilm--import-capture (&rest data)
-  (let ((immediate-p (if org-ilm-capture-show-menu
-                         current-prefix-arg
-                       (not current-prefix-arg)))
-        (capture (apply #'org-ilm-capture-ensure data)))
+  ;; We check explicitely for non-numeric prefix arg, as numeric prefixes are
+  ;; used to set priority.
+  (let* ((prefix-p (equal current-prefix-arg '(4)))
+         (immediate-p (if org-ilm-capture-show-menu
+                          prefix-p (not prefix-p)))
+         (capture (apply #'org-ilm-capture-ensure data)))
     (if immediate-p
         (org-ilm--capture capture)
       (org-ilm--import-plain-transient capture))))
