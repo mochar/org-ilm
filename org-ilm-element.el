@@ -448,24 +448,31 @@ COLLECTION specifies in which queue to look at."
           (org-todo 'none)
           (org-ilm-queue--insert pqueue priority element))))))
 
-(defun org-ilm-element-delete (element &optional warn-attach)
-  "Delete ilm element at point."
-  (interactive (list (org-ilm--element-from-context)))
+;;;; Deletion
+
+(defun org-ilm--element-delete (element warn)
+  "Delete ELEMENT."
   (cl-assert (org-ilm-element-p element) nil "Not an ilm element")
+  (cl-assert (member warn '(all element attachment)))
 
   (with-slots (id type collection) element
-    (org-ilm--element-with-point-at element
-      (when (called-interactively-p)
+    (org-ilm--org-with-point-at id
+      (when (member warn '(all element))
         (org-mark-subtree)
         (unless (yes-or-no-p "Delete element?")
           (pop-mark)
           (user-error "Abort deletion")))
       
-      (when (and (org-attach-dir) (or (called-interactively-p) warn-attach))
+      (when (and (member warn '(all attachment)) (org-attach-dir))
         (cond-let*
+          ;; Top-level elements (ie imports) have their DIR property set. So if
+          ;; we are deleting such an element, ask to delete entire attachment
+          ;; dir.
           ((org-entry-get nil "DIR")
            (when (yes-or-no-p "Delete ENTIRE attachment directory?")
              (org-attach-delete-all 'force)))
+          ;; Otherwise this is a child element, so ask to delete it and its
+          ;; childrens attachments.
           ([attachments
             (apply #'append
                    (mapcar
@@ -475,7 +482,10 @@ COLLECTION specifies in which queue to look at."
                         (org-attach-dir)
                         (concat (org-element-property :ID headline) "*"))))
                     (org-ilm--element-query-children
-                     element :return-type 'headline :include-self t :all-descendants t)))]
+                     element
+                     :return-type 'headline
+                     :include-self t
+                     :all-descendants t)))]
            (when (yes-or-no-p (format "Delete element %s attachtment(s)?" (length attachments)))
              (dolist (file attachments)
                (delete-file file))))))
@@ -486,6 +496,87 @@ COLLECTION specifies in which queue to look at."
       (run-hook-with-args
        'org-ilm-element-delete-hook
        id type collection))))
+    
+(defun org-ilm--element-delete-many (ids)
+  "Go through each element in IDS can run deletion process."
+  (let* ((ask-confirmation-p t)
+         (confirm-p (lambda (message)
+                      (if (not ask-confirmation-p)
+                          t
+                        (setq message
+                              (propertize 
+                               (concat message " (y)es, (n)o, (!)all, (q)uit")
+                               'face 'bold))
+                        (pcase (read-char message '("y" "n" "!" "q"))
+                          (?y t)
+                          (?n nil)
+                          (?q (throw 'abort nil))
+                          (?! (setq ask-confirmation-p nil)
+                              t)))))
+         ;; When we delete an element, we first add the id of its children to
+         ;; SKIP-IDS so we can skip them without errors.
+         skip-ids)
+    (catch 'abort
+      (dolist (id ids)
+        (cond-let*
+          ((member id skip-ids))
+          ([element (org-ilm--element-by-id id)]
+           (org-id-goto id)
+           (org-mark-subtree)
+           (when (funcall confirm-p "Delete element?")
+             (save-excursion
+               (while (re-search-forward org-heading-regexp (region-end) 'noerror)
+                 (when-let ((child-id (org-id-get)))
+                   (push child-id skip-ids))))
+             (org-ilm--element-delete element 'attachment)))
+          (t
+           (when (funcall confirm-p
+                          (format "Element %s not found. Delete from priority queue?" id))
+             (org-ilm--pqueue-remove id collection))))))))
+
+(defun org-ilm--element-delete-region (beg end)
+  "Delete elements within region."
+  (let (ids)
+    ;; Collect children ids
+    (save-excursion
+      (goto-char beg)
+      (while (re-search-forward org-heading-regexp end 'noerror)
+        (when-let ((id (org-id-get)))
+          (push id ids))))
+
+    (if ids
+        (org-ilm--element-delete-many (reverse ids))
+      (user-error "No elements found"))))
+
+(defun org-ilm-element-delete-children ()
+  "Delete children of element at point."
+  (interactive)
+  (let ((region-beg (save-excursion
+                      (org-end-of-meta-data)
+                      (point)))
+        (region-end (save-excursion (org-end-of-subtree))))
+    (org-ilm--element-delete-region region-beg region-end)))
+
+(defun org-ilm-element-delete-active-region ()
+  "Delete elements in active region."
+  (interactive)
+  (cl-assert (region-active-p))
+  (org-ilm--element-delete-region (region-beginning) (region-end)))
+
+(defun org-ilm-element-delete (&optional delete-children)
+  "Delete element at point.
+
+With prefix delete children.
+With active region delete all in region."
+  (interactive "P")
+  (cond
+   (delete-children
+    (org-ilm-element-delete-children))
+   ((region-active-p)
+    (org-ilm-element-delete-active-region))
+   (t
+    (org-ilm--element-delete))))
+    
 
 ;;;; Transient
 
@@ -632,7 +723,7 @@ COLLECTION specifies in which queue to look at."
     ("k" "Delete"
      (lambda ()
        (interactive)
-       (funcall-interactively #'org-ilm-element-delete (transient-scope))))
+       (org-ilm--element-delete (transient-scope) 'all)))
     ]
    [
     ("C" "New card"

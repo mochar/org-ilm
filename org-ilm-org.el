@@ -694,8 +694,7 @@ A cloze is made automatically of the element at point or active region."
 (defun org-ilm-element-delete-embark (target)
   (let ((element (get-text-property 0 :element target))
         (ov (get-text-property 0 :ov target)))
-    (org-ilm--element-with-point-at element
-      (call-interactively #'org-ilm-element-delete element))
+    (org-ilm--element-delete element 'all)
     (save-excursion
       (goto-char (overlay-start ov))
       (save-match-data

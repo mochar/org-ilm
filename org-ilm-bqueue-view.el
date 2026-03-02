@@ -795,7 +795,7 @@ DAYS can be specified as numeric prefix arg."
          ((ignore-errors (progn (org-id-goto id) t))
           (org-mark-subtree)
           (when (funcall confirm-p "Delete element?")
-            (org-ilm-element-delete (org-ilm--element-at-point) 'warn-attach)
+            (org-ilm--element-delete (org-ilm--element-at-point) 'attachment)
             (funcall delete-id id)))
          (t
           (switch-to-buffer queue-buffer)
