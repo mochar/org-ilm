@@ -122,10 +122,11 @@ The callback ON-ABORT is called when capture is cancelled."
 
       ;; If no priority given, decide based on parent
       (unless priority
-        (when-let* ((parent-p (org-ilm--pqueue-priority
-                               (oref parent id) nil 'nil-if-absent collection))
-                    (p (org-ilm--priority-calculate-child-priority parent-p type)))
-          (setq priority p))))
+        (let* ((parent-p (org-ilm--pqueue-priority
+                          (oref parent id) nil 'nil-if-absent collection))
+               (p (org-ilm--priority-calculate-child-priority
+                   parent-p collection type)))
+          (when p (setq priority p)))))
      (parent (error "PARENT must be of type `org-ilm-element'"))
      (target
       (let* ((target-buf (org-ilm--org-capture-target-buffer target))
@@ -373,8 +374,9 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
                (when-let ((bqueue (org-ilm-capture--bqueue capture)))
                  ;; TODO Do this in seperate thread?
                  (org-ilm--org-mem-ensure)
-                 (let ((element (org-ilm--element-by-id id)))
-                   (org-ilm-bqueue--insert bqueue element))) 
+                 (if-let ((element (org-ilm--element-by-id id)))
+                     (org-ilm-bqueue--insert bqueue element)
+                   (warn "Could not add captured element to queue, not found: %s" id))) 
 
                (when-let ((on-success (org-ilm-capture--on-success capture)))
                  (dolist (callback (ensure-list on-success))

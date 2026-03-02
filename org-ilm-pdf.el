@@ -1295,34 +1295,82 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 
 ;;;; Split
 
-(defun org-ilm-pdf-split ()
-  "Split PDF outline items into a extracts."
-  (interactive)
-  (map-let (:id :attach-dir :pdf-path :collection :headline) (org-ilm--pdf-data)
-    (let ((outline (org-ilm--pdf-outline-get)))
-      (unless outline (error "No outline found"))
-      (let ((depth (cdr
-                    (org-ilm--select-alist
-                     (seq-map
-                      (lambda (section)
-                        (cons
-                         (format "%s%s"
-                                 (make-string (1- (alist-get 'depth section)) ?\s)
-                                 (alist-get 'title section))
-                         (alist-get 'depth section)))
-                      outline)
-                     "Level on which to split: "
-                     nil 'ordered)))
-            (org-ilm-capture-show-menu nil))
+(transient-define-prefix org-ilm--pdf-split-transient (outline)
+  :value
+  (lambda ()
+    `((level . 1)))
+  
+  [
+   ("l" "Level"
+    :cons 'level
+    :class org-ilm-transient-cons-option
+    :reader
+    (lambda (&rest _)
+      (cdr
+       (org-ilm--select-alist
+        (seq-map
+         (lambda (section)
+           (cons
+            (format "%s%s"
+                    (make-string (1- (alist-get 'depth section)) ?\s)
+                    (alist-get 'title section))
+            (alist-get 'depth section)))
+         (transient-scope))
+        "Level on which to split: "
+        nil 'ordered))))
+   ("q" "Queue"
+    :cons 'bqueue-buffer
+    :class org-ilm-transient-cons-option
+    :transient transient--do-call
+    :reader
+    (lambda (&rest _)
+      (if-let* ((collection (org-ilm--collection-from-context)))
+          (org-ilm--bqueue-completing-read nil nil collection)
+        (user-error "Could not find collection"))))
+   ]
+
+  [
+   ("RET" "Split"
+    (lambda ()
+      (interactive)
+      (pcase-let* (((map :id :collection :headline) (org-ilm--pdf-data))
+                   (parent-element (org-ilm--element-by-id id))
+                   ((map level bqueue-buffer) (org-ilm--transient-parse))
+                   (bqueue (when bqueue-buffer
+                             (with-current-buffer bqueue-buffer
+                               org-ilm-bqueue)))
+                   (outline (transient-scope))
+                   (org-ilm-capture-show-menu nil)
+                   (ids))
         (dolist (section outline)
-          (when (= depth (alist-get 'depth section))
-            (org-ilm--import-capture
-             :type 'material
-             :parent (org-ilm--element-by-id id)
-             :title (concat "Section: " (alist-get 'title section))
-             :props (list :ILM_PDF (org-ilm--pdf-spec-to-string (alist-get 'spec section))))))))))
+          (when (= level (alist-get 'depth section))
+            (let ((id (org-id-new)))
+              (push id ids)
+              (org-ilm--import-capture
+               :type 'material
+               :id id
+               :parent parent-element
+               :title (concat "Section: " (alist-get 'title section))
+               :props (list :ILM_PDF (org-ilm--pdf-spec-to-string (alist-get 'spec section)))))))
 
+        ;; Add to bqueue after capture, this way we only need to ensure org-mem
+        ;; cache once.
+        (when (and bqueue ids)
+          (org-ilm--org-mem-ensure)
+          (dolist (id ids)
+            (if-let ((element (org-ilm--element-by-id id)))
+                (org-ilm-bqueue--insert bqueue element)
+              (warn "Could not add captured element to queue, not found: %s" id)))))))
+   ]
 
+  (interactive "P")
+  (transient-setup 'org-ilm--pdf-split-transient nil nil :scope outline))
+
+(cl-defmethod org-ilm--split (&context (ilm-attachment pdf))
+  "Split PDF document by section."
+  (let ((outline (org-ilm--pdf-outline-get)))
+    (unless outline (user-error "No outline found"))
+    (org-ilm--pdf-split-transient outline)))
 
 
 ;;;; Interactive capture

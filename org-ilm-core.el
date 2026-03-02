@@ -77,6 +77,9 @@ here."
 (cl-defgeneric org-ilm--cloze ()
   (user-error "Cannot cloze here"))
 
+(cl-defgeneric org-ilm--split ()
+  (user-error "Cannot split here"))
+
 (cl-defgeneric org-ilm--point ()
   (user-error "Cannot set point here"))
 

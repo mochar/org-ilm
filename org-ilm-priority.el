@@ -22,10 +22,11 @@
   :type 'float
   :group 'org-ilm-priority)
 
-(defun org-ilm--priority-calculate-child-priority (parent-priority type)
+(defun org-ilm--priority-calculate-child-priority (parent-priority collection type)
   "Calculate child capture's priority based on PARENT-PRIORITY and capture TYPE.
 Uses a multiplicative factor to ensure children are prioritized ahead of parents."
-  (if-let* ((parent-priority (org-ilm--pqueue-position parent-priority))
+  (if-let* ((pqueue (org-ilm--pqueue collection))
+            (parent-priority (ost-tree-position pqueue parent-priority 1)) 
             (parent-rank (car parent-priority))
             (factor (pcase type
                       ('card org-ilm-priority-factor-card)
@@ -36,8 +37,10 @@ Uses a multiplicative factor to ensure children are prioritized ahead of parents
              ;; don't land on the exact same integer index.  This spreads them
              ;; out slightly (e.g., +/- 2 spots).
              (jitter (random 5))
-             (new-rank (max 0 (+ new-rank jitter))))
-        (org-ilm--pqueue-position-new new-rank))
+             ;; Make sure 0 <= rank <= ost size
+             (new-rank (max 0 (min (+ new-rank jitter)
+                                   (1- (ost-tree-size pqueue 1))))))
+        (ost-tree-position pqueue new-rank 1))
     ;; If parent not in queue, fallback to top of queue (0) or end?
     ;; Defaulting to 0 (highest priority) for captured items without 
     ;; queued parents is usually safe for active learners.

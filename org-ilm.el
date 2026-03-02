@@ -238,13 +238,7 @@
 (defun org-ilm-split ()
   "Split document by section."
   (interactive)
-  (if (eq 'attachment (car (org-ilm--where-am-i)))
-      (cond
-       ((eq major-mode 'org-mode)
-        (call-interactively #'org-ilm-org-split))
-       ((org-ilm--pdf-mode-p)
-        (call-interactively #'org-ilm-pdf-split)))
-    (user-error "Splitting can only be done from within an attachment")))
+  (org-ilm--split))
 
 (defun org-ilm-point (&optional arg)
   "Mark location as reading point."

@@ -119,7 +119,7 @@
       (org-ilm-org-extract)
     (org-ilm-mark-mode 1)))
 
-(defun org-ilm-org-extract (&optional title)
+(defun org-ilm-org-extract (&rest capture-kwargs)
   "Extract region text in Org mode attachments."
   (interactive)
   (unless (region-active-p) (user-error "No region active"))
@@ -145,7 +145,7 @@
                            (max (- region-end 1) 1)
                          region-end))
            (region-text (org-ilm--org-buffer-text-prepare region-begin region-end))
-           (extract-org-id (org-id-new))
+           (extract-org-id (or (plist-get capture-kwargs :id) (org-id-new)))
            (entry (org-mem-entry-by-id attach-org-id))
            props)
 
@@ -153,13 +153,13 @@
       (when (org-mem-entry-property-with-inheritance org-ilm-property-media entry)
         (when-let ((timer (org-ilm--media-extract-range region-text)))
           (setf (plist-get props :ILM_MEDIA+) timer)))
-          
-      (org-ilm--import-capture
+      
+      (apply
+       #'org-ilm--import-capture
        :type 'material
        :parent (org-ilm--element-by-id file-org-id)
        :id extract-org-id
        :content region-text
-       :title title
        :props props
        :on-success
        (lambda (&rest _)
@@ -188,6 +188,7 @@
 
                (save-buffer)
                (org-ilm-recreate-overlays region-begin (point))))))
+       capture-kwargs
        ))))
 
 ;;;; Cloze
@@ -412,30 +413,71 @@ A cloze is made automatically of the element at point or active region."
 
 ;;;; Split
 
-(defun org-ilm-org-split (&optional level)
+(transient-define-prefix org-ilm--org-split-transient ()
+  :value
+  (lambda ()
+    `((level . ,(max (org-outline-level) 1))))
+  
+  ["Split"
+   ("l" "Level"
+    :cons 'level
+    :class org-ilm-transient-cons-option
+    :reader
+    (lambda (&rest _)
+      (read-number "Split by level: "  (max (org-outline-level) 1))))
+   ("q" "Queue"
+    :cons 'bqueue-buffer
+    :class org-ilm-transient-cons-option
+    :transient transient--do-call
+    :reader
+    (lambda (&rest _)
+      (if-let* ((collection (org-ilm--collection-from-context)))
+          (org-ilm--bqueue-completing-read nil nil collection)
+        (user-error "Could not find collection"))))
+   ]
+  
+  [
+   ("RET" "Split"
+    (lambda ()
+      (interactive)
+      (map-let (level bqueue-buffer) (org-ilm--transient-parse)
+        (let ((bqueue (when bqueue-buffer
+                        (with-current-buffer bqueue-buffer
+                          org-ilm-bqueue)))
+              (org-ilm-capture-show-menu nil)
+              ids)
+          
+          (save-excursion
+            (goto-char (point-min))
+            (let ((re (format "^\\*\\{%d\\} " level))
+                  title id)
+              (while (re-search-forward re nil t)
+                (setq title (org-get-heading t t t t))
+                (push (setq id (org-id-new)) ids)
+                (atomic-change-group
+                  (beginning-of-line)
+                  (insert "\n")
+                  (set-mark (point))
+                  (org-end-of-subtree t)
+                  (insert "\n")
+                  (org-ilm-org-extract :title title :id id)))))
+
+          ;; Add to bqueue after capture, this way we only need to ensure
+          ;; org-mem cache once.
+          (when (and bqueue ids)
+            (org-ilm--org-mem-ensure)
+            (dolist (id ids)
+              (if-let ((element (org-ilm--element-by-id id)))
+                  (org-ilm-bqueue--insert bqueue element)
+                (warn "Could not add captured element to queue, not found: %s" id))))
+          
+          ))))
+   ]
+  )
+
+(cl-defmethod org-ilm--split (&context (ilm-attachment org))
   "Split org document by heading level."
-  (interactive)
-  (cl-assert (and (eq (car (org-ilm--where-am-i)) 'attachment)
-                  (eq major-mode 'org-mode))
-             nil "Not in Org mode attachment")
-
-  (unless level
-    (setq level (read-number "Split by level: "  (max (org-outline-level) 1))))
-
-  (let ((org-ilm-capture-show-menu nil))
-    (save-excursion
-      (goto-char (point-min))
-      (let ((re (format "^\\*\\{%d\\} " level))
-            title)
-        (while (re-search-forward re nil t)
-          (setq title (org-get-heading t t t t))
-          (atomic-change-group
-            (beginning-of-line)
-            (insert "\n")
-            (set-mark (point))
-            (org-end-of-subtree t)
-            (insert "\n")
-            (org-ilm-org-extract title)))))))
+  (org-ilm--org-split-transient))
 
 ;;;; Target overlays
 
