@@ -957,24 +957,6 @@ buffer-local `pdf-view--hotspot-functions'."
               (attach-dir (file-name-directory attachment))
               (spec (org-ilm--pdf-spec-parse pdf-range attachment))
               (buffer-name (concat (org-id-get) ".pdf")))
-
-    ;; For cards, the ILM_PDF property specifies the cloze, so it is not
-    ;; desirable to zoom into just the cloze region. Instead infer from parent
-    ;; what region should be, and `org-ilm--pdf-render-page-highlights' will
-    ;; show the current cloze region with a black border. Further during review,
-    ;; the alpha will be set to 1 to hide the cloze.
-    ;; (when (eq el-type 'card)
-    ;;   (save-excursion
-    ;;     (org-up-heading 1)
-    ;;     (if-let ((parent-pdf-range (org-entry-get nil "ILM_PDF")))
-    ;;         (setq spec (org-ilm--pdf-parse-spec
-    ;;                     (org-ilm--pdf-range-from-string
-    ;;                      parent-pdf-range)
-    ;;                     attachment))
-    ;;       (setq spec (org-ilm--pdf-parse-spec
-    ;;                   (plist-get spec :begin-page)
-    ;;                   attachment)))))
-
     (org-ilm--pdf-open-specs (list spec) buffer-name attach-dir no-region)))
 
 (defun org-ilm--pdf-open-specs (specs buffer-name attach-dir &optional no-region)
@@ -1156,6 +1138,17 @@ See also `org-ilm-pdf-convert-org-respect-area'."
        card-p)
     (error "No interactive capture active")))
 
+(defun org-ilm--pdf-extract-region (output-type)
+  (if (pdf-view-active-region-p)
+      (org-ilm--pdf-capture-spec
+       output-type
+       (make-org-ilm-pdf-spec
+        :single-page-p t
+        :parts (list (make-org-ilm-pdf-page
+                      :number (org-ilm--pdf-page-normalized)
+                      :area (org-ilm--pdf-active-region)))))
+    (error "No active region")))
+
 (defun org-ilm--pdf-extract-outline-section (output-type)
   (if-let ((section (org-ilm--pdf-outline-page-sections)))
       (org-ilm--pdf-capture-spec
@@ -1269,15 +1262,25 @@ See also `org-ilm-pdf-convert-org-respect-area'."
           '(virtual text image marker)
           (concat action-str " custom selection as: ")))
        card-p))
+     ;; When region selected:
+     ;; Extract: Region becomes area
+     ;; Card: Region becomes selection, area is whole page
+     ;; This is because clozes are useless without their context. Add the same
+     ;; time we want to be able to extract only part of a page.
      ((pdf-view-active-region-p)
-      (org-ilm-pdf-select-region 'no-redisplay)
-      (org-ilm--pdf-capture-interactive
-       (if card-p
-           'virtual
-         (org-ilm--pdf-capture-prompt-for-format
-          '(virtual text image marker)
-          (concat action-str " custom selection as: ")))
-       card-p))
+      (if (not card-p)
+          (org-ilm--pdf-extract-region
+           (org-ilm--pdf-capture-prompt-for-format
+            '(virtual text image marker)
+            (concat action-str " area as: ")))
+        (org-ilm-pdf-select-region 'no-redisplay)
+        (org-ilm--pdf-capture-interactive
+         (if card-p
+             'virtual
+           (org-ilm--pdf-capture-prompt-for-format
+            '(virtual text image marker)
+            (concat action-str " custom selection as: ")))
+         card-p)))
      (t
       (when card-p
         (user-error "Cannot cloze without selection"))
