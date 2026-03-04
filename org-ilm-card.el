@@ -66,7 +66,25 @@ FSRS default: t"
 (defconst org-ilm-property-card-state "ILM_CARD_STATE")
 (defconst org-ilm-property-card-stability "ILM_CARD_STABILITY")
 (defconst org-ilm-property-card-difficulty "ILM_CARD_DIFFICULTY")
-(defconst org-ilm-property-card-retention "ILM_RETENTION")
+(defconst org-ilm-property-card-retention "ILM_CARD_RETENTION")
+
+;;;; Parameters
+
+(cl-defmethod org-ilm--parameter-data ((parameter (eql card-retention)))
+  (list
+   :parameter 'card-retention
+   :property org-ilm-property-card-retention
+   :prompt "Desired retention (0-1): "
+   :validate
+   (lambda (value)
+     (when (stringp value) (setq value (string-to-number value)))
+     (unless (and (numberp value) (< 0 value 1))
+       (error "Desired retention must be between 0 and 1"))
+     value)
+   :aggregate
+   (lambda (concept-values)
+     (apply #'org-ilm--mean (mapcar #'cdr concept-values)))
+   ))
 
 ;;;; Functions
 
@@ -95,24 +113,11 @@ FSRS default: t"
 concept properties."
   (cl-assert (org-ilm-element--card-p element) nil "Element not a card")
   (let ((retention (or
-                    (when-let ((r (org-entry-get nil org-ilm-property-card-retention)))
-                      (string-to-number r))
-                    (when-let ((r (seq-keep
-                                   (lambda (x)
-                                     (let ((r (string-to-number (cdr x))))
-                                       (if (< 0 r 1)
-                                           r
-                                         (message "Detected invalid retention property: %s" r)
-                                         nil)))
-                                   (org-ilm--concept-property-or-inherited
-                                    (org-ilm-element--id element)
-                                    org-ilm-property-card-retention))))
-                      (apply #'org-ilm--mean r))
+                    (org-ilm--parameter-compile-value 'card-retention)
                     org-ilm-card-fsrs-desired-retention)))
     (unless (and (numberp retention) (< 0 retention 1))
-      (message "Invalid inherited retention value: %s" retention)
+      (warn "Invalid inherited retention value: %s" retention)
       (setq retention org-ilm-card-fsrs-desired-retention))
-    
     (fsrs-make-scheduler
      :desired-retention retention
      :learning-steps org-ilm-card-fsrs-learning-steps

@@ -16,7 +16,7 @@
 
 ;;;; Variables
 
-(defconst org-ilm-property-multiplier "ILM_MULTIPLIER")
+(defconst org-ilm-property-material-multiplier "ILM_MTRL_MULTIPLIER")
 
 ;;;; Functions
 
@@ -37,6 +37,22 @@ Lower PRIORITY → higher importance → smaller A."
                       (- (/ 1.0 (+ 1.0 (exp (* (- k) 0.5))))
                          (/ 1.0 (+ 1.0 (exp (* k 0.5))))))))
     (+ min-a (* (- max-a min-a) sig-norm))))
+
+(cl-defmethod org-ilm--parameter-data ((parameter (eql material-multiplier)))
+  (list
+   :parameter 'material-multiplier
+   :property org-ilm-property-material-multiplier
+   :prompt "Interval multiplier (>0): "
+   :validate
+   (lambda (value)
+     (when (stringp value) (setq value (string-to-number value)))
+     (unless (and (numberp value) (> value 0))
+       (error "Material multiplier must be a number greater than 0"))
+     value)
+   :aggregate
+   (lambda (concept-values)
+     (apply #'org-ilm--mean (mapcar #'cdr concept-values)))
+   ))
 
 (defun org-ilm--material-calculate-interval (priority scheduled last-review &optional multiplier)
   "Calculate the new scheduled interval in days.
@@ -76,13 +92,7 @@ This will update the log table and the headline scheduled date."
       (cl-assert last-review nil "Element missing log")
       (let* ((scheduled (org-ilm-element--sched element))
              (priority  (org-ilm-element--priority element))
-             ;; TODO Inherit from concepts like fsrs retention?
-             (multiplier (when-let ((m (org-entry-get nil org-ilm-property-multiplier)))
-                           (setq m (string-to-number m))
-                           (if (> m 0)
-                               m
-                             (message "Multiplier property invalid")
-                             nil)))
+             (multiplier (org-ilm--parameter-compile-value 'material-multiplier))
              (interval (org-ilm--material-calculate-interval
                         priority scheduled
                         (ts-parse (org-ilm-log-review--timestamp last-review))

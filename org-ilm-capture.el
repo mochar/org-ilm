@@ -134,10 +134,11 @@ The callback ON-ABORT is called when capture is cancelled."
         (if collection
             (cl-assert (org-ilm--collection-file target-path collection)
                        nil "TARGET not in COLLECTION")
-          (let ((collections (org-ilm--collection-file target-file)))
+          (let ((collections (org-ilm--collection-file target-path)))
             (pcase (length collections)
-              (0 (error "No collcetion specified or found for target %s" target))
+              (0 (error "No collection specified or found for target %s" target))
               (1 (setq collection (car collections)))
+              ;; TODO Can probably just be completing read
               (_ (error "Target %s may belong to one of multiple collections: %s" collections)))))))
      (t
       (cl-assert (assoc collection (org-ilm-collections)) nil

@@ -702,6 +702,7 @@ With active region delete all in region."
    ("m" "Media..." org-ilm--element-media-transient :transient t
     :if (lambda () (oref (transient-scope) media)))
    ("v" "Convert..." org-ilm-convert-menu :transient t)
+   ("r" "Parameters..." org-ilm--element-parameters-transient :transient t)
    ]
    
   ["Actions"
@@ -755,6 +756,37 @@ With active region delete all in region."
      (org-ilm-concept-menu))
     (t
      (user-error "Ilm element not found"))))
+
+;;;;; Parameters
+
+(transient-define-prefix org-ilm--element-parameters-transient (scope)
+  :refresh-suffixes t
+
+  ["Parameters"
+   [""
+    :if (lambda () (eq (oref (transient-scope) type) 'card))
+    :setup-children
+    (lambda (_)
+      (org-ilm--parameter-build-suffix-children
+       'org-ilm--concept-transient
+       "r" "Desired retention"
+       (oref (transient-scope) id)
+       'card-retention))
+    ]
+   [""
+    :if (lambda () (eq (oref (transient-scope) type) 'material))
+    :setup-children
+    (lambda (_)
+      (org-ilm--parameter-build-suffix-children
+       'org-ilm--concept-transient
+       "m" "Interval multiplier"
+       (oref (transient-scope) id)
+       'material-multiplier))
+    ]
+   ]
+  
+  (interactive "P")
+  (transient-setup 'org-ilm--element-parameters-transient nil nil :scope (transient-scope)))
 
 ;;;;; Attachment
 

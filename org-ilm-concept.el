@@ -410,46 +410,100 @@ outline, and/or property concept."
 
 (transient-define-prefix org-ilm--concept-transient ()
   :refresh-suffixes t
-
-  ["Concepts"
-   :setup-children
-   (lambda (_)
-     (seq-map
-      (lambda (concept)
-        (pcase-let (((map :outline :direct :property :title :id) concept)
-                    (keymap (make-sparse-keymap)))
-          ;; TODO Clicking doesnt work
-          (define-key keymap [mouse-1]
-                      (lambda ()
-                        (interactive)
-                        (org-ilm--org-goto-id id)))
-          (transient-parse-suffix
-           'org-ilm--concept-transient
-           (list :info*
-                 (concat 
-                  (propertize "P" 'face (if property 'error 'Info-quoted))
-                  (propertize "O" 'face (if outline 'error 'Info-quoted))
-                  (propertize "D" 'face (if direct 'error 'Info-quoted))
-                  " "
-                  (propertize title 'mouse-face 'highlight 'keymap keymap))))))
-      (plist-get (transient-scope) :concepts)))
-   ]
+  :value
+  (lambda ()
+    (org-ilm--org-with-point-at (plist-get (transient-scope) :id)
+      (mapcar
+       (lambda (parameter)
+         (map-let (:property) (org-ilm--parameter-data parameter)
+           (cons parameter (org-entry-get nil property))))
+       '(material-multiplier card-retention))))
 
   [
-   ("n" "Concepts"
-    (lambda ()
-      (interactive)
-      (let ((id (plist-get (transient-scope) :id)))
-        (org-ilm--concept-set
-         id
-         (lambda ()
-           (org-ilm--concept-transient-rebuild-scope)
-           (unless (eq transient-current-command 'org-ilm--concept-transient)
-             (org-ilm--concept-transient))
-           ))))
-    :transient transient--do-stay
-    )
-   ]
+   ["Concepts"
+    :setup-children
+    (lambda (children)
+      (append
+       children
+       (seq-map
+        (lambda (concept)
+          (pcase-let (((map :outline :direct :property :title :id) concept)
+                      (keymap (make-sparse-keymap)))
+            ;; TODO Clicking doesnt work
+            (define-key keymap [mouse-1]
+                        (lambda ()
+                          (interactive)
+                          (org-ilm--org-goto-id id)))
+            (transient-parse-suffix
+             'org-ilm--concept-transient
+             (list :info*
+                   (concat 
+                    (propertize "P" 'face (if property 'error 'Info-quoted))
+                    (propertize "O" 'face (if outline 'error 'Info-quoted))
+                    (propertize "D" 'face (if direct 'error 'Info-quoted))
+                    " "
+                    (propertize title 'mouse-face 'highlight 'keymap keymap))))))
+        (plist-get (transient-scope) :concepts))))
+    ("n" "Concepts"
+     (lambda ()
+       (interactive)
+       (let ((id (plist-get (transient-scope) :id)))
+         (org-ilm--concept-set
+          id
+          (lambda ()
+            (org-ilm--concept-transient-rebuild-scope)
+            (unless (eq transient-current-command 'org-ilm--concept-transient)
+              (org-ilm--concept-transient))
+            ))))
+     :transient transient--do-stay
+     )
+    ]
+    ["Parameters"
+     :setup-children
+     (lambda (children)
+       (org-ilm--parameter-build-suffix-children
+        'org-ilm--concept-transient
+        "r" "Card desired retention"
+        (plist-get (transient-scope) :id)
+        'card-retention)
+       )
+     ]
+    [""
+     :setup-children
+     (lambda (children)
+       (org-ilm--parameter-build-suffix-children
+        'org-ilm--concept-transient
+        "m" "Material interval multiplier"
+        (plist-get (transient-scope) :id)
+        'material-multiplier)
+       )
+     ]
+    ;; ]
+   ;; ["Parameters"
+   ;;  :setup-children
+   ;;  (lambda (children)
+   ;;    (mapcar
+   ;;     (lambda (data)
+   ;;       (pcase-let* ((`(,parameter ,key ,desc) data)
+   ;;                    ((map :property :prompt :validate) (org-ilm--parameter-data parameter)))
+   ;;         (transient-parse-suffix
+   ;;          'org-ilm--concept-transient
+   ;;          `(
+   ;;            ,key ,desc
+   ;;            :cons ',parameter
+   ;;            :class org-ilm-transient-cons-option
+   ;;            :always-read t
+   ;;            :reader
+   ;;            ,(lambda (&rest _)
+   ;;               (let ((value (org-ilm--parameter-read prompt validate)))
+   ;;                 (org-ilm--org-with-point-at (plist-get (transient-scope) :id)
+   ;;                   (org-entry-put nil property (format "%s" value)))
+   ;;                 value))
+   ;;            :transient t))))
+   ;;     '((card-retention "r" "Card retention")
+   ;;       (material-multiplier "m" "Material int multip"))))
+   ;;  ]
+  ]
   
   (interactive)
   (transient-setup
