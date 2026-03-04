@@ -916,10 +916,12 @@ buffer-local `pdf-view--hotspot-functions'."
 ;; which we intercept to add our capture highlights. Alternative was calling
 ;; `pdf-view-display-region' to create the regions but it gets overwritten as
 ;; soon as the image needs to be generated again.
-(defun org-ilm--advice--pdf-view-create-page (page &optional window)
+(defun org-ilm--advice--pdf-view-create-page (orig-func &rest args)
   (if (not (org-ilm--attachment-data))
-      (pdf-view-create-page page window) 
-    (let* ((highlights (or (ensure-list
+      (apply orig-func args)
+    (let* ((page (car args))
+           (window (nth 1 args)) ; optional
+           (highlights (or (ensure-list
                             (org-ilm--pdf-interactive-capture-page-highlights page))
                            (and (org-ilm--attachment-data)
                                 org-ilm-pdf-highlight-highlights-p
@@ -1641,7 +1643,7 @@ With prefix arg, use mouse position as bottom cutoff point."
   (cond
    (org-ilm-global-minor-mode
     (advice-add #'pdf-view-create-page
-                :override #'org-ilm--advice--pdf-view-create-page)
+                :around #'org-ilm--advice--pdf-view-create-page)
     (define-key pdf-view-mode-map (kbd "A") org-ilm-pdf-map)
     (define-key pdf-view-mode-map (kbd "e") #'org-ilm-element-menu)
     (advice-add 'pdf-annot-create-context-menu
