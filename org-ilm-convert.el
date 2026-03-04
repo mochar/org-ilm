@@ -44,7 +44,7 @@
   data ; arbitrary
   buffer
   chain ; org-ilm-convert-chain object
-  start ;; ts
+  start end ;; ts
   on-success
   on-error
   default-dir)
@@ -124,6 +124,7 @@
 (defun org-ilm-convert-job--handle-completion (job success)
   "Handles completion of a JOB. SUCCESS indicates if job finished
 successfully."
+  (oset job end (ts-now))
   (with-slots (buffer name on-success on-error) job
     (let* ((status (if success :success :error))
            (chain (oref job chain))
@@ -281,7 +282,8 @@ successfully.. ON-ERROR will be called when any job errors."
   ;; "k" (lambda ()
   ;;       (interactive)
   ;;       (kill-buffer (current-buffer)))
-  "g" #'org-ilm-convert-conversions-revert)
+  "g" #'org-ilm-convert-conversions-revert
+  )
 
 (defvar-keymap org-ilm-convert-conversions-map
   :doc "Keymap for the conversions view."
@@ -290,7 +292,8 @@ successfully.. ON-ERROR will be called when any job errors."
   "RET" #'org-ilm-convert-conversions-buffer-open
   "d" #'org-ilm-convert-conversions-delete
   "D" #'org-ilm-convert-conversions-delete-all
-  "B" #'org-ilm-convert-conversions-ibuffer)
+  "B" #'org-ilm-convert-conversions-ibuffer
+  "r" #'org-ilm-convert-conversions-rerun)
 
 (defun org-ilm-convert-conversions-goto ()
   "View element of object at point in collection."
@@ -305,6 +308,14 @@ successfully.. ON-ERROR will be called when any job errors."
     (if (and buf (buffer-live-p buf))
         (pop-to-buffer buf)
       (user-error "Buffer not found"))))
+
+(defun org-ilm-convert-conversions-rerun ()
+  "Rerun job at point."
+  (interactive)
+  (when (yes-or-no-p "Run again?")
+    (let ((job (vtable-current-object)))
+      (org-ilm-convert-job--run job)
+      (org-ilm-convert-conversions-revert))))
 
 (defun org-ilm-convert-conversions-delete ()
   "Remove job at point and its status buffer."
@@ -377,6 +388,10 @@ successfully.. ON-ERROR will be called when any job errors."
       :width 6
       )
      (:name
+      "End"
+      :width 6
+      )
+     (:name
       "Converter"
       ;; :min-width "30%"
       ;; :min-width "100%"
@@ -386,14 +401,14 @@ successfully.. ON-ERROR will be called when any job errors."
       :formatter
       (lambda (chain)
         (if chain (oref chain name) ""))
-      :max-width "30%"
+      :max-width "25%"
       )
      (:name
       "ID"
       :formatter
       (lambda (id)
         (propertize id 'face 'Info-quoted))
-      ;; :width 20
+      :max-width "30%"
       )
      )
    :getter
@@ -401,6 +416,7 @@ successfully.. ON-ERROR will be called when any job errors."
      (pcase (vtable-column vtable column)
        ("ID" (oref job id))
        ("Start" (ts-format "%H:%M" (oref job start)))
+       ("End" (if (oref job end) (ts-format "%H:%M" (oref job end)) ""))
        ("Status" (oref job status))
        ("Converter" (oref job name))
        ("Chain" (oref job chain))
@@ -454,6 +470,7 @@ successfully.. ON-ERROR will be called when any job errors."
   "Convert with Pandoc."
   (setq input-path (expand-file-name input-path)
         input-format (or input-format (file-name-extension input-path)))
+  (when (string= input-format "md") (setq input-format "markdown"))
   (let (output-dir)
     (cond
      ((null output-path)
@@ -871,6 +888,121 @@ does not have an option for this so it is done here. "
       ))
    )
   )
+
+
+;;;; Docling
+
+(defcustom org-ilm-convert-docling-path (executable-find "docling")
+  "Path to the docling executable."
+  :type 'file
+  :group 'org-ilm-convert-docling)
+
+(cl-defun org-ilm--convert-make-docling
+    (run-p
+     &key
+     job-args
+     input-path input-format
+     output-format output-dir
+     (image-export-mode "embedded") ; docling default
+     (ocr-p t) ; default: on
+     (ocr-engine "auto") ; default: auto
+     ocr-lang ; comma seperated, depends on engine
+     enrich-code ; default: off
+     enrich-formula ; default: off
+     enrich-picture-description ; default: off
+     artifacts-path
+     (allow-external-plugins t)
+     (page-batch-size 4) ; default: 4
+     flags)
+  "Convert a file using Docling."
+  (cl-assert (member image-export-mode '(nil "placeholder" "embedded" "referenced")))
+  (cl-assert (member ocr-engine '(nil "auto" "easyocr" "ocrmac" "rapidocr" "tesserocr" "tesseract" "onnxtr")))
+  (let* ((input-path (expand-file-name input-path))
+         (output-dir (or output-dir (file-name-directory input-path)))
+         (output-path (expand-file-name
+                       (concat (file-name-base input-path) "." output-format)
+                       output-dir)))
+    (apply
+     #'org-ilm--convert-make-job
+     run-p
+     :type 'docling
+     :method :cli
+     :data (list :output-format output-format
+                 :output-path output-path)
+     :payload
+     (append
+      (list
+       org-ilm-convert-docling-path
+       input-path
+       "--to" output-format
+       "--output" output-dir
+       "--image-export-mode" image-export-mode
+       (if enrich-code "--enrich-code" "--no-enrich-code")
+       (if enrich-formula "--enrich-formula" "--no-enrich-formula")
+       (if enrich-picture-description
+           "--enrich-picture-description"
+         "--no-enrich-picture-description")
+       (if ocr-p "--ocr" "--no-ocr")
+       "--ocr-engine" ocr-engine
+       "--page-batch-size" (format "%s" page-batch-size)
+       )
+      (when ocr-lang
+        `("--ocr-lang" ,ocr-lang))
+      (when input-format
+        `("--from" ,input-format))
+      (when artifacts-path
+        `("--artifacts-path" ,artifacts-path))
+      (when allow-external-plugins
+        '("--allow-external-plugins")
+        )
+      flags)
+     job-args)))
+
+(cl-defmethod org-ilm--convert-make-converter ((type (eql 'docling)) run-p &rest args)
+  (apply #'org-ilm--convert-make-docling run-p args))
+
+(cl-defmethod org-ilm--convert-make-converter-in-chain
+  ((type (eql 'pandoc)) (from-type (eql 'docling)) docling-job args)
+  (map-let (:output-path :output-format) (oref docling-job data)
+    (setf (plist-get args :input-path) output-path
+          (plist-get args :input-format) output-format))
+  (cl-call-next-method type from-type docling-job args))
+
+(when nil
+  (org-ilm--convert-make-docling
+   'run
+   :input-path "~/tmp/docling/192.png"
+   :output-format "html"
+   :ocr-engine "onnxtr"
+   :ocr-lang "nl"
+   :artifacts-path "/home/mochar/.cache/docling/models"
+   )
+
+  (org-ilm--convert-make-docling
+   'run
+   :input-path "~/tmp/docling/a.pdf"
+   :output-format "html"
+   :ocr-engine "onnxtr"
+   :artifacts-path "/home/mochar/.cache/docling/models"
+   :enrich-formula t
+   :page-batch-size 1
+   )
+
+  (org-ilm--convert-make-converter-chain
+   :run-p t
+   :on-success (lambda (j) (message "WOWOWOWO"))
+   :converters
+   `((docling
+      :input-path "~/tmp/docling/math.png"
+      :output-format "md"
+      :artifacts-path "/home/mochar/.cache/docling/models"
+      :enrich-formula t)
+     (pandoc
+      :output-format "org"
+      )
+   ))
+  )
+
 
 
 ;;;; yt-dlp
