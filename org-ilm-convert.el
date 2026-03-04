@@ -627,6 +627,56 @@ successfully.. ON-ERROR will be called when any job errors."
   )
 
 
+;;;; QPDF
+
+;; For cutting PDF files
+
+(defcustom org-ilm-convert-qpdf-path (executable-find "qpdf")
+  "Path to the qpdf executable."
+  :type 'file
+  :group 'org-ilm-convert-qpdf)
+
+(cl-defun org-ilm--convert-make-qpdf
+    (run-p
+     &key
+     job-args
+     input-path 
+     output-dir output-path output-name
+     pages-spec flags)
+  "Cut PDF using QPDF."
+  (cl-assert (or output-path output-name) nil "Must specify output path or name")
+  (setq input-path (expand-file-name input-path))
+  (unless output-name
+    (setq output-name (file-name-base output-path)))
+  (unless output-dir
+    (setq output-dir (if output-path (file-name-directory output-path)
+                       (file-name-directory input-path))))
+  (unless output-path
+    (setq output-path (expand-file-name (concat output-name ".pdf") output-dir)))
+  
+  (apply
+   #'org-ilm--convert-make-job
+   run-p
+   :type 'qpdf
+   :method :cli
+   :data (list :output-path output-path)
+   :payload
+   (append
+    (list
+     org-ilm-convert-qpdf-path
+     "--empty"
+     "--pages"
+     input-path
+     pages-spec
+     "--"
+     output-path)
+    flags)
+   job-args))
+
+(cl-defmethod org-ilm--convert-make-converter ((type (eql 'qpdf)) run-p &rest args)
+  (apply #'org-ilm--convert-make-qpdf run-p args))
+
+
 ;;;; Marker
 
 ;; Marker: https://github.com/datalab-to/marker
@@ -962,6 +1012,12 @@ does not have an option for this so it is done here. "
   (apply #'org-ilm--convert-make-docling run-p args))
 
 (cl-defmethod org-ilm--convert-make-converter-in-chain
+  ((type (eql 'docling)) (from-type (eql 'qpdf)) qpdf-job args)
+  (map-let (:output-path) (oref qpdf-job data)
+    (setf (plist-get args :input-path) output-path))
+  (cl-call-next-method type from-type qpdf-job args))
+
+(cl-defmethod org-ilm--convert-make-converter-in-chain
   ((type (eql 'pandoc)) (from-type (eql 'docling)) docling-job args)
   (map-let (:output-path :output-format) (oref docling-job data)
     (setf (plist-get args :input-path) output-path
@@ -978,14 +1034,23 @@ does not have an option for this so it is done here. "
    :artifacts-path "/home/mochar/.cache/docling/models"
    )
 
-  (org-ilm--convert-make-docling
-   'run
-   :input-path "~/tmp/docling/a.pdf"
-   :output-format "html"
-   :ocr-engine "onnxtr"
-   :artifacts-path "/home/mochar/.cache/docling/models"
-   :enrich-formula t
-   :page-batch-size 1
+  (org-ilm--convert-make-converter-chain
+   :run-p t
+   :on-success (lambda (j) (message "WOWOWOWO"))
+   :converters
+   `((qpdf
+      :input-path "~/tmp/docling/a.pdf"
+      :output-name "a_part"
+      :pages-spec "2,3"
+      )
+     (docling
+      :output-format "html"
+      :ocr-engine "onnxtr"
+      :artifacts-path "/home/mochar/.cache/docling/models"
+      :enrich-formula t
+      :enrich-code t
+      :page-batch-size 1
+      ))
    )
 
   (org-ilm--convert-make-converter-chain
