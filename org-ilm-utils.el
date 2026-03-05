@@ -134,6 +134,75 @@ dates in the past, and negative for dates in the future."
          (format "in %sd" (* -1 difference)))
         (t "today")))
 
+;; Thanks Gemini:
+(defun org-ilm--ts-human-relative (ts &optional now)
+  "Return a human-readable relative time string for a TS object.
+Examples: 'in 1 year and 3 months', '3 months and 5 days ago'."
+  (require 'calendar)
+  (let* ((now (or now (ts-now)))
+         (diff-secs (- (ts-unix ts) (ts-unix now)))
+         (is-future (> diff-secs 0))
+         
+         ;; FIX 1: Round to the nearest minute. 
+         ;; This completely prevents a 1-millisecond execution delay from 
+         ;; causing "4 hours and 59 minutes" to truncate down to 4 hours.
+         (abs-secs (* 60.0 (round (abs diff-secs) 60.0)))
+         
+         ;; FIX 2: Use EXACTLY 30 days for a month and 365 for a year.
+         ;; This ensures that division leaves perfect remainders for `truncate`.
+         (sec-year   31536000.0) ; 365 days exactly
+         (sec-month  2592000.0)  ; 30 days exactly
+         (sec-day    86400.0)
+         (sec-hour   3600.0)
+         (sec-minute 60.0)
+         
+         ;; Cascade down the time units
+         (years   (truncate (/ abs-secs sec-year)))
+         (rem     (mod abs-secs sec-year))
+         (months  (truncate (/ rem sec-month)))
+         (rem     (mod rem sec-month))
+         (days    (truncate (/ rem sec-day)))
+         (rem     (mod rem sec-day))
+         (hours   (truncate (/ rem sec-hour)))
+         (rem     (mod rem sec-hour))
+         (minutes (truncate (/ rem sec-minute)))
+         (seconds (truncate (mod rem sec-minute)))
+         
+         ;; Build a list of only the non-zero components
+         (components (delq nil
+                           (list
+                            (when (> years 0)   (cons years "year"))
+                            (when (> months 0)  (cons months "month"))
+                            (when (> days 0)    (cons days "day"))
+                            (when (> hours 0)   (cons hours "hour"))
+                            (when (> minutes 0) (cons minutes "minute"))
+                            (when (> seconds 0) (cons seconds "second")))))
+         
+         ;; Formatting helper for a single (value . "unit") pair
+         (format-part (lambda (comp)
+                        (let ((val (car comp))
+                              (unit (cdr comp)))
+                          (format "%d %s%s" val unit (if (= val 1) "" "s"))))))
+    
+    ;; If the difference is practically zero
+    (if (null components)
+        "just now"
+      (let* (;; Take up to the 2 most significant non-zero units
+             (top-components (if (> (length components) 2)
+                                 (seq-take components 2)
+                               components))
+             ;; Format them with "and" if there are two
+             (time-str (if (= (length top-components) 1)
+                           (funcall format-part (car top-components))
+                         (format "%s and %s"
+                                 (funcall format-part (car top-components))
+                                 (funcall format-part (cadr top-components))))))
+        
+        ;; Add the directional prefix/suffix
+        (if is-future
+            (format "in %s" time-str)
+          (format "%s ago" time-str))))))
+
 ;;;; Elisp
 
 (defun org-ilm--select-alist (alist &optional prompt formatter ordered)

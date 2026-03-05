@@ -54,15 +54,16 @@ Aggregate: Takes in an alist of (concept-id . value) pairs, and aggregates
 (defun org-ilm--parameter-read (parameter-or-data)
   "Continously prompts user for value until a valid one has been given."
   (map-let (:prompt :validate) (org-ilm--parameter-data-from parameter-or-data)
-    (let (value)
-      (while (not value)
+    (catch 'value
+      (while t
         (let ((input (read-string prompt)))
-          (condition-case err
-              (setq value (funcall validate input))
-            (error
-             (message (error-message-string err))
-             (sleep-for 1.)))))
-      value)))
+          (if (string-empty-p input)
+              (throw 'value nil)
+            (condition-case err
+                (throw 'value (funcall validate input))
+              (error
+               (message (error-message-string err))
+               (sleep-for 1.)))))))))
 
 (defun org-ilm--parameter-validate-or-warn (validate-f value)
   "Calls the validator VALIDATE-F on VALUE, but on error warns instead, and
@@ -141,7 +142,9 @@ returns nil."
         (lambda (&rest _)
           (let ((value (org-ilm--parameter-read ',data)))
             (org-ilm--org-with-point-at ,id
-              (org-entry-put nil ,property (format "%s" value))
+              (if value 
+                  (org-entry-put nil ,property (format "%s" value))
+                (org-entry-delete nil ,property))
               (save-buffer))
             value))
         :transient t))

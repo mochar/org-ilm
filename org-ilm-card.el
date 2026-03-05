@@ -157,8 +157,7 @@ An empty log implies a new card, so step is 0."
             (cl-incf current-step))))))
     current-step))
 
-(cl-defmethod org-ilm--element-review ((type (eql 'card)) element duration &rest args)
-  "Rate a card ELEMENT with RATING, update log and scheduled date."
+(cl-defmethod org-ilm--element-next-state ((type (eql 'card)) element duration &rest args)
   (org-ilm--element-with-point-at element
     (let* ((priority (org-ilm-element--priority element))
            (scheduled (org-ilm-element--sched element))
@@ -196,6 +195,17 @@ An empty log implies a new card, so step is 0."
               ;; duration ;; TODO Pass this?
               )))
 
+      (list :scheduled (ts-parse (fsrs-card-due card))
+            :priority priority
+            :rating rating
+            :timestamp timestamp
+            :card card))))
+
+(cl-defmethod org-ilm--element-review ((type (eql 'card)) element duration &rest args)
+  "Rate a card ELEMENT with RATING, update log and scheduled date."
+  (org-ilm--element-with-point-at element
+    (pcase-let* (((map :priority :scheduled :card :rating :timestamp)
+                  (apply #'org-ilm--element-next-state type element duration args)))
       (atomic-change-group
         (org-ilm--log-log
          'card (org-ilm-element--collection element) priority

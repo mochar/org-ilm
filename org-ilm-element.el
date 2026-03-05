@@ -309,6 +309,10 @@ COLLECTION specifies in which queue to look at."
 (cl-defgeneric org-ilm--element-prepare-new (type collection priority due &rest args)
   (org-ilm--log-log type collection priority due :new))
 
+(cl-defgeneric org-ilm--element-next-state (type element duration &rest args)
+  "Returns plist with what would be the next :scheduled and :priority after
+review.")
+
 (cl-defgeneric org-ilm--element-review (type element duration &rest args))
 
 (defun org-ilm-element-set-schedule (element timestamp)

@@ -239,20 +239,22 @@ Return t if already ready."
     (switch-to-buffer org-ilm-bqueue-active-buffer)
     t))
 
+(defun org-ilm--review-duration ()
+  "Return current review duration in minutes."
+  (when-let* ((start (oref org-ilm--review start))
+              (end (current-time))
+              (diff (float-time (time-subtract end start)))
+              (minutes (/ diff 60.0)))
+    minutes))  
+
 (defun org-ilm--review-next (&optional dont-update)
   (when org-ilm--review
     ;; Update priority and schedule
     (let* ((element (org-ilm--review-element))
-           duration)
+           (duration (org-ilm--review-duration)))
       
       (when (and (oref org-ilm--review update-p)
                  (not dont-update))
-        (when-let* ((start (oref org-ilm--review start))
-                    (end (current-time))
-                    (diff (float-time (time-subtract end start)))
-                    (minutes (/ diff 60.0)))
-          (setq duration minutes))
-        
         (org-ilm--element-review
          (org-ilm-element--type element)
          element duration :rating (oref org-ilm--review rating))))
@@ -463,14 +465,51 @@ needs the attachment buffer."
 
   [
    ["Actions"
-    ("n" "Next" org-ilm-review-next)
+    ("n" "Next" org-ilm-review-next
+     :description
+     (lambda ()
+       (if (org-ilm--review-card-p)
+           "Next"
+         (pcase-let* ((element (org-ilm--review-element))
+                      (duration (org-ilm--review-duration))
+                      ((map :scheduled :priority)
+                       (org-ilm--element-next-state
+                        (oref element type) element duration)))
+           (concat
+            "Next "
+            (propertize
+             (org-ilm--ts-human-relative scheduled)
+             'face 'Info-quoted))))))
     ("s" "Reschedule" org-ilm-review-postpone)
     ("d" "Done" org-ilm-review-done)
     ("q" "Quit" org-ilm-review-quit)]
-   ["Element"
-    ("e" "Element..." org-ilm-element-menu)
-    ("c" "Open collection" org-ilm-review-open-collection)
-    ("a" "Open attachment" org-ilm-review-open-attachment)]
+   
+   ["Next"
+    :if org-ilm--review-card-p
+    :setup-children
+    (lambda (children)
+      (let ((element (org-ilm--review-element))
+            (duration (org-ilm--review-duration)))
+        (mapcar
+         (lambda (rating-data)
+           (pcase-let* ((`(,key ,desc ,func ,rating) rating-data)
+                        ((map :scheduled :priority)
+                         (org-ilm--element-next-state
+                          (oref element type) element duration :rating rating)))
+             (transient-parse-suffix
+              'org-ilm--review-transient
+              (list key desc func
+                    :description
+                    (concat
+                     desc " "
+                     (propertize
+                      (org-ilm--ts-human-relative scheduled)
+                      'face 'Info-quoted))))))
+         '(("1" "Easy" org-ilm-review-rate-easy :easy)
+           ("2" "Good" org-ilm-review-rate-good :good)
+           ("3" "Hard" org-ilm-review-rate-hard :hard)
+           ("4" "Again" org-ilm-review-rate-again :again)))))
+    ]
    ]
   )
 

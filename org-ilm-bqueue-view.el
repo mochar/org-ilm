@@ -596,7 +596,9 @@ DAYS can be specified as numeric prefix arg."
     (when point
       (goto-char point)
       (hl-line-highlight)
-      (recenter-top-bottom t))
+      ;; https://lists.gnu.org/r/emacs-devel/2014-06/msg00094.html
+      (when (eq (window-buffer) (current-buffer))
+        (recenter-top-bottom t)))
     point))
 
 (defun org-ilm--bqueue-next-marked (&optional previous-p)

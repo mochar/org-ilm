@@ -88,9 +88,7 @@ as a new element and the initial interval based on PRIORITY is returned."
 
         (max 1 (round new-interval))))))
 
-(cl-defmethod org-ilm--element-review ((type (eql 'material)) element duration &rest args)
-  "Apply a review on the material element.
-This will update the log table and the headline scheduled date."
+(cl-defmethod org-ilm--element-next-state ((type (eql 'material)) element duration &rest args)
   (org-ilm--element-with-point-at element
     (let* ((review-log  (org-ilm--log-read))
            (last-review (car (last review-log))))
@@ -103,12 +101,20 @@ This will update the log table and the headline scheduled date."
                         (ts-parse (org-ilm-log-review--timestamp last-review))
                         multiplier))
              (due (ts-adjust 'day interval (ts-now))))
-        (atomic-change-group
-          (org-ilm--log-log 'material (org-ilm-element--collection element)
-                            priority due :review
-                            :duration duration
-                            :timestamp (plist-get args :timestamp))
-          (org-ilm--org-schedule :timestamp due :ignore-time t))))))
+        (list :scheduled due :priority priority)))))
+
+(cl-defmethod org-ilm--element-review ((type (eql 'material)) element duration &rest args)
+  "Apply a review on the material element.
+This will update the log table and the headline scheduled date."
+  (org-ilm--element-with-point-at element
+    (pcase-let (((map :scheduled :priority)
+                 (apply #'org-ilm--element-next-state type element duration args)))
+      (atomic-change-group
+        (org-ilm--log-log 'material (org-ilm-element--collection element)
+                          priority scheduled :review
+                          :duration duration
+                          :timestamp (plist-get args :timestamp))
+        (org-ilm--org-schedule :timestamp scheduled :ignore-time t)))))
 
 ;;; Footer
 
