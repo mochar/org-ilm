@@ -18,6 +18,27 @@
 
 (defconst org-ilm-property-material-multiplier "ILM_MTRL_MULTIPLIER")
 
+;;;; Parameters
+
+(cl-defmethod org-ilm--parameter-get-of-type ((type (eql material)))
+  '(material-multiplier))
+
+(cl-defmethod org-ilm--parameter-data ((parameter (eql material-multiplier)))
+  (list
+   :parameter 'material-multiplier
+   :property org-ilm-property-material-multiplier
+   :prompt "Interval multiplier (>0): "
+   :validate
+   (lambda (value)
+     (when (stringp value) (setq value (string-to-number value)))
+     (unless (and (numberp value) (> value 0))
+       (error "Material multiplier must be a number greater than 0"))
+     value)
+   :aggregate
+   (lambda (concept-values)
+     (apply #'org-ilm--mean (mapcar #'cdr concept-values)))
+   ))
+
 ;;;; Functions
 
 (defun org-ilm--material-schedule-multiplier (priority)
@@ -37,22 +58,6 @@ Lower PRIORITY → higher importance → smaller A."
                       (- (/ 1.0 (+ 1.0 (exp (* (- k) 0.5))))
                          (/ 1.0 (+ 1.0 (exp (* k 0.5))))))))
     (+ min-a (* (- max-a min-a) sig-norm))))
-
-(cl-defmethod org-ilm--parameter-data ((parameter (eql material-multiplier)))
-  (list
-   :parameter 'material-multiplier
-   :property org-ilm-property-material-multiplier
-   :prompt "Interval multiplier (>0): "
-   :validate
-   (lambda (value)
-     (when (stringp value) (setq value (string-to-number value)))
-     (unless (and (numberp value) (> value 0))
-       (error "Material multiplier must be a number greater than 0"))
-     value)
-   :aggregate
-   (lambda (concept-values)
-     (apply #'org-ilm--mean (mapcar #'cdr concept-values)))
-   ))
 
 (defun org-ilm--material-calculate-interval (priority scheduled last-review &optional multiplier)
   "Calculate the new scheduled interval in days.

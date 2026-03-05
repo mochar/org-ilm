@@ -70,6 +70,9 @@ FSRS default: t"
 
 ;;;; Parameters
 
+(cl-defmethod org-ilm--parameter-get-of-type ((type (eql card)))
+  '(card-retention))
+
 (cl-defmethod org-ilm--parameter-data ((parameter (eql card-retention)))
   (list
    :parameter 'card-retention

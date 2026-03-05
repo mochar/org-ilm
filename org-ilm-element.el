@@ -761,28 +761,30 @@ With active region delete all in region."
 
 (transient-define-prefix org-ilm--element-parameters-transient (scope)
   :refresh-suffixes t
+  :value
+  (lambda ()
+    (org-ilm--parameter-parse :id (oref (transient-scope) id)))
 
   ["Parameters"
-   [""
-    :if (lambda () (eq (oref (transient-scope) type) 'card))
-    :setup-children
-    (lambda (_)
-      (org-ilm--parameter-build-suffix-children
-       'org-ilm--concept-transient
-       "r" "Desired retention"
-       (oref (transient-scope) id)
-       'card-retention))
-    ]
-   [""
-    :if (lambda () (eq (oref (transient-scope) type) 'material))
-    :setup-children
-    (lambda (_)
-      (org-ilm--parameter-build-suffix-children
-       'org-ilm--concept-transient
-       "m" "Interval multiplier"
-       (oref (transient-scope) id)
-       'material-multiplier))
-    ]
+   :if (lambda () (eq (oref (transient-scope) type) 'card))
+   :setup-children
+   (lambda (_)
+     (org-ilm--parameter-build-suffix-children
+      'org-ilm--concept-transient
+      "r" "Desired retention"
+      (oref (transient-scope) id)
+      'card-retention))
+   ]
+  
+  ["Parameters"
+   :if (lambda () (eq (oref (transient-scope) type) 'material))
+   :setup-children
+   (lambda (_)
+     (org-ilm--parameter-build-suffix-children
+      'org-ilm--concept-transient
+      "m" "Interval multiplier"
+      (oref (transient-scope) id)
+      'material-multiplier))
    ]
   
   (interactive "P")

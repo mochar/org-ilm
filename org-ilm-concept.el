@@ -412,12 +412,8 @@ outline, and/or property concept."
   :refresh-suffixes t
   :value
   (lambda ()
-    (org-ilm--org-with-point-at (plist-get (transient-scope) :id)
-      (mapcar
-       (lambda (parameter)
-         (map-let (:property) (org-ilm--parameter-data parameter)
-           (cons parameter (org-entry-get nil property))))
-       '(material-multiplier card-retention))))
+    (org-ilm--parameter-parse
+     :id (plist-get (transient-scope) :id)))
 
   [
    ["Concepts"
