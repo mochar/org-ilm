@@ -644,8 +644,10 @@ successfully.. ON-ERROR will be called when any job errors."
      output-dir output-path output-name
      pages-spec flags)
   "Cut PDF using QPDF."
-  (cl-assert (or output-path output-name) nil "Must specify output path or name")
+  (cl-assert pages-spec)
   (setq input-path (expand-file-name input-path))
+  (unless (xor output-path output-name)
+    (setq output-name (concat (file-name-base input-path) " " (ts-format (ts-now)))))
   (unless output-name
     (setq output-name (file-name-base output-path)))
   (unless output-dir
@@ -947,6 +949,11 @@ does not have an option for this so it is done here. "
   :type 'file
   :group 'org-ilm-convert-docling)
 
+(defcustom org-ilm-convert-docling-args nil
+  "Arguments to always pass to docling."
+  :type '(repeat string)
+  :group 'org-ilm-convert-docling)
+
 (cl-defun org-ilm--convert-make-docling
     (run-p
      &key
@@ -1005,7 +1012,8 @@ does not have an option for this so it is done here. "
       (when allow-external-plugins
         '("--allow-external-plugins")
         )
-      flags)
+      flags
+      org-ilm-convert-docling-args)
      job-args)))
 
 (cl-defmethod org-ilm--convert-make-converter ((type (eql 'docling)) run-p &rest args)
@@ -1454,6 +1462,116 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
          (message "[Org-Ilm-Convert] Media download completed: %s" url)
          (org-ilm--org-with-point-at (oref (oref job chain) id) (org-attach-sync)))))))
 
+;;;;; PDF group
+
+(transient-define-group org-ilm--convert-pdf-transient-group
+  ["PDF conversion"
+   :if (lambda () (and (eq (oref (transient-scope) type) 'attachment)
+                       (s-ends-with-p "pdf" (oref (transient-scope) source))))
+   (:info* (lambda () "Convert a PDF document to Markdown or Org mode"))
+   ("pc" "Convert"
+    :cons 'pdf-convert
+    :transient t
+    :class org-ilm-transient-cons-switch)
+   ("pp" "Pages"
+    :cons 'pdf-pages
+    :transient t
+    :class org-ilm-transient-cons-option
+    :if (lambda () (alist-get 'pdf-convert (org-ilm--transient-parse))))
+   ("pt" "Tool"
+    :cons 'pdf-tool
+    :transient t
+    :class org-ilm-transient-cons-switches
+    :choices (docling marker)
+    :allow-empty nil
+    :if (lambda () (alist-get 'pdf-convert (org-ilm--transient-parse))))
+]
+  [""
+   :description (lambda () (propertize "Docling options" 'face 'default))
+   :hide (lambda ()
+           (map-let (pdf-convert pdf-tool) (org-ilm--transient-parse)
+             (not (and pdf-convert (eq pdf-tool 'docling)))))
+   ("po" "OCR engine"
+    :cons 'pdf-ocr-engine
+    :class org-ilm-transient-cons-switches
+    :transient t
+    :choices ("onnxtr" "auto")
+    :allow-empty t)
+   ("pl" "OCR language"
+    :cons 'pdf-ocr-lang
+    :class org-ilm-transient-cons-option
+    :transient t
+    :allow-empty t)
+   ("pC" "Enrich code"
+    :cons 'pdf-enrich-code
+    :class org-ilm-transient-cons-switch
+    :transient t)
+   ("pf" "Enrich formula"
+    :cons 'pdf-enrich-formula
+    :class org-ilm-transient-cons-switch
+    :transient t)
+   ("pb" "Page batch size"
+    :cons 'pdf-page-batch
+    :class org-ilm-transient-cons-option
+    :transient t
+    :always-read t
+    :allow-empty nil)
+   ]
+  )
+
+(defun org-ilm--convert-transient-pdf-run (path id main-p &optional transient-args)
+  (pcase-let* ((transient-args (or transient-args (org-ilm--transient-parse)))
+               ((map pdf-pages pdf-tool) transient-args)
+               (name (if main-p id
+                       (concat (file-name-base path) " " (ts-format (ts-now)))))
+               (pdf-pages (when (and pdf-pages (not (string-empty-p pdf-pages)))
+                            pdf-pages))
+               (converters))
+
+    (when pdf-pages
+      (push
+       `(qpdf
+         :input-path ,path
+         :pages-spec ,pdf-pages
+         :output-name ,name)
+       converters))
+
+    (push
+     (pcase pdf-tool
+       ('marker
+        `(marker
+          :input-path ,(unless pdf-pages path)
+          :output-format "markdown"
+          ))
+       ('docling
+        (map-let (pdf-ocr-engine pdf-ocr-lang pdf-enrich-code pdf-enrich-formula pdf-page-batch) transient-args
+          `(docling
+            :input-path ,(unless pdf-pages path)
+            :output-format "md"
+            :ocr-p ,(when pdf-ocr-engine t)
+            :ocr-engine ,(or pdf-ocr-engine "auto")
+            :enrich-code ,pdf-enrich-code
+            :enrich-formula ,pdf-enrich-formula
+            :page-batch-size ,(if (and pdf-page-batch (not (string-empty-p pdf-page-batch)))
+                                  (let ((bs (string-to-number pdf-page-batch)))
+                                    (if (= bs 0) 4 bs)))
+            ))))
+     converters)
+
+    (push '(pandoc :output-format "org") converters)
+    
+    (org-ilm--convert-make-converter-chain
+     :run-p t
+     :converters (reverse converters)
+     :on-success
+     (lambda (job)
+       (unless main-p
+         (dolist (ext '("pdf" "md"))
+           (delete-file (expand-file-name
+                         (concat name "." ext)
+                         (file-name-directory path)))))))))
+
+   
 ;;;;; Main transient
 
 (cl-defstruct (org-ilm-convert-menu-data
@@ -1502,7 +1620,9 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
   (lambda ()
     `((webpage-simplify . "markdown")
       (webpage-orgify . t)
-      (media-template . "%(title)s.%(ext)s")))
+      (media-template . "%(title)s.%(ext)s")
+      (pdf-tool . docling)
+      (pdf-page-batch . "4")))
 
   ["Convtool"
    (:info*
@@ -1523,18 +1643,7 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    org-ilm--convert-media-transient-group
    ]
 
-  ["PDF conversion"
-   :if (lambda () (and (eq (oref (transient-scope) type) 'attachment)
-                       (s-ends-with-p "pdf" (oref (transient-scope) source))))
-   (:info* (lambda () "Convert a PDF document to Markdown or Org mode"))
-   ("pc" "Convert"
-    :cons 'pdf-convert
-    :class org-ilm-transient-cons-switch
-    :transient transient--do-call)
-   ("pp" "Pages" :cons 'pdf-pages
-    :class org-ilm-transient-cons-option
-    :transient transient--do-call)
-   ]
+  org-ilm--convert-pdf-transient-group
 
   [
    :if (lambda ()
@@ -1543,6 +1652,7 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    ("a" "Main attachment"
     :cons 'main-attachment
     :class org-ilm-transient-cons-switches
+    :allow-empty t
     :choices
     (lambda ()
       (map-let (media-download webpage-download pdf-convert) (org-ilm--transient-parse)
@@ -1583,23 +1693,8 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
 
         ;; PDF
         (when pdf-convert
-          (org-ilm--convert-make-converter-chain
-           :run-p t
-           :on-success (lambda (j) (message "WOWOWOWO"))
-           :converters
-           `((marker
-              :input-path ,source
-              ;; :output-dir "~/tmp/marker/"
-              :output-format "markdown"
-              :pages ,pdf-pages
-              :new-name ,(when (eq main-attachment 'pdf) org-id)
-              )
-             (pandoc
-              ;; :output-path "~/tmp/marker/"
-              :output-format "org"
-              ))
-           )
-          )
+          (org-ilm--convert-transient-pdf-run
+           source org-id (eq main-attachment 'pdf) args))
         ))
     :inapt-if
     (lambda ()
