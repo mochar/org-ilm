@@ -597,11 +597,19 @@ With active region delete all in region."
   (lambda ()
     (concat
      "Schedule "
-     (if (oref (transient-scope) done)
-         (propertize "(done)" 'face 'Info-quoted)
-       (when-let* ((element (transient-scope))
-                   (sched (oref element sched)))
-         (propertize (ts-format "%Y-%m-%d" sched) 'face 'transient-value)))))
+     (cond-let*
+       ((oref (transient-scope) done)
+        (propertize "(done)" 'face 'Info-quoted))
+       ([element (transient-scope)]
+        [sched (oref element sched)]
+        (concat
+         (propertize
+          (ts-format "%Y-%m-%d" sched)
+          'face 'transient-value)
+         " "
+         (propertize
+          (org-ilm--ts-human-relative sched)
+          'face 'Info-quoted))))))
   :transient 'transient--do-call
   :inapt-if (lambda () (oref (transient-scope) done))
   (interactive)
