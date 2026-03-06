@@ -690,7 +690,11 @@ environment (multiline), paste it in headline body."
  :register #'org-ilm-registry--type-image-register
  )
 
-;;;;; Org type
+;;;;; Org type (deprecated)
+
+;; This old method worked by using org-transclusion to embed the contents
+;; underneath the registry overlay, which was very finicky as it required
+;; fragile cleanup on top of org-transclusion being buggy in general.
 
 (defface org-ilm-registry-org-header-face
   '((t :slant italic))
@@ -777,15 +781,63 @@ environment (multiline), paste it in headline body."
 (defun org-ilm-registry--type-org-create (&optional args)
   args)
 
+;; (org-ilm-registry-set-type
+;;  "org"
+;;  :key ?o
+;;  :preview #'org-ilm-registry--type-org-preview
+;;  :teardown #'org-ilm-registry--type-org-teardown
+;;  :paste #'org-ilm-registry--type-org-paste
+;;  :parse #'org-ilm-registry--type-org-parse
+;;  :create #'org-ilm-registry--type-org-create
+;;  )
+
+;;;;; Org type 
+
+;; Org contents are displayed being fontifying it in a tmp buffer and inserting
+;; the propertized buffer string in the overlay using the display property.
+
+(defun org-ilm-registry--type-org-fontify-string (string)
+  "Apply Org mode fontification (text properties) to STRING."
+  (with-temp-buffer
+    (insert string)
+    ;; Prevent Org from running heavy startup routines (like building agenda
+    ;; files) since we only want the syntax highlighting.
+    (let ((org-inhibit-startup t))
+      (org-mode))
+    
+    ;; Force font-lock to parse and propertize the buffer contents immediately
+    (font-lock-ensure)
+    
+    (buffer-string)))
+
+(defun org-ilm-registry--type-org-preview (entry ov link)
+  (let* ((content (org-ilm-registry--entry-contents entry))
+         (content (org-ilm-registry--type-org-fontify-string content)))
+    (overlay-put ov 'display content))
+  t)
+
+(defun org-ilm-registry--type-org-paste (entry)
+  (insert (org-ilm-registry--entry-contents entry)))
+
+(defun org-ilm-registry--type-org-parse ()
+  (when (and (eq major-mode 'org-mode) (region-active-p))
+    (let ((begin (region-beginning))
+          (end (region-end)))
+      (list :body (buffer-substring-no-properties begin end)
+            :region (list begin end)))))
+
+(defun org-ilm-registry--type-org-create (&optional args)
+  args)
+
 (org-ilm-registry-set-type
  "org"
  :key ?o
  :preview #'org-ilm-registry--type-org-preview
- :teardown #'org-ilm-registry--type-org-teardown
  :paste #'org-ilm-registry--type-org-paste
  :parse #'org-ilm-registry--type-org-parse
  :create #'org-ilm-registry--type-org-create
  )
+
 
 ;;; Footer
 
