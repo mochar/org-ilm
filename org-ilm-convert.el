@@ -1563,6 +1563,7 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
     
     (org-ilm--convert-make-converter-chain
      :run-p t
+     :id id
      :converters (reverse converters)
      :on-success
      (lambda (job)
@@ -1570,7 +1571,10 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
          (dolist (ext '("pdf" "md"))
            (delete-file (expand-file-name
                          (concat name "." ext)
-                         (file-name-directory path)))))))))
+                         (file-name-directory path)))))
+       (when main-p
+         (org-ilm--org-with-point-at (oref (oref job chain) id)
+           (org-entry-put nil org-ilm-property-ext "org")))))))
 
    
 ;;;;; Main transient
