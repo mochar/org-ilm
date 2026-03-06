@@ -1567,11 +1567,10 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
      :converters (reverse converters)
      :on-success
      (lambda (job)
-       (unless main-p
-         (dolist (ext '("pdf" "md"))
-           (delete-file (expand-file-name
-                         (concat name "." ext)
-                         (file-name-directory path)))))
+       (dolist (ext (if main-p '("md") '("pdf" "md")))
+         (delete-file (expand-file-name
+                       (concat name "." ext)
+                       (file-name-directory path))))
        (when main-p
          (org-ilm--org-with-point-at (oref (oref job chain) id)
            (org-entry-put nil org-ilm-property-ext "org")))))))
