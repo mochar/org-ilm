@@ -213,17 +213,16 @@
           (org-ilm-open-attachment)
         (user-error "No ilm element at point!")))
      ('registry
-      ;; TODO Allow for multiple ilm elements for same registry
-      ;; Eg: blog and accompanying video, manuscript and published paper, etc
-      (if-let ((entry (seq-find
-                       (lambda (entry)
-                         (and (org-ilm--element-type entry)
-                              (string= (org-id-get)
-                                       (org-mem-entry-property "REGISTRY" entry))))
-                       (hash-table-values org-mem--id<>entry))))
-          (org-node-goto-id (org-mem-entry-id entry))
-        (user-error "No ilm element derived from this registry entry!")))
+      (if-let* ((entry (ignore-errors (org-mem-entry-at-point))))
+          (org-ilm-registry-view entry)
+        (user-error "No entry at point")))
      (_ (org-ilm-open-collection)))))
+
+(defun org-ilm-find ()
+  "Find a concept or registry item."
+  (interactive)
+  
+  )
 
 (defun org-ilm-extract (&optional priority)
   "Extract region.

@@ -29,7 +29,7 @@
 
 One of:
 - ('collection collection)
-- ('registry collection)
+- ('registry collections) (yes multiple potentially!)
 - ('attachment org-id collection path type)
 - ('queue collection org-id)"
   (require 'org-ilm-collection)
@@ -38,14 +38,16 @@ One of:
   (cond-let*
     ([attachment (org-ilm--attachment-data)]
      (cons 'attachment attachment))
-    ([collections (org-ilm--collection-file (org-ilm--buffer-file-name))]
-     [collection (org-ilm--collection-first-valid collections)]
-     (if (string= (file-name-base (buffer-file-name (buffer-base-buffer))) "registry")
-         (cons 'registry collection)
-       (cons 'collection collection)))
     ((bound-and-true-p org-ilm-bqueue)
      (let ((id (org-ilm--bqueue-vtable-get-object-id)))
-       (list 'queue (org-ilm-queue--collection org-ilm-bqueue) id)))))
+       (list 'queue (org-ilm-queue--collection org-ilm-bqueue) id)))
+    ([collections (org-ilm--collection-file (org-ilm--buffer-file-name))]
+     (cond-let*
+       ((string= (buffer-file-name (buffer-base-buffer))
+                 (org-ilm--collection-registry-path (car collections)))
+        (list 'registry collections))
+       ([collection (org-ilm--collection-first-valid collections)]
+        (cons 'collection collection))))))
 
 (cl-generic-define-context-rewriter ilm-location (var)
   `((car (org-ilm--where-am-i)) (eql ,var)))
@@ -333,6 +335,26 @@ Direct copy from mm-decode.el"
   "Return non-nil if current major mode is `pdf-view-mode' or `pdf-virtual-view-mode'."
   (when (member major-mode '(pdf-view-mode pdf-virtual-view-mode)) t))
 
+;;;; Emacs
+
+(defmacro org-ilm--with-special-buffer (buf-name &rest body)
+  "Evaluate BODY and display the result in a popup window named BUFFER-NAME.
+
+The buffer becomes the current buffer and `standard-output` is bound to
+it.  After BODY executes, the buffer is put in
+`special-mode` (dismissible with 'q')."
+  (declare (indent 1) (debug t))
+  (let ((buf (make-symbol "buf")))
+    `(let* ((,buf (get-buffer-create ,buf-name))
+            ;; Bind standard-output so `princ` and `print` write here
+            (standard-output ,buf))
+       (with-current-buffer ,buf
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           ,@body)
+         (special-mode)
+         (goto-char (point-min)))
+       (pop-to-buffer ,buf))))
 
 ;;;; Org
 

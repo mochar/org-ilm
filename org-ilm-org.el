@@ -894,11 +894,12 @@ A cloze is made automatically of the element at point or active region."
             :filter-args #'org-ilm--org-cloze-advice--org-latex-preview-place)
 
 (defun org-ilm--org-cloze-latex-preview-update-hook (overlay)
-  (save-excursion
-    ;; (ov-beg) gives me a not found error on startup!!
-    (goto-char (overlay-start overlay))
-    (when (org-ilm--card-cloze-match-around-point)
-      (overlay-put overlay 'face 'org-ilm-cloze-content-face))))
+  ;; (ov-beg) gives me a not found error on startup!!
+  (when-let ((pos (overlay-start overlay)))
+    (save-excursion
+      (goto-char pos)
+      (when (org-ilm--card-cloze-match-around-point)
+        (overlay-put overlay 'face 'org-ilm-cloze-content-face)))))
 
 (add-hook 'org-latex-preview-overlay-update-functions
           #'org-ilm--org-cloze-latex-preview-update-hook)

@@ -68,9 +68,13 @@ See `org-ilm--citation-get-zotero'"))
     ("u" "URL" org-ilm-import-url)
     ("b" "Buffer" org-ilm-import-buffer)]
    ["New"
-   ("o" "Org" org-ilm-import-org)
-   ("c" "Card" org-ilm-import-card)
-   ("n" "Concept" org-ilm-concept-new)]
+    ("o" "Org" org-ilm-import-org)
+    ("c" "Card" org-ilm-import-card)
+    ("n" "Concept" org-ilm-concept-new)
+    ]
+   [""
+    ("g" "Registry" org-ilm-registry-register)
+    ]
    ]
   )
 

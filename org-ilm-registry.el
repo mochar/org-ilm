@@ -79,6 +79,11 @@ Properties are:
   Optional list of aliases for this type. You may also use
   `org-ilm-registry-type-aliases'.
 
+`:view'
+
+  Opens a buffer to view the contents of the org-mem entry, which is
+  passed to it as the only arg.
+
 One of the following properties can be passed to create a new entry of
 this type. Note that they are mutually exclusive:
 
@@ -118,6 +123,9 @@ This helps share functionality of a type while being able to filter on a more gr
   '((t :inherit org-link))
   "Face used by registry link types."
   :group 'org-ilm-registry)
+
+(defconst org-ilm-property-registry "REGISTRY")
+(defconst org-ilm-registry-buffer-name "*Registry entry*")
 
 ;;;; Set up
 
@@ -159,7 +167,7 @@ This helps share functionality of a type while being able to filter on a more gr
   "i" #'org-ilm-registry-insert
   "p" #'org-ilm-registry-paste
   "g" #'org-ilm-registry-register-dwim
-  "a" #'org-ilm-registry-attachments)
+  "v" #'org-ilm-registry-view)
 
 ;;;###autoload
 (defun org-ilm-registry-open ()
@@ -183,10 +191,22 @@ This helps share functionality of a type while being able to filter on a more gr
   "Paste the contents of the entry rather than linking to it."
   (interactive)
   (let* ((entry (org-ilm-registry--select-entry))
-         (type (org-mem-entry-property "TYPE" entry))
+         (type (org-mem-entry-property org-ilm-property-registry entry))
          (data (cdr (org-ilm-registry--type-data type)))
          (paste-func (plist-get data :paste)))
     (funcall paste-func entry)))
+
+;;;###autoload
+(defun org-ilm-registry-view (&optional entry)
+  "View the contents of a registry entry."
+  (interactive)
+  (let* ((entry (or entry (org-ilm-registry--select-entry)))
+         (type (org-mem-entry-property org-ilm-property-registry entry))
+         (data (cdr (org-ilm-registry--type-data type)))
+         (view-func (plist-get data :view)))
+    (if view-func
+        (funcall view-func entry)
+      (user-error "Registry entry has no view function"))))
 
 ;;;###autoload
 (defun org-ilm-registry-register (type-name &optional args)
@@ -225,25 +245,6 @@ This helps share functionality of a type while being able to filter on a more gr
       (funcall #'org-ilm-registry-register (car type) (cdr type))
     (call-interactively #'org-ilm-registry-register)))
 
-;;;###autoload
-(defun org-ilm-registry-attachments ()
-  "View the attachments of a registry entry."
-  (interactive)
-  (let* ((attachments (org-attach-file-list (org-attach-dir)))
-         (conversion (org-ilm-convert--conversion-by-id (org-id-get)))
-         conversion-name)
-    (when (and conversion (not (eq (plist-get conversion :state) 'success)))
-      (setq conversion-name
-            (concat (propertize (plist-get conversion :name) 'face 'italic)
-                    " ("
-                    (org-ilm-convert--conversion-propertize-state (plist-get conversion :state))
-                    ")"))
-      (push conversion-name attachments))
-    (let ((choice (completing-read "Attachment: " attachments nil t)))
-      (if (string= choice conversion-name)
-          (switch-to-buffer (plist-get conversion :buffer))
-        (find-file (expand-file-name choice (org-attach-dir)))))))
-
 ;;;; Functions
 
 (cl-defun org-ilm-registry--select-entry (&key types collection)
@@ -260,7 +261,7 @@ This helps share functionality of a type while being able to filter on a more gr
                (lambda ()
                  (seq-keep
                   (lambda (entry)
-                    (when (member (org-mem-entry-property "TYPE" entry)
+                    (when (member (org-mem-entry-property org-ilm-property-registry entry)
                                   (org-ilm-registry--type-name-and-aliases type-name))
                       (cons (org-mem-entry-title entry) entry)))
                   (org-mem-entries-in-file registry)))))
@@ -301,7 +302,7 @@ Aliases are retrieved from `org-ilm-registry-type-aliases' and the :aliases
   (when-let* ((entry (if (org-mem-entry-p entry-or-id)
                          entry-or-id
                        (org-mem-entry-by-id entry-or-id)))
-              (type (org-mem-entry-property "TYPE" entry)))
+              (type (org-mem-entry-property org-ilm-property-registry entry)))
     (org-ilm-registry--type-data type)))
 
 (defun org-ilm-registry--id-links-to-entry (&optional entry-or-id)
@@ -322,11 +323,11 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
         (seq-filter (##equal (org-mem-link-type %) "registry") links)))))
 
 (defun org-ilm-registry--entry-contents (entry)
+  "Return the Org heading contents of org-mem ENTRY."
   (cl-assert (org-mem-entry-p entry))
   (save-excursion
-    (org-ilm--org-with-point-at
-     (org-mem-entry-id entry)
-     (org-ilm-registry--org-get-contents))))
+    (org-ilm--org-with-point-at (org-mem-entry-id entry)
+      (org-ilm-registry--org-get-contents))))
 
 (defun org-ilm-registry--link-target ()
   (if (and (eq major-mode 'org-mode) (org-id-get))
@@ -338,58 +339,10 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
     ;;   (match-string-no-properties 1 link))
     (concat "file:" (buffer-file-name (buffer-base-buffer)))))
 
-;;;; Content capture
-
-;; TODO Finish. Idea is to ahve a capture buffer with more space where eg latex
-;; can be typed out before send to `org-ilm-registry--register' but i'm facing
-;; scoping issues and i dont like having two capture buffers in a row.
-
-(defcustom org-ilm-registry-content-capture-path
-  (expand-file-name
-   "org-ilm-registry-input.org"
-   temporary-file-directory)
-  "Path of file where content is captured to, to be used with type registers."
-  :type 'string
-  :group 'org-ilm-registry)
-
-(defun org-ilm-registry--org-capture (on-capture)
-  (cl-letf* (((symbol-value 'org-capture-templates)
-               (list
-                (list
-                 "i" "Input"
-                 'plain
-                 (list 'file org-ilm-registry-content-capture-path)
-                 ""
-                 :hook
-                 (lambda ()
-                   (save-restriction
-                     (erase-buffer)
-                     (unless (eq major-mode 'org-mode)
-                       (org-mode))
-                     (save-buffer))
-
-                   (setq-local header-line-format
-                               (substitute-command-keys
-                                "Registry concent capture. Finish `\\[org-capture-finalize]' Abort `\\[org-capture-kill]'"))
-                   )
-                 
-                 :prepare-finalize
-                 (lambda ()
-                   (goto-char (point-min))
-                   ;; Remove empty lines and comment lines
-                   (flush-lines "^\\([ \t]*\\|#.*\\)$")
-                   (goto-char (point-min))
-                   (funcall on-capture)
-                   ;; ,@body
-                   )
-                 ;; :after-finalize
-                 ;; (lambda ()
-                 ;;   (with-current-buffer (find-file-noselect org-ilm-registry-content-capture-path)
-                 ;;     ,@body))
-                 :kill-buffer t
-                 ))))
-     (org-capture nil "i")))
-
+(defun org-ilm-registry--attachment-path (&optional org-id)
+  (unless org-id (setq org-id (org-id-get)))
+  (car (file-expand-wildcards
+        (expand-file-name (concat org-id "*") (org-attach-dir)))))
 
 ;;;; Register
 
@@ -432,7 +385,7 @@ org-capture template properties."
                    (cl-loop
                     for (p v) on props by #'cddr
                     do (org-entry-put nil (if (stringp p) p (substring (symbol-name p) 1)) v))
-                   (org-entry-put nil "TYPE" type)
+                   (org-entry-put nil org-ilm-property-registry type)
                    (org-node-nodeify-entry)
                    ;; Toggle open the properties drawer
                    (save-excursion
@@ -523,6 +476,11 @@ Can be either in the LATEX property or the body text."
    (org-mem-entry-property "LATEX" entry)
    (org-ilm-registry--entry-contents entry)))
 
+(defun org-ilm-registry--type-latex-place (latex beg end)
+  (org-latex-preview-place
+   org-latex-preview-process-default
+   (list (list beg end latex))))
+
 (defun org-ilm-registry--type-latex-preview (entry ov link)
   "Place a latex overlay on the link.
 
@@ -536,10 +494,8 @@ The way this is implemented is by using `org-latex-preview-place' which
  `delete-overlay', which is done in the global minor mode."
   (when-let ((latex (org-ilm-registry--type-latex-from-entry entry)))
     (overlay-put ov 'org-ilm-registry-latex t)
-    (org-latex-preview-place
-     org-latex-preview-process-default
-     (list
-      (list (overlay-start ov) (overlay-end ov) latex )))
+    (org-ilm-registry--type-latex-place
+     latex (overlay-start ov) (overlay-end ov))
     t))
 
 (defun org-ilm-registry--type-latex-teardown (ov)
@@ -577,6 +533,14 @@ environment (multiline), paste it in headline body."
             :props (list :LATEX (when fragment latex))
             :region (list begin end)))))
 
+(defun org-ilm-registry--type-latex-view (entry)
+  (let* ((latex (org-ilm-registry--type-latex-from-entry entry))
+         (img (org-latex-preview-create-images 
+               latex
+               :processing-type org-latex-preview-process-default)))
+    (org-ilm--with-special-buffer org-ilm-registry-buffer-name
+      (insert-image (create-image (expand-file-name img) nil nil :scale 2.5)))))
+
 (org-ilm-registry-set-type
  "latex"
  :key ?l
@@ -585,6 +549,7 @@ environment (multiline), paste it in headline body."
  :paste #'org-ilm-registry--type-latex-paste
  :parse #'org-ilm-registry--type-latex-parse
  :create #'org-ilm-registry--type-latex-create
+ :view #'org-ilm-registry--type-latex-view
  )
 
 
@@ -596,10 +561,7 @@ environment (multiline), paste it in headline body."
   (org-link-preview-file
    ov
    (with-current-buffer (find-file-noselect (org-mem-entry-file entry))
-     (car
-      (file-expand-wildcards
-       (expand-file-name (concat (org-mem-entry-id entry) "*")
-                         (org-attach-dir)))))
+     (org-ilm-registry--attachment-path (org-mem-entry-id entry)))
    link))
 
 (defun org-ilm-registry--type-image-paste (entry)
@@ -680,6 +642,12 @@ environment (multiline), paste it in headline body."
           (run-hook-with-args 'org-attach-after-change-hook attach-dir)
           (org-attach-tag)))))))
 
+(defun org-ilm-registry--type-image-view (entry)
+  (if-let ((attachment (org-ilm-registry--attachment-path (org-mem-entry-id entry))))
+      (org-ilm--with-special-buffer org-ilm-registry-buffer-name
+        (insert-image (create-image (expand-file-name attachment))))
+    (user-error "Image registry entry has no attachment")))
+
 (org-ilm-registry-set-type
  "image"
  :key ?i
@@ -688,6 +656,7 @@ environment (multiline), paste it in headline body."
  :parse #'org-ilm-registry--type-image-parse
  ;; :create #'org-ilm-registry--type-image-create
  :register #'org-ilm-registry--type-image-register
+ :view #'org-ilm-registry--type-image-view
  )
 
 ;;;;; Org type (deprecated)
@@ -810,9 +779,13 @@ environment (multiline), paste it in headline body."
     
     (buffer-string)))
 
+(defun org-ilm-registry--type-org-contents-fontified (entry)
+  (-some-> entry
+    org-ilm-registry--entry-contents
+    org-ilm-registry--type-org-fontify-string))
+
 (defun org-ilm-registry--type-org-preview (entry ov link)
-  (let* ((content (org-ilm-registry--entry-contents entry))
-         (content (org-ilm-registry--type-org-fontify-string content)))
+  (let ((content (org-ilm-registry--type-org-contents-fontified entry)))
     (overlay-put ov 'display content))
   t)
 
@@ -829,6 +802,11 @@ environment (multiline), paste it in headline body."
 (defun org-ilm-registry--type-org-create (&optional args)
   args)
 
+(defun org-ilm-registry--type-org-view (entry)
+  (let ((content (org-ilm-registry--type-org-contents-fontified entry)))
+    (org-ilm--with-special-buffer org-ilm-registry-buffer-name
+      (insert content))))
+
 (org-ilm-registry-set-type
  "org"
  :key ?o
@@ -836,6 +814,7 @@ environment (multiline), paste it in headline body."
  :paste #'org-ilm-registry--type-org-paste
  :parse #'org-ilm-registry--type-org-parse
  :create #'org-ilm-registry--type-org-create
+ :view #'org-ilm-registry--type-org-view
  )
 
 
