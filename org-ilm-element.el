@@ -713,7 +713,11 @@ With active region delete all in region."
    ("q" "Queue..." org-ilm--element-queue-transient :transient t)
    ("m" "Media..." org-ilm--element-media-transient :transient t
     :if (lambda () (oref (transient-scope) media)))
-   ("v" "Convert..." org-ilm-convert-menu :transient t)
+   ("v" "Convert..."
+    (lambda ()
+      (interactive)
+      (org-ilm-convert-menu (oref (transient-scope) id)))
+    :transient transient--do-replace)
    ("r" "Parameters..." org-ilm--element-parameters-transient :transient t)
    ]
    

@@ -83,11 +83,12 @@
       (insert (propertize (oref job id) 'face 'Info-quoted) "\n")
       (when default-dir
         (insert (propertize "Default directory:" 'face 'highlight) " " default-dir "\n"))
-      (when data
-        (insert (propertize "Data:" 'face 'highlight) "\n")
-        (insert (pp-to-string data)))
-      (insert (propertize "Payload:" 'face 'highlight) "\n")
-      (insert (pp-to-string payload))
+      (let ((print-length nil))
+        (when data
+          (insert (propertize "Data:" 'face 'highlight) "\n")
+          (insert (pp-to-string data)))
+        (insert (propertize "Payload:" 'face 'highlight) "\n")
+        (insert (pp-to-string payload)))
       (insert "\n\n\n" (propertize "Log:" 'face 'highlight) "\n"))
 
     (oset job start (ts-now))
@@ -1576,54 +1577,49 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
 
 (cl-defstruct (org-ilm-convert-menu-data
                (:conc-name org-ilm-convert-menu-data--))
-  type title source)
+  id type title source props)
                
-
-(defun org-ilm-convert-menu ()
+(defun org-ilm-convert-menu (&optional id)
   (interactive)
-  (when-let ((entry (org-node-at-point)))
-    (let* ((attach-dir (org-attach-dir))
-           (attachments (when attach-dir (org-attach-file-list attach-dir)))
-           (refs (org-ilm--org-mem-refs entry)))
-      (when-let ((url (org-entry-get nil "URL")))
-        (cl-pushnew url refs :test #'equal))
-      (setq refs (seq-filter #'org-url-p refs))
-      
-      (let* ((choice (consult--multi
-                      (list
-                       (list
-                        :name "Refs"
-                        :narrow ?r
-                        :items refs
-                        :action #'message)
-                       (list
-                        :name "Attachments"
-                        :narrow ?a
-                        :items attachments
-                        :action #'message))
-                      :require-match t
-                      :prompt "Convert: " ))
-             (source (car choice))
-             (type (if (string= (plist-get (cdr choice) :name) "Attachments")
-                       'attachment 'url)))
-        (when (eq type 'attachment)
-          (setq source (expand-file-name source attach-dir)))
-        (org-ilm--convert-transient
-         (make-org-ilm-convert-menu-data
-          :title (org-mem-entry-title entry)
-          :source source :type type))))))
+  (org-ilm--org-with-point-at id
+    (when-let ((entry (org-node-at-point)))
+      (let* ((attach-dir (org-attach-dir))
+             (attachments (when attach-dir (org-attach-file-list attach-dir)))
+             (refs (org-ilm--org-mem-refs entry)))
+        (when-let ((url (org-entry-get nil "URL")))
+          (cl-pushnew url refs :test #'equal))
+        (setq refs (seq-filter #'org-url-p refs))
+        
+        (let* ((choice (consult--multi
+                        (list
+                         (list
+                          :name "Refs"
+                          :narrow ?r
+                          :items refs
+                          :action #'message)
+                         (list
+                          :name "Attachments"
+                          :narrow ?a
+                          :items attachments
+                          :action #'message))
+                        :require-match t
+                        :prompt "Convert: " ))
+               (source (car choice))
+               (type (if (string= (plist-get (cdr choice) :name) "Attachments")
+                         'attachment 'url)))
+          (when (eq type 'attachment)
+            (setq source (expand-file-name source attach-dir)))
+          (org-ilm--convert-transient
+           (make-org-ilm-convert-menu-data
+            :id (org-mem-entry-id entry)
+            :title (org-mem-entry-title entry)
+            :props (org-mem-entry-properties entry)
+            :source source :type type)))))))
 
 (transient-define-prefix org-ilm--convert-transient (data)
   :refresh-suffixes t
-  ;; :incompatible '((media-download webpage-download)) 
-  :value
-  (lambda ()
-    `((webpage-simplify . "markdown")
-      (webpage-orgify . t)
-      (media-template . "%(title)s.%(ext)s")
-      (pdf-tool . docling)
-      (pdf-page-batch . "4")))
-
+  ;; :incompatible '((media-download webpage-download))
+  
   ["Convtool"
    (:info*
     (lambda ()
@@ -1636,12 +1632,12 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    ]
 
   [:if (lambda () (eq (oref (transient-scope) type) 'url))
-   org-ilm--convert-webpage-transient-group
-   ]
+       org-ilm--convert-webpage-transient-group
+       ]
   
   [:if (lambda () (eq (oref (transient-scope) type) 'url))
-   org-ilm--convert-media-transient-group
-   ]
+       org-ilm--convert-media-transient-group
+       ]
 
   org-ilm--convert-pdf-transient-group
 
@@ -1668,34 +1664,35 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    ("RET" "Convert"
     (lambda ()
       (interactive)
-      (pcase-let* ((args (org-ilm--transient-parse)) 
-                   ((map webpage-download media-download media-subs pdf-convert pdf-pages main-attachment) args)
-                   (data (transient-scope))
-                   (source (oref data source))
-                   (type (oref data type))
-                   (org-id (org-id-get))
-                   (attach-dir (org-attach-dir-get-create)))
+      (org-ilm--org-with-point-at (oref (transient-scope) id)
+        (pcase-let* ((args (org-ilm--transient-parse)) 
+                     ((map webpage-download media-download media-subs pdf-convert pdf-pages main-attachment) args)
+                     (data (transient-scope))
+                     (source (oref data source))
+                     (type (oref data type))
+                     (org-id (org-id-get))
+                     (attach-dir (org-attach-dir-get-create)))
 
-        ;; Webpage
-        (when webpage-download
-          (make-thread
-           (lambda ()
-             (let ((title (if (eq main-attachment 'webpage)
-                              org-id
-                            (org-ilm--get-page-title source 'slugify))))
-               (org-ilm--convert-transient-webpage-run
-                source title attach-dir org-id args)))))
+          ;; Webpage
+          (when webpage-download
+            (make-thread
+             (lambda ()
+               (let ((title (if (eq main-attachment 'webpage)
+                                org-id
+                              (org-ilm--get-page-title source 'slugify))))
+                 (org-ilm--convert-transient-webpage-run
+                  source title attach-dir org-id args)))))
 
-        ;; Media
-        (when (or media-download media-subs)
-          (org-ilm--convert-transient-media-run
-           source attach-dir org-id (eq main-attachment 'media) args))
+          ;; Media
+          (when (or media-download media-subs)
+            (org-ilm--convert-transient-media-run
+             source attach-dir org-id (eq main-attachment 'media) args))
 
-        ;; PDF
-        (when pdf-convert
-          (org-ilm--convert-transient-pdf-run
-           source org-id (eq main-attachment 'pdf) args))
-        ))
+          ;; PDF
+          (when pdf-convert
+            (org-ilm--convert-transient-pdf-run
+             source org-id (eq main-attachment 'pdf) args))
+          )))
     :inapt-if
     (lambda ()
       (with-slots (type) (transient-scope)
@@ -1708,7 +1705,27 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    ]
 
   (interactive "P")
-  (transient-setup 'org-ilm--convert-transient nil nil :scope data))
+  (transient-setup
+   'org-ilm--convert-transient nil nil
+   :scope data 
+   :value
+   (lambda ()
+     (with-slots (title source type props) data
+       (append
+        `((webpage-simplify . "markdown")
+          (webpage-orgify . t)
+          (media-template . "%(title)s.%(ext)s")
+          (pdf-tool . docling)
+          (pdf-page-batch . "4"))
+        (when (and (eq type 'attachment)
+                   (string= (file-name-extension source) "pdf"))
+          '((pdf-convert . t)))
+        (when-let* ((pdf-ranges (map-elt props "ILM_PDF"))
+                    (spec (org-ilm--pdf-spec-parse pdf-ranges))
+                    (range (org-ilm-pdf-spec--range spec)))
+          (if (= (car range) (cdr range))
+              `((pdf-pages . ,(car range)))
+            `((pdf-pages . ,(format "%s-%s" (car range) (cdr range)))))))))))
 
 
 ;;;; Footer
