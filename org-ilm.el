@@ -259,6 +259,7 @@
       (list
        :name "Registry"
        :narrow ?g
+       :state #'org-ilm-registry--consult-preview-state
        :items
        (lambda ()
          (org-ilm-registry--collection-entries

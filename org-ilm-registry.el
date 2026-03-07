@@ -256,6 +256,29 @@ This helps share functionality of a type while being able to filter on a more gr
          (if map-f (funcall map-f entry) entry)))
      (org-mem-entries-in-file reg-path))))
 
+(defun org-ilm-registry--consult-preview-state ()
+  "State function for previewing registry entries in `consult--multi'."
+  (lambda (action cand)
+    (pcase action
+      ('preview
+       (if cand ; A candidate is selected; preview it
+           (let* ((type (org-mem-entry-property org-ilm-property-registry cand))
+                  (data (cdr (org-ilm-registry--type-data type)))
+                  (view-func (plist-get data :view)))
+             (when view-func
+               (condition-case err
+                   (save-selected-window
+                     (funcall view-func cand))
+                 (error
+                  (when-let ((win (get-buffer-window org-ilm-registry-buffer-name)))
+                    (quit-window nil win))))))
+         ;; Cand is nil (preview reset); close the preview window
+         (when-let ((win (get-buffer-window org-ilm-registry-buffer-name)))
+           (quit-window nil win))))
+      ('exit ; Exit the minibuffer; clean up the preview window
+       (when-let ((win (get-buffer-window org-ilm-registry-buffer-name)))
+         (quit-window nil win))))))
+
 (cl-defun org-ilm-registry--select-entry (&key types collection)
   "Select registry entry."
   (let* ((types (if types (ensure-list types) (mapcar #'car org-ilm-registry-types)))
@@ -266,6 +289,7 @@ This helps share functionality of a type while being able to filter on a more gr
        (lambda (type-name)
          (list :name (capitalize type-name)
                :narrow (plist-get (cdr (assoc type-name org-ilm-registry-types)) :key)
+               :state #'org-ilm-registry--consult-preview-state
                :items
                (lambda ()
                  (seq-keep
@@ -652,7 +676,10 @@ environment (multiline), paste it in headline body."
           (org-attach-tag)))))))
 
 (defun org-ilm-registry--type-image-view (entry)
-  (if-let ((attachment (org-ilm-registry--attachment-path (org-mem-entry-id entry))))
+  (if-let* ((file (org-mem-entry-file entry))
+            (attachment (with-current-buffer (find-file-noselect file)
+                          (org-ilm-registry--attachment-path
+                           (org-mem-entry-id entry)))))
       (org-ilm--with-special-buffer org-ilm-registry-buffer-name
         (insert-image (create-image (expand-file-name attachment))))
     (user-error "Image registry entry has no attachment")))
