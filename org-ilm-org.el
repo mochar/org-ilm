@@ -48,10 +48,11 @@
                     (def (with-current-buffer source-buffer
                            (org-footnote-get-definition label))))
           (push (concat fn " " (nth 3 def)) footnotes)))
-      (goto-char (point-max))
-      (insert "\n\n* Footnotes\n")
-      (dolist (fn (delete-dups (nreverse footnotes)))
-        (insert fn "\n")))))
+      (when (setq footnotes (delete-dups (nreverse footnotes)))
+        (goto-char (point-max))
+        (insert "\n\n* Footnotes\n")
+        (dolist (fn footnotes)
+          (insert fn "\n"))))))
 
 (defun org-ilm--org-buffer-text-prepare (&optional region-begin region-end keep-clozes remove-footnotes)
   "Return processed buffer text for new extract or card element."
