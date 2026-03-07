@@ -20,10 +20,25 @@
 
 ;;;; Variables
 
+(defcustom org-ilm-concept-format-nchar 6
+  "Truncation size of concept names as displayed in various places.
+If available, the last alias in the ROAM_ALIASES property will be used."
+  :type 'integer
+  :group 'org-ilm-concpet)
+
 (defvar org-ilm-concept-change-hook nil
   "Hook run when concept of an element or concept changed.")
 
 ;;;; Functions
+
+(defun org-ilm--concept-collection-entries (collection &optional map-f)
+  (seq-keep
+   (lambda (entry)
+     (when-let ((type (org-ilm--element-type entry))
+                (file (org-mem-entry-file entry)))
+       (when (eq type 'concept)
+         (if map-f (funcall map-f entry) entry))))
+   (org-mem-entries-in-files (org-ilm--collection-files collection))))
 
 (defun org-ilm--concept-select-entry (&optional collection prompt blank-ok predicate)
   "Select org-mem concept entries."
@@ -47,6 +62,18 @@
                  (if predicate (funcall predicate entry) t)))))
            'require-match)))
     (gethash choice org-node--candidate<>entry)))
+
+(defun org-ilm--concept-format-names (ids)
+  (when-let* ((entries (seq-keep #'org-mem-entry-by-id ids))
+              (names (mapcar
+                      (lambda (concept)
+                        (let ((title (or
+                                      (car (last (org-mem-entry-roam-aliases concept)))
+                                      (org-mem-entry-title concept))))
+                          (substring title 0 (min (length title)
+                                                  org-ilm-concept-format-nchar))))
+                      entries)))
+    (s-join "," names)))
 
 (defun org-ilm--concept-parse-property (&optional string inherit)
   "Return (id . title) of concepts in STRING or property of heading at point."

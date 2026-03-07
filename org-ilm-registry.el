@@ -247,6 +247,15 @@ This helps share functionality of a type while being able to filter on a more gr
 
 ;;;; Functions
 
+(defun org-ilm-registry--collection-entries (collection &optional types map-f)
+  (let ((types (if types (ensure-list types) (mapcar #'car org-ilm-registry-types)))
+        (reg-path (org-ilm--collection-registry-path collection)))
+    (seq-keep
+     (lambda (entry)
+       (when (member (org-mem-entry-property org-ilm-property-registry entry) types)
+         (if map-f (funcall map-f entry) entry)))
+     (org-mem-entries-in-file reg-path))))
+
 (cl-defun org-ilm-registry--select-entry (&key types collection)
   "Select registry entry."
   (let* ((types (if types (ensure-list types) (mapcar #'car org-ilm-registry-types)))

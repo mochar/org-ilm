@@ -25,12 +25,6 @@
 
 ;;;; Variables
 
-(defcustom org-ilm-queue-concept-nchar 6
-  "Truncation size of concept names as displayed in the queue.
-If available, the last alias in the ROAM_ALIASES property will be used."
-  :type 'integer
-  :group 'org-ilm)
-
 (defcustom org-ilm-outstanding-randomness .1
   "The default level of randomness applied to the outstanding queue."
   :type 'number

@@ -82,6 +82,7 @@
   "z" #'org-ilm-cloze
   ;; "c" #'org-ilm-cloze-toggle
   "c" #'org-ilm-clozeify
+  "f" #'org-ilm-find
   "t" #'org-ilm-attachment-transclude
   "." #'org-ilm-point
   ";" org-ilm-context-map
@@ -221,8 +222,67 @@
 (defun org-ilm-find ()
   "Find a concept or registry item."
   (interactive)
-  
-  )
+  (let* ((collection (or (org-ilm--collection-from-context)
+                         (org-ilm--active-collection)))
+         (truncate-len 40)
+         (map-entry (lambda (entry)
+                      (let* ((concepts (org-ilm--concept-cache-gather
+                                        (org-mem-entry-id entry)))
+                             (concepts (last (car concepts) (cdr concepts)))
+                             (concepts-str
+                              (if concepts
+                                  (propertize (org-ilm--concept-format-names concepts)
+                                              'face 'font-lock-comment-face)
+                                ""))
+                             (title (org-ilm--org-mem-title-full entry))
+                             (title (if (string-empty-p title)
+                                        (org-mem-entry-id entry)
+                                      title))
+                             (title-str (truncate-string-to-width
+                                         title truncate-len nil nil "…"))
+                             (type (org-mem-entry-property
+                                    org-ilm-property-registry entry))
+                             (type-str
+                              (if type
+                                  (propertize type 'face 'font-lock-type-face)
+                                "")))
+                        (cons
+                         (concat
+                          title-str
+                          (propertize " " 'display '(space :align-to 42))
+                          type-str
+                          (propertize " " 'display '(space :align-to 50))
+                          concepts-str)
+                         entry)))))
+    (consult--multi
+     (list
+      (list
+       :name "Registry"
+       :narrow ?g
+       :items
+       (lambda ()
+         (org-ilm-registry--collection-entries
+          collection nil map-entry))
+       :annotate (lambda (entry) nil)
+       :action
+       (lambda (entry)
+         (org-ilm--org-goto-id (org-mem-entry-id entry)))
+       )
+      (list
+       :name "Concept"
+       :narrow ?n
+       :items
+       (lambda ()
+         (org-ilm--concept-collection-entries
+          collection map-entry))
+       :annotate (lambda (entry) nil)
+       :action
+       (lambda (entry)
+         (org-ilm--org-goto-id (org-mem-entry-id entry)))
+       )
+      )
+     :require-match t
+     :prompt "Select: ")))
 
 (defun org-ilm-extract (&optional priority)
   "Extract region.

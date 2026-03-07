@@ -328,21 +328,10 @@
       :max-width 15
       :formatter
       (lambda (data)
-        (pcase-let ((`(,marked ,concepts ,missing) data)
-                    (names))
-          (when concepts
-            (setq names
-                  (mapcar
-                   (lambda (concept)
-                     (let ((title (or
-                                   (car (last (org-mem-entry-roam-aliases concept)))
-                                   (org-mem-entry-title concept))))
-                       (substring title 0 (min (length title)
-                                               org-ilm-queue-concept-nchar))))
-                   concepts)))
+        (pcase-let ((`(,marked ,concept-names ,missing) data))
           (org-ilm--bqueue-vtable-format-cell
            (cond
-            (names (org-add-props (s-join "," names) nil 'face 'org-tag))
+            (concept-names (propertize concept-names 'face 'org-tag))
             (missing "NA")
             (t ""))
            marked missing)))))
@@ -362,11 +351,11 @@
              ("Due" (list marked (org-ilm-element--schedrel element)))
              ;; ("Tags" (list marked (org-ilm-element--tags element)))
              ("Concepts"
-              (let ((concepts (org-ilm-element--concepts element)))
-                (list marked
-                      (mapcar #'org-mem-entry-by-id
-                              ;; Only direct concepts
-                              (last (car concepts) (cdr concepts))))))))
+              (let* ((concepts (org-ilm-element--concepts element))
+                     (names (org-ilm--concept-format-names
+                             ;; Only direct concepts
+                             (last (car concepts) (cdr concepts)))))
+                (list marked names)))))
           (id ; Element not found
            (pcase (vtable-column vtable column)
              ("Index" (list marked rank t))
