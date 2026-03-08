@@ -835,7 +835,9 @@ by default will be the child of this parent element."
 (cl-defmethod org-ilm--import-default-args ((import org-ilm-buffer-import))
   (append
    (cl-call-next-method import)
-   `((buffer-download . t))))
+   `((buffer-download . t)
+     (buffer-orgify . ,(with-current-buffer (oref import buffer)
+                         (if (member major-mode '(gptel-mode org-mode)) nil t))))))
 
 (cl-defmethod org-ilm--import-process ((import org-ilm-buffer-import) args)
   (cl-call-next-method import args)
@@ -864,37 +866,157 @@ by default will be the child of this parent element."
         (push
          (lambda (id attach-dir collection)
            (make-directory attach-dir t)
-           (let ((tmp-file (make-temp-file nil)))
-             (with-current-buffer buffer
-               (if-let ((html-buf (ignore-errors (hfy-fontify-buffer))))
-                   (progn
-                     (with-current-buffer html-buf
-                       (write-region nil nil tmp-file))
-                     (kill-buffer html-buf))
-                 (user-error "Failed to html fontify buffer")))
-             (org-ilm-convert--convert-multi
-              :process-name "buffer"
-              :process-id id
-              :converters
-              (list
-               (cons #'org-ilm-convert--convert-with-marker
-                     (list
-                      :input-path tmp-file
-                      :format "markdown"
-                      :output-dir attach-dir
-                      :move-content-out t
-                      :flags '("--disable_ocr")))
-               (cons #'org-ilm-convert--convert-with-pandoc
-                     (list
-                      :input-path (expand-file-name (concat (file-name-base tmp-file) ".md") attach-dir)
-                      :input-format "markdown"
-                      :output-name id)))
-              :on-error nil
-              :on-final-success
-              (lambda (proc buf id)
-                (message "[Org-Ilm-Convert] Buffer conversion completed")
-                (org-ilm--org-with-point-at id (org-attach-sync))))))
+           (org-ilm--buffer-to-org attach-dir buffer (concat id ".org"))
+           (org-ilm--org-with-point-at id (org-attach-sync)))
+           ;; (let ((tmp-file (make-temp-file nil)))
+           ;;   (with-current-buffer buffer
+           ;;     (if-let ((html-buf (ignore-errors (hfy-fontify-buffer))))
+           ;;         (progn
+           ;;           (with-current-buffer html-buf
+           ;;             (write-region nil nil tmp-file))
+           ;;           (kill-buffer html-buf))
+           ;;       (user-error "Failed to html fontify buffer")))
+           ;;   (org-ilm-convert--convert-multi
+           ;;    :process-name "buffer"
+           ;;    :process-id id
+           ;;    :converters
+           ;;    (list
+           ;;     (cons #'org-ilm-convert--convert-with-marker
+           ;;           (list
+           ;;            :input-path tmp-file
+           ;;            :format "markdown"
+           ;;            :output-dir attach-dir
+           ;;            :move-content-out t
+           ;;            :flags '("--disable_ocr")))
+           ;;     (cons #'org-ilm-convert--convert-with-pandoc
+           ;;           (list
+           ;;            :input-path (expand-file-name (concat (file-name-base tmp-file) ".md") attach-dir)
+           ;;            :input-format "markdown"
+           ;;            :output-name id)))
+           ;;    :on-error nil
+           ;;    :on-final-success
+           ;;    (lambda (proc buf id)
+           ;;      (message "[Org-Ilm-Convert] Buffer conversion completed")
+           ;;      (org-ilm--org-with-point-at id (org-attach-sync))))))
          (oref import on-success))))))
+
+(defun org-ilm--buffer-to-org (out-dir &optional source-buf filename)
+  "Convert the rich-text buffer to an org-mode buffer.
+
+Preserves basic formatting (bold, italic, underline, links) and extracts
+images to a local directory, replacing them with org file links."
+  (setq filename (or filename (concat (buffer-name source-buf) ".org"))
+        source-buf (or source-buf (current-buffer))
+        out-dir (expand-file-name out-dir))
+  
+  (unless (file-exists-p out-dir)
+    (make-directory out-dir t))
+
+  (let* ((org-buf (generate-new-buffer "*buf-to-org*"))
+         (pos (point-min))
+         next-pos
+         pending-text)
+
+    (cl-flet ((flush-pending ()
+                (when pending-text
+                  (map-let (:bold :italic :underline :text :link) pending-text
+                    (when (and text (not (string-empty-p text)))
+                      (let* ((ws-start (if (string-match "\\`[ \t\n\r]+" text)
+                                           (match-string 0 text) ""))
+                             (ws-end (if (string-match "[ \t\n\r]+\\'" text)
+                                         (match-string 0 text) ""))
+                             (core-text (replace-regexp-in-string
+                                         "\\`[ \t\n\r]+\\|[ \t\n\r]+\\'" "" text)))
+                        
+                        (when (not (string-empty-p core-text))
+                          (if link
+                              (setq core-text (format "[[%s][%s]]" link core-text))
+                            (when bold (setq core-text (concat "*" core-text "*")))
+                            (when italic (setq core-text (concat "/" core-text "/")))
+                            (when underline (setq core-text (concat "_" core-text "_")))))
+                        
+                        (with-current-buffer org-buf
+                          (insert (concat ws-start core-text ws-end))))
+                      
+                      ;; Reset accumulator
+                      (setq pending-text nil))))))
+
+      (with-current-buffer source-buf
+        (while (< pos (point-max))
+          (setq next-pos (next-property-change pos source-buf (point-max)))
+          (let* ((text (buffer-substring-no-properties pos next-pos))
+                 (display-prop (get-text-property pos 'display))
+                 (face-prop (get-text-property pos 'face))
+                 (link-prop (get-text-property pos 'shr-url)))
+
+            (cond
+             ;; Handle Images
+             ((and (consp display-prop) (eq (car display-prop) 'image))
+              (flush-pending) ;; Output any text accumulated before the image
+              
+              (let ((image-type (plist-get (cdr display-prop) :type))
+                    (image-data (plist-get (cdr display-prop) :data)))
+                
+                ;; Fallback if the image relies on a file instead of raw string
+                ;; data
+                (unless image-data
+                  (when-let ((file (plist-get (cdr display-prop) :file)))
+                    (with-temp-buffer
+                      (insert-file-contents-literally file)
+                      (setq image-data (buffer-string)))))
+
+                (when image-data
+                  (let* ((ext (if image-type (symbol-name image-type) "png"))
+                         (rand-str (md5 (number-to-string (random))))
+                         (filename (concat "img_" rand-str "." ext))
+                         (filepath (expand-file-name filename out-dir)))
+                    
+                    ;; Write raw image data to file
+                    (with-temp-file filepath
+                      (set-buffer-multibyte nil)
+                      (insert image-data))
+                    
+                    ;; Replace the buffer text chunk with an org link
+                    (with-current-buffer org-buf
+                      (insert (format "\n[[file:%s]]\n" filename)))))))
+
+             ;; Handle Faces and Text Formatting (if it's not an image)
+             (t
+              (let* ((faces (cond
+                             ((facep face-prop) (list face-prop))
+                             ((listp face-prop)
+                              (seq-filter #'facep face-prop))))
+                     (is-bold (cl-some (lambda (f) (face-bold-p f nil t)) faces))
+                     (is-italic (cl-some (lambda (f) (face-italic-p f nil t)) faces))
+                     (is-underline (cl-some (lambda (f) (face-underline-p f nil t)) faces)))
+
+                ;; If properties match the pending state, accumulate the string
+                (if (and pending-text
+                         (eq is-bold (plist-get pending-text :bold))
+                         (eq is-italic (plist-get pending-text :italic))
+                         (eq is-underline (plist-get pending-text :underline))
+                         (equal link-prop (plist-get pending-text :link)))
+                    (setf (plist-get pending-text :text)
+                          (concat (plist-get pending-text :text) text))
+
+                  ;; If properties change, flush old state and start accumulating
+                  ;; new state
+                  (flush-pending)
+                  (setq pending-text (list :text text :bold is-bold :italic is-italic
+                                           :underline is-underline :link link-prop)))))))
+          
+          (setq pos next-pos))
+
+        ;; Ensure the final text chunk is inserted before finishing
+        (flush-pending)))
+
+
+    (with-current-buffer org-buf
+      (setq-local default-directory out-dir)
+      (set-visited-file-name filename)
+      (save-buffer))
+
+    org-buf))
 
 (transient-define-prefix org-ilm--import-buffer-transient (import)
   :refresh-suffixes t
