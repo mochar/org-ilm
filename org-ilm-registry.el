@@ -630,6 +630,10 @@ environment (multiline), paste it in headline body."
     ([data (org-ilm-registry--type-image-from-path
             (buffer-file-name (buffer-base-buffer)))]
      data)
+    ;; Image at point in eww website
+    ((eq major-mode 'eww-mode)
+     (when-let ((img-path (org-ilm--eww-export-image nil temporary-file-directory)))
+       (org-ilm-registry--type-image-from-path img-path)))
     ;; PDF page or active region
     ((org-ilm--pdf-mode-p)
      (let* ((region (when (pdf-view-active-region-p) (org-ilm--pdf-active-region)))

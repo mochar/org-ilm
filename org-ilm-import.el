@@ -949,36 +949,15 @@ images to a local directory, replacing them with org file links."
                  (face-prop (get-text-property pos 'face))
                  (link-prop (get-text-property pos 'shr-url)))
 
-            (cond
+            (cond-let*
              ;; Handle Images
-             ((and (consp display-prop) (eq (car display-prop) 'image))
-              (flush-pending) ;; Output any text accumulated before the image
-              
-              (let ((image-type (plist-get (cdr display-prop) :type))
-                    (image-data (plist-get (cdr display-prop) :data)))
-                
-                ;; Fallback if the image relies on a file instead of raw string
-                ;; data
-                (unless image-data
-                  (when-let ((file (plist-get (cdr display-prop) :file)))
-                    (with-temp-buffer
-                      (insert-file-contents-literally file)
-                      (setq image-data (buffer-string)))))
-
-                (when image-data
-                  (let* ((ext (if image-type (symbol-name image-type) "png"))
-                         (rand-str (md5 (number-to-string (random))))
-                         (filename (concat "img_" rand-str "." ext))
-                         (filepath (expand-file-name filename out-dir)))
-                    
-                    ;; Write raw image data to file
-                    (with-temp-file filepath
-                      (set-buffer-multibyte nil)
-                      (insert image-data))
-                    
-                    ;; Replace the buffer text chunk with an org link
-                    (with-current-buffer org-buf
-                      (insert (format "\n[[file:%s]]\n" filename)))))))
+              ([img-path (org-ilm--eww-export-image pos out-dir)]
+               ;; Output any text accumulated before the image
+               (flush-pending)
+               
+               ;; Replace the buffer text chunk with an org link
+               (with-current-buffer org-buf
+                 (insert (format "\n[[file:%s]]\n" (file-name-nondirectory img-path)))))
 
              ;; Handle Faces and Text Formatting (if it's not an image)
              (t

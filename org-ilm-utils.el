@@ -1072,6 +1072,33 @@ Uses various utilities from `url.el'."
                            "--wrap=preserve")
       (buffer-string))))
 
+(defun org-ilm--eww-export-image (&optional pos out-dir file-basename)
+  (let* ((pos (or pos (point)))
+         (display-prop (get-text-property pos 'display)))
+    (when (and (consp display-prop) (eq (car display-prop) 'image))
+      (let ((image-type (plist-get (cdr display-prop) :type))
+            (image-data (plist-get (cdr display-prop) :data)))
+        
+        ;; Fallback if the image relies on a file instead of raw string
+        ;; data
+        (unless image-data
+          (when-let ((file (plist-get (cdr display-prop) :file)))
+            (with-temp-buffer
+              (insert-file-contents-literally file)
+              (setq image-data (buffer-string)))))
+
+        (when image-data
+          (let* ((ext (if image-type (symbol-name image-type) "png"))
+                 (file-basename (or file-basename (md5 (number-to-string (random)))))
+                 (filename (concat file-basename "." ext))
+                 (filepath (expand-file-name filename out-dir)))
+            
+            ;; Write raw image data to file
+            (with-temp-file filepath
+              (set-buffer-multibyte nil)
+              (insert image-data))
+
+            filepath))))))
 
 ;;;; Tools
 
