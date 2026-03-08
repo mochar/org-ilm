@@ -488,7 +488,7 @@ PARAMETERS should be keyword value pairs. See `org-ilm-registry-types'."
   (org-node-goto-id id))
 
 (defun org-ilm-registry--link-face (id)
-  (if-let* ((type-data (org-ilm-registry-type-data-from-entry id))
+  (if-let* ((type-data (org-ilm-registry--type-data-from-entry id))
             (face (plist-get (car type-data) :face)))
       face
     'org-ilm-registry-link-face))

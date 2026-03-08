@@ -73,7 +73,7 @@ See `org-ilm--citation-get-zotero'"))
     ("n" "Concept" org-ilm-concept-new)
     ]
    [""
-    ("g" "Registry" org-ilm-registry-register)
+    ("g" "Registry" org-ilm-registry-register-dwim)
     ]
    ]
   )
