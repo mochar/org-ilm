@@ -146,7 +146,7 @@ With MEM-ENSURE non-nil, update org-mem cache synchronously to ensure it
 is available after capture."
   (let ((target (or target
                     (when parent-id (list 'id parent-id))
-                    (org-ilm--collection-property collection :concept)))
+                    (org-ilm--collection-property collection :concept-target)))
         (id (or id (org-id-new))))
     (org-ilm--org-capture-programmatic
      target

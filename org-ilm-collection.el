@@ -2,6 +2,21 @@
 
 ;;; Commentary:
 
+;; Collections are where the elements are stored. This can be a single Org file,
+;; or a directory of them. Multiple collections can share a directory. What is
+;; always unique to a collection is its priority queue. Short-lived collections
+;; are often created before they are merged with the main collection, as it is
+;; easier to reason with a smaller priority queue. To facilitate this workflow,
+;; collections that share a directory therefore also share their concepts and
+;; registry.
+
+;; Collections can be defined in the `org-ilm-collections' variable. It is also
+;; convenient to quickly make collection without editing your config file,
+;; especially for smaller, transient collections that share a directory with a
+;; bigger "main" collection. For this, the `org-ilm-new-collection' command can
+;; be used, which will place these collections in custom variable
+;; `org-ilm-custom-collections'.
+
 ;;; Code:
 
 ;;;; Requirements
@@ -18,21 +33,21 @@
 ;;;; Variables
 
 (defcustom org-ilm-collection-default-targets
-  '((concept  . (file "concepts.org"))
-    (registry . (file "registry.org"))
-    (import   . (file "ilm.org"))
-    (bib      . (file "refs.bib")))
+  '((concept-target  . (file "concepts.org"))
+    (registry-target . (file "registry.org"))
+    (element-target  . (file "ilm.org"))
+    (bib-target      . (file "refs.bib")))
   "Alist mapping ilm things to default targets."
   :type '(alist :key-type symbol :value-type alist)
   :group 'org-ilm-collection)
 
 (defcustom org-ilm-collections
   (let ((targets org-ilm-collection-default-targets))
-    `((ilm :path     "~/ilm/"
-           :bib      ,(alist-get 'bib targets)
-           :concept  ,(alist-get 'concept targets)
-           :registry ,(alist-get 'registry targets)
-           :import   ,(alist-get 'import targets)
+    `((ilm :path            "~/ilm/"
+           :bib-target      ,(alist-get 'bib targets)
+           :concept-target  ,(alist-get 'concept targets)
+           :registry-target ,(alist-get 'registry targets)
+           :element-target  ,(alist-get 'import targets)
            ))) 
   "Alist mapping collection name symbol to its configuration plist.
 
@@ -46,19 +61,19 @@ Configuration properties:
 The following specify default targets, for which see
 `org-ilm-collection-default-targets'.
 
-`import'
+`element-target'
 
-  The default target for imports.
+  The default target for elements.
 
-`concept'
+`concept-target'
 
   The deafult target for concepts.
 
-`registry'
+`registry-target'
 
   The default target for registry items.
 
-`bib'
+`bib-target'
 
   The default target for bibtex entries."
   :type '(alist :key-type symbol :value-type alist)
@@ -199,14 +214,14 @@ Raise error if neither file nor folder."
 (defun org-ilm--collection-registry-path (&optional collection)
   "Return path to registry of COLLECTION."
   (when-let* ((collection (or collection (org-ilm--active-collection)))
-              (target (org-ilm--collection-property collection :registry))
+              (target (org-ilm--collection-property collection :registry-target))
               (buf (org-ilm--org-capture-target-buffer target))
               (path (buffer-file-name buf)))
     path))
 
 (defun org-ilm-bibliography ()
   (interactive)
-  (if-let* ((target (org-ilm--collection-property (org-ilm--active-collection) :bib))
+  (if-let* ((target (org-ilm--collection-property (org-ilm--active-collection) :bib-target))
             (buf (org-ilm--org-capture-target-buffer target))
             (path (buffer-file-name buf)))
       (let ((key (ignore-errors (car (org-ilm--org-mem-cite-refs)))))

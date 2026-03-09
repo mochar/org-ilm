@@ -187,7 +187,7 @@ See `org-ilm--citation-get-zotero'"))
            (collection (alist-get 'collection args)))
       (pcase location
         ('default
-         ;; (oset (transient-scope) target (org-ilm--collection-property collection :import))
+         ;; (oset (transient-scope) target (org-ilm--collection-property collection :element-target))
          (oset (transient-scope) target nil))
         ('child
          (oset (transient-scope) target nil))
@@ -235,7 +235,9 @@ See `org-ilm--citation-get-zotero'"))
            (let* ((el-type (org-ilm-import--type (transient-scope)))
                   (target (org-ilm--collection-property
                            collection
-                           (if (eq el-type 'concept) :concept :import))))
+                           (if (eq el-type 'concept)
+                               :concept-target
+                             :element-target))))
              (concat
               (propertize (format "%s" target) 'face 'Info-quoted))))
           ('child

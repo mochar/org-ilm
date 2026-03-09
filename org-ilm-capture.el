@@ -144,7 +144,7 @@ The callback ON-ABORT is called when capture is cancelled."
       (cl-assert (assoc collection (org-ilm-collections)) nil
                  "COLLECTION must be a valid if no PARENT or TARGET given, got %s"
                  collection)
-      (setq target (org-ilm--collection-property collection :import))))
+      (setq target (org-ilm--collection-property collection :element-target))))
 
     ;; Make sure bqueue is valid
     (when bqueue
@@ -372,7 +372,7 @@ For type of arguments DATA, see `org-ilm-capture-ensure'"
 
                ;; Store bibtex
                (when-let ((bibtex (org-ilm-capture--bibtex capture))
-                          (bib-target (org-ilm--collection-property collection :bib)))
+                          (bib-target (org-ilm--collection-property collection :bib-target)))
                  (org-ilm--org-capture-programmatic bib-target bibtex 'plain))
                
                (when org-ilm-update-org-mem-after-capture
