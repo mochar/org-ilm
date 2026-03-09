@@ -265,7 +265,28 @@ See `org-ilm--citation-get-zotero'"))
   :description "Title"
   :argument 'title
   :prompt "Title: "
-  :always-read t :allow-empty nil :transient t)
+  :always-read t
+  :allow-empty nil
+  :transient t
+  :reader
+  (lambda (prompt initial-input history)
+    (let* ((options '(("Parse from website" . website)
+                      ("Parse using Zotero" . zotero)))
+           (choice (completing-read "Title: " options nil nil initial-input history))
+           (choice (or (map-elt options choice) choice)))
+      (pcase choice
+        ('zotero
+         (let* ((ref (org-ilm--import-get-ref (transient-scope)))
+                (info (org-ilm--citation-get-zotero ref))
+                (title (or (alist-get 'title info)
+                           (alist-get 'shortTitle info))))
+           (if info
+               (oset (transient-scope) info info)
+             (message "Nothing returned from Zotero"))
+           title))
+        ('website
+         (org-ilm--import-get-title (transient-scope)))
+        (_ choice)))))
 
 (transient-define-suffix org-ilm--import-suffix-concepts ()
   :transient 'transient--do-stack
@@ -376,7 +397,41 @@ See `org-ilm--citation-get-zotero'"))
 
 
 ;;;; Citation suffixes
-  
+
+(transient-define-suffix org-ilm--import-suffix-bibtex ()
+  :transient 'transient--do-suspend
+  :key "b"
+  :description "Bibtex"
+  (interactive)
+  (let ((import (transient-scope)))
+    (org-ilm--with-capture-buffer
+        (list :name "*ilm-bibtex*"
+              :description "Bibtex citation"
+              :height 0.6
+              :commit
+              (lambda (text)
+                (if (and text (not (string-empty-p text)))
+                    (let* ((bib-alist (org-ilm--citation-parse-bibtex text))
+                           (key (map-elt bib-alist "=key=")))
+                      (if (null bib-alist)
+                          (progn
+                            (message "Invalid bibtex")
+                            (transient-resume))
+                        (oset import bibtex text)
+                        (oset import bib-alist bib-alist)
+                        (transient-resume)
+                        (org-ilm--transient-set-target-value "k" key)))
+                  (transient-resume)))
+              :cancel
+              (lambda ()
+                (transient-resume)))
+      (cond-let*
+        ([bibtex (oref import bibtex)]
+         (insert bibtex))
+        ([bib-alist (oref import bib-alist)]
+         (insert (org-ilm--format-bibtex-entry (oref import bib-alist)))))
+      (goto-char (point-min)))))
+
 (transient-define-infix org-ilm--import-suffix-key ()
   :class 'org-ilm-transient-cons-option
   :transient 'transient--do-call
@@ -395,9 +450,9 @@ See `org-ilm--citation-get-zotero'"))
   :inapt-if-not
   (lambda () (oref (transient-scope) bib-alist))
   :reader
-  (lambda (&rest _)
+  (lambda (prompt initial-input history)
     (let* ((args (org-ilm--transient-parse))
-           (key (read-string "Key (empty to auto-generate): "))
+           (key (read-string "Key (empty to auto-generate): " initial-input history))
            (bib-alist (oref (transient-scope) bib-alist)))
 
       ;; Generate new key if no key specified 
@@ -409,13 +464,13 @@ See `org-ilm--citation-get-zotero'"))
           (unless (and key (not (string-empty-p key)))
             (setq key (upcase (substring (org-id-uuid) 0 8))))))
       
-      (setf (alist-get "=key=" bib-alist nil nil #'string=) key)
+      (setf (map-elt bib-alist "=key=") key)
       
       key)))
 
 (transient-define-group org-ilm--import-group-citation
   ["Citation"
-   ("C" "Add citation"
+   ("C" "Get citation"
     (lambda ()
       (interactive)
       ;; TODO We already save the zotero data in :data, write a function to
@@ -428,13 +483,16 @@ See `org-ilm--citation-get-zotero'"))
               (setq ref option))))
 
         (when ref
-          (if-let* ((bibtex (org-ilm--citation-get-bibtex ref 'as-alist))
-                    (key (cdr (assoc "=key=" bibtex))))
+          (if-let* ((bib-alist (org-ilm--citation-get-bibtex ref 'as-alist))
+                    (key (cdr (assoc "=key=" bib-alist)))
+                    (bib-str (org-ilm--format-bibtex-entry bib-alist key)))
               (progn
-                (oset (transient-scope) bib-alist bibtex)
+                (oset (transient-scope) bib-alist bib-alist)
+                (oset (transient-scope) bibtex bib-str)
                 (org-ilm--transient-set-target-value "k" key))
             (message "Bibtex could not be found")))))
     :transient transient--do-call)
+   (org-ilm--import-suffix-bibtex)
    (org-ilm--import-suffix-key)
    ])
 
@@ -469,7 +527,8 @@ See `org-ilm--citation-get-zotero'"))
       (org-ilm--transient-set-target-value
        "k" (cdr (assoc "=key=" bib))))
     (when attachments
-      (org-ilm--transient-set-target-value "ad" (car attachments)))))
+      (org-ilm--transient-set-target-value "ad" (car attachments)))
+    ))
 
 (transient-define-group org-ilm--import-group-actions
   ["Actions"
@@ -705,7 +764,7 @@ by default will be the child of this parent element."
    ]
 
   org-ilm--import-group-citation
-  org-ilm--import-group-actions
+  ;; org-ilm--import-group-actions
   org-ilm--import-group-import
   
   (interactive "P")
@@ -793,7 +852,7 @@ by default will be the child of this parent element."
 
   org-ilm--convert-media-transient-group
   org-ilm--import-group-citation
-  org-ilm--import-group-actions
+  ;; org-ilm--import-group-actions
   org-ilm--import-group-import
   
   (interactive "P")
@@ -1133,7 +1192,7 @@ images to a local directory, replacing them with org file links."
    ]
 
   org-ilm--import-group-citation
-  org-ilm--import-group-actions
+  ;; org-ilm--import-group-actions
   org-ilm--import-group-import
   
   (interactive "P")

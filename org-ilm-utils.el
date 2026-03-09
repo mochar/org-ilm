@@ -356,6 +356,78 @@ it.  After BODY executes, the buffer is put in
          (goto-char (point-min)))
        (pop-to-buffer ,buf))))
 
+;;;;; Capture buffer
+
+(defvar org-ilm-capture-data nil
+  "Plist containing data of current/last capture.
+
+Data contains SPEC argument of `org-ilm--with-capture-buffer'. After
+commit, the :text property is set to the buffer content. The variable is
+left as-is in order to retrieve the data after the capture.")
+
+(defvar org-ilm-capture-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") 'org-ilm-capture-commit)
+    (define-key map (kbd "C-c C-k") 'org-ilm-capture-cancel)
+    map)
+  "Keymap for `org-ilm-capture-mode'.")
+
+(define-derived-mode org-ilm-capture-mode text-mode "Capture"
+  "Major mode for temporary text capture.
+\\{org-ilm-capture-mode-map}"
+  (setq-local header-line-format
+              (substitute-command-keys
+               "  Type \\[org-ilm-capture-commit] to commit, \\[org-ilm-capture-cancel] to cancel.")))
+
+(defun org-ilm-capture-commit ()
+  "Commit the current capture buffer."
+  (interactive)
+  (map-let (:pre-commit :commit) org-ilm-capture-data
+    (when pre-commit (funcall pre-commit))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (setf (plist-get org-ilm-capture-data :text) text)
+      (when commit (funcall commit text)))
+    (quit-window t)))
+
+(defun org-ilm-capture-cancel ()
+  "Cancel the current capture buffer."
+  (interactive)
+  (map-let (:cancel) org-ilm-capture-data
+    (quit-window t)
+    (when cancel (funcall cancel))))
+
+(defmacro org-ilm--with-capture-buffer (spec &rest body)
+  "Pop up a capture buffer at the bottom of the frame.
+
+SPEC is a plist evaluated at runtime, which can contain:
+  :name         String used to name the buffer (default \"*ilm-capture*\").
+  :description  Optional string prepended to the header line.
+  :height       The window height (default 0.45).
+  :pre-commit   Function called before commit with the buffer still active.
+  :commit       Function called after commit, passed buffer content string.
+  :cancel       Function called when cancelled.
+
+BODY is evaluated inside the new buffer before displaying it."
+  (declare (indent 1) (debug t))
+  (let ((s (make-symbol "spec")))
+    `(let* ((,s ,spec)
+            (buf-name (or (plist-get ,s :name) "*ilm-capture*"))
+            (desc (plist-get ,s :description))
+            (height (or (plist-get ,s :height) 0.45))
+            (buf (generate-new-buffer buf-name)))
+       (with-current-buffer buf
+         (org-ilm-capture-mode)
+         (setq org-ilm-capture-data ,s)
+         (when desc
+           (setq-local header-line-format
+                       (concat "  " (propertize desc 'face 'bold)
+                               " |" header-line-format)))
+         ,@body)
+       (pop-to-buffer buf
+                      `(display-buffer-at-bottom
+                        (window-height . ,height))))))
+
+
 ;;;; Org
 
 (defun org-ilm--org-headline-bounds ()
