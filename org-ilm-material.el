@@ -90,7 +90,7 @@ as a new element and the initial interval based on PRIORITY is returned."
 
 (cl-defmethod org-ilm--element-next-state ((type (eql 'material)) element duration &rest args)
   (org-ilm--element-with-point-at element
-    (let* ((review-log  (org-ilm--log-read))
+    (let* ((review-log  (or (plist-get args :log) (org-ilm--log-read)))
            (last-review (car (last review-log))))
       (cl-assert last-review nil "Element missing log")
       (let* ((scheduled (org-ilm-element--sched element))

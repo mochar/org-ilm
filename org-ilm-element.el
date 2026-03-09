@@ -579,7 +579,9 @@ With active region delete all in region."
    ((region-active-p)
     (org-ilm-element-delete-active-region))
    (t
-    (org-ilm--element-delete))))
+    (if-let ((element (org-ilm--element-from-context)))
+        (org-ilm--element-delete element 'all)
+      (user-error "No element at point")))))
     
 
 ;;;; Transient

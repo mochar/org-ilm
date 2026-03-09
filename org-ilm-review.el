@@ -68,7 +68,7 @@ The attachment's buffer is current.")
 (cl-defstruct (org-ilm-review
                (:conc-name org-ilm-review--))
   "Review data."
-  id type buffer start card-revealed rating
+  id type log buffer start card-revealed rating
   (update-p t :description "Whether to update priority and schedule after review"))
 
 (defun org-ilm--review-element ()
@@ -313,6 +313,8 @@ needs the attachment buffer."
                 (make-org-ilm-review
                  :id (oref element id)
                  :type (oref element type)
+                 :log (org-ilm--element-with-point-at element
+                        (org-ilm--log-read))
                  :start (current-time)))
           
           (org-ilm--org-with-point-at id
@@ -474,12 +476,19 @@ needs the attachment buffer."
                       (duration (org-ilm--review-duration))
                       ((map :scheduled :priority)
                        (org-ilm--element-next-state
-                        (oref element type) element duration)))
+                        (oref element type) element duration
+                        :log (oref org-ilm--review log))))
            (concat
             "Next "
             (propertize
              (org-ilm--ts-human-relative scheduled)
-             'face 'Info-quoted))))))
+             'face 'Info-quoted)))))
+     :if (lambda () (or (not (org-ilm--review-card-p))
+                        (oref org-ilm--review card-revealed))))
+    ("n" "Reveal" org-ilm-review-reveal
+     :transient t
+     :if (lambda () (and (org-ilm--review-card-p)
+                         (not (oref org-ilm--review card-revealed)))))
     ("s" "Reschedule" org-ilm-review-postpone)
     ("d" "Done" org-ilm-review-done)
     ("q" "Quit" org-ilm-review-quit)]
@@ -495,7 +504,9 @@ needs the attachment buffer."
            (pcase-let* ((`(,key ,desc ,func ,rating) rating-data)
                         ((map :scheduled :priority)
                          (org-ilm--element-next-state
-                          (oref element type) element duration :rating rating)))
+                          (oref element type) element duration
+                          :log (oref org-ilm--review log)
+                          :rating rating)))
              (transient-parse-suffix
               'org-ilm--review-transient
               (list key desc func

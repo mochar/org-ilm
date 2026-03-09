@@ -91,8 +91,12 @@ returns nil."
       (org-ilm--parameter-data-from parameter-or-data)
     (org-ilm--org-with-point-at id
       (cond-let*
+        ;; If the parameter is set explicitely on the element, we use that
+        ;; value.
         ([value (org-entry-get nil property)]
          (org-ilm--parameter-validate-or-warn validate value))
+        ;; Otherwise we get the values from the direct parent concepts and
+        ;; aggregate them.
         ([concept-values (seq-keep
                           (lambda (concept-value)
                             (when-let ((value (org-ilm--parameter-validate-or-warn validate (cdr concept-value))))

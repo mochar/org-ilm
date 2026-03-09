@@ -123,10 +123,10 @@ concept properties."
       (setq retention org-ilm-card-fsrs-desired-retention))
     (fsrs-make-scheduler
      :desired-retention retention
-     :learning-steps org-ilm-card-fsrs-learning-steps
-     :relearning-steps org-ilm-card-fsrs-relearning-steps
-     :maximum-interval org-ilm-card-fsrs-maximum-interval
-     :enable-fuzzing-p org-ilm-card-fsrs-fuzzing-p)))
+     :learning-steps    org-ilm-card-fsrs-learning-steps
+     :relearning-steps  org-ilm-card-fsrs-relearning-steps
+     :maximum-interval  org-ilm-card-fsrs-maximum-interval
+     :enable-fuzzing-p  org-ilm-card-fsrs-fuzzing-p)))
 
 ;; TODO This can be optimized by truncating based on latest :review state
 (defun org-ilm--card-step-from-log (scheduler review-log)
@@ -164,7 +164,7 @@ An empty log implies a new card, so step is 0."
            (rating (plist-get args :rating))
            (scheduler (org-ilm--card-element-scheduler element))
            (timestamp (or (plist-get args :timestamp) (ts-now)))
-           (review-log  (org-ilm--log-read))
+           (review-log (or (plist-get args :log) (org-ilm--log-read)))
            (last-review (seq-find
                          (lambda (r)
                            (not (eq (org-ilm-log-review--action r) :done)))

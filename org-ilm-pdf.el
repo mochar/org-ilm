@@ -1700,8 +1700,13 @@ With prefix arg, use mouse position as bottom cutoff point."
 ;; Show clozes after review rating
 (defun org-ilm--pdf-review-reveal-hook ()
   (when (org-ilm--pdf-mode-p)
-  ;; TODO Need a stupid wait here, fix
-    (run-at-time .1 nil #'pdf-view-redisplay)))
+    ;; TODO Need a stupid wait here, fix
+    ;; (run-at-time .1 nil #'pdf-view-redisplay)
+    (let ((buf (current-buffer)))
+      (run-at-time .1 nil (lambda ()
+                            (when (and buf (buffer-live-p buf))
+                              (with-current-buffer buf
+                                (pdf-view-redisplay))))))))
 
 (add-hook 'org-ilm-review-reveal-hook
           #'org-ilm--pdf-review-reveal-hook)
