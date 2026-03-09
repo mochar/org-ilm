@@ -1015,15 +1015,26 @@ TODO Handle two column layout"
 ;;;; Convert
 
 ;; TODO off-load pages handling to here so that this function can be more usefull
-(cl-defun org-ilm--pdf-convert-attachment-to-org (pdf-path pages org-id &key on-success on-error)
+(defun org-ilm--pdf-convert-attachment-to-org (pdf-path pages org-id &optional main-p tool)
   "Convert attachment PDF to Md using Marker, then to Org mode using Pandoc."
-  (org-ilm-convert--convert-to-org-with-marker-pandoc
-   :process-id org-id
-   :input-path pdf-path
-   :new-name org-id 
-   :pdf-pages pages
-   :on-success on-success
-   :on-error on-error))
+  (cond
+   ((or (null pages) (stringp pages)))
+   ((integerp pages) (setq pages (number-to-string pages)))
+   ;; TODO allow "0,5-10,20" as list of integers and cons
+   ((and (consp pages) (integerp (car pages)) (integerp (cdr pages)))
+    (setq pages (format "%s-%s" (car pages) (cdr pages))))
+   (t (error "Argument PAGES not correctly specified.")))
+  (org-ilm--convert-transient
+   (make-org-ilm-convert-menu-data
+    :id org-id
+    :source pdf-path
+    :type 'attachment
+    :defaults
+    `((pdf-convert . t)
+      (pdf-pages . ,pages)
+      (pdf-tool . ,(or tool 'docling))
+      (main-attachment . ,(when main-p 'pdf))
+      ))))
 
 (defun org-ilm-pdf-convert ()
   "Convert PDF to another format within the same attachment.
@@ -1043,7 +1054,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
 (transient-define-prefix org-ilm--pdf-convert-transient ()
   :refresh-suffixes t
   :value '("image")
-  
+
   ["PDF Convert"
    ("f" "Format" "%s"
     :class transient-switches
@@ -1113,6 +1124,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
        ;; Decide on whether to convert just the virtual pdf region or the entire
        ;; page.
        (if (and region (= 1 num-pages) org-ilm-pdf-convert-org-respect-area)
+           ;; TODO WTF??
            (org-ilm--image-convert-attachment-to-org
             (org-ilm--pdf-image-export org-id :dir attach-dir)
             org-id
@@ -1123,12 +1135,10 @@ See also `org-ilm-pdf-convert-org-respect-area'."
            (org-ilm--pdf-convert-attachment-to-org
             pdf-path
             (if (= 1 num-pages)
-                (1- (org-ilm--pdf-page-normalized))
-              (cons (1- (org-ilm--pdf-page-normalized 1))
-                    (1- (org-ilm--pdf-page-normalized num-pages))))
-            org-id
-            :on-success
-            (lambda (proc buf id) (funcall on-success "org")))))))))
+                (org-ilm--pdf-page-normalized)
+              (cons (org-ilm--pdf-page-normalized 1)
+                    (org-ilm--pdf-page-normalized num-pages)))
+            org-id as-main-p)))))))
 
 ;;;; Capture
 
@@ -1218,7 +1228,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
               :attach-method 'mv
               :ext t
               capture-args))))
-        ('marker
+        ((or 'docling 'marker)
          (map-put! capture-args
                    :on-success
                    (lambda (&rest _)
@@ -1230,8 +1240,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                             (1- beg)
                           (cons (1- beg) (1- end))))
                       extract-id
-                      :on-success
-                      (lambda (proc buf id) (message "Conversion finished.")))))         
+                      'main output-type)))
          (apply #'org-ilm--import-capture :ext "org" capture-args)))
 
       (org-ilm--pdf-interactive-capture-reset))))
@@ -1240,6 +1249,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
   '((virtual . "PDF (virtual)")
     (text    . "Text")
     (image   . "Image")
+    (docling . "Org (Docling)")
     (marker  . "Org (Marker)")))
 
 (defun org-ilm--pdf-capture-prompt-for-format (formats prompt)
@@ -1261,7 +1271,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
        (if card-p
            'virtual
          (org-ilm--pdf-capture-prompt-for-format
-          '(virtual text image marker)
+          '(virtual text image docling marker)
           (concat action-str " custom selection as: ")))
        card-p))
      ;; When region selected:
@@ -1273,14 +1283,14 @@ See also `org-ilm-pdf-convert-org-respect-area'."
       (if (not card-p)
           (org-ilm--pdf-extract-region
            (org-ilm--pdf-capture-prompt-for-format
-            '(virtual text image marker)
+            '(virtual text image docling marker)
             (concat action-str " area as: ")))
         (org-ilm-pdf-select-region 'no-redisplay)
         (org-ilm--pdf-capture-interactive
          (if card-p
              'virtual
            (org-ilm--pdf-capture-prompt-for-format
-            '(virtual text image marker)
+            '(virtual text image docling marker)
             (concat action-str " custom selection as: ")))
          card-p)))
      (t
@@ -1288,7 +1298,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
         (user-error "Cannot cloze without selection"))
       (org-ilm--pdf-extract-outline-section
        (org-ilm--pdf-capture-prompt-for-format
-        '(virtual text image marker)
+        '(virtual text image docling marker)
         (concat action-str " custom outline section as: ")))))))
 
 (cl-defmethod org-ilm--extract (&context (ilm-attachment pdf))

@@ -1580,7 +1580,7 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
 
 (cl-defstruct (org-ilm-convert-menu-data
                (:conc-name org-ilm-convert-menu-data--))
-  id type title source props)
+  id type title source defaults)
                
 (defun org-ilm-convert-menu (&optional id)
   (interactive)
@@ -1616,8 +1616,21 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
            (make-org-ilm-convert-menu-data
             :id (org-mem-entry-id entry)
             :title (org-mem-entry-title entry)
-            :props (org-mem-entry-properties entry)
-            :source source :type type)))))))
+            :source source
+            :type type
+            :defaults
+            (append
+             (when (and (eq type 'attachment)
+                        (string= (file-name-extension source) "pdf"))
+               '((pdf-convert . t)))
+             (when-let* ((props (org-mem-entry-properties entry))
+                         (pdf-ranges (map-elt props "ILM_PDF"))
+                         (spec (org-ilm--pdf-spec-parse pdf-ranges))
+                         (range (org-ilm-pdf-spec--range spec)))
+               (if (= (car range) (cdr range))
+                   `((pdf-pages . ,(car range)))
+                 `((pdf-pages . ,(format "%s-%s" (car range) (cdr range))))))
+            ))))))))
 
 (transient-define-prefix org-ilm--convert-transient (data)
   :refresh-suffixes t
@@ -1713,22 +1726,15 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
    :scope data 
    :value
    (lambda ()
-     (with-slots (title source type props) data
-       (append
+     (with-slots (title source type defaults) data
+       (map-merge
+        'alist
         `((webpage-simplify . "markdown")
           (webpage-orgify . t)
           (media-template . "%(title)s.%(ext)s")
           (pdf-tool . docling)
           (pdf-page-batch . "4"))
-        (when (and (eq type 'attachment)
-                   (string= (file-name-extension source) "pdf"))
-          '((pdf-convert . t)))
-        (when-let* ((pdf-ranges (map-elt props "ILM_PDF"))
-                    (spec (org-ilm--pdf-spec-parse pdf-ranges))
-                    (range (org-ilm-pdf-spec--range spec)))
-          (if (= (car range) (cdr range))
-              `((pdf-pages . ,(car range)))
-            `((pdf-pages . ,(format "%s-%s" (car range) (cdr range)))))))))))
+        defaults)))))
 
 
 ;;;; Footer
