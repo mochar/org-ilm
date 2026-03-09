@@ -2,6 +2,8 @@
 
 ;;; Commentary:
 
+;; PDF attachments.
+
 ;;; Code:
 
 ;;;; Requirements
@@ -311,7 +313,7 @@ When not specified, REGION is active region."
       (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
              (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
         (if page-region
-            (pcase-let* ((`(,LE ,TO ,RI, BO) page-region)
+            (pcase-let* ((`(,LE ,TO ,RI ,BO) page-region)
                          (`(,le ,to ,ri ,bo) region)
                          (w (- RI LE))
                          (h (- BO TO)))
@@ -336,21 +338,22 @@ If VIRTUAL-PAGE is omitted, use the current virtual page."
       region
 
     (let* ((virtual-page (or virtual-page (pdf-view-current-page)))
-           (page-region (nth 2 (pdf-virtual-document-page virtual-page))))
+           (page-region  (nth 2 (pdf-virtual-document-page virtual-page))))
       (if page-region
           (pcase-let* ((`(,LE ,TO ,RI ,BO) page-region)
                        (`(,le ,to ,ri ,bo) region)
-                       (w (- RI LE))
-                       (h (- BO TO)))
+                       (w (float (- RI LE)))
+                       (h (float (- BO TO))))
             ;; Inverse of normalization:
             ;; full = LE + rel_virtual * w
             ;; rel_virtual = (full - LE) / w
-            (list (/ (- le LE) w)
-                  (/ (- to TO) h)
-                  (/ (- ri LE) w)
-                  (/ (- bo TO) h)))
+            (org-ilm--pdf-clip-rect
+             (list (/ (- le LE) w)
+                   (/ (- to TO) h)
+                   (/ (- ri LE) w)
+                   (/ (- bo TO) h))))
         ;; No subregion (whole page shown)
-        region))))
+        (org-ilm--pdf-clip-rect region)))))
 
 (defun org-ilm--pdf-mouse-position-relative ()
   "Return the relative coordinates (X . Y) of the mouse on the current
@@ -368,7 +371,7 @@ PDF page."
     relative-xy))
 
 (defun org-ilm--pdf-clip-rect (rect)
-  (mapcar (lambda (x) (min (max x 0) 1)) rect))
+  (mapcar (lambda (x) (min (max x 0.0) 1.0)) rect))
 
 
 ;;;; Section spec
@@ -910,17 +913,20 @@ buffer-local `pdf-view--hotspot-functions'."
 
     (apply #'pdf-info-renderpage page width file-or-buffer cmds)))
 
-;; Advice `pdf-view-create-page' to add highlights for our captures. The
-;; function is responsible for generating an image of the PDF. During this
-;; process, region rectangle and hotspots are created to generate the image,
-;; which we intercept to add our capture highlights. Alternative was calling
-;; `pdf-view-display-region' to create the regions but it gets overwritten as
-;; soon as the image needs to be generated again.
 (defun org-ilm--advice--pdf-view-create-page (orig-func &rest args)
+  "Advice `pdf-view-create-page' to add highlights for our captures.
+
+The function is responsible for generating an image of the PDF. During
+this process, region rectangle and hotspots are created to generate the
+image, which we intercept to add our capture highlights. Alternative was
+calling `pdf-view-display-region' to create the regions but it gets
+overwritten as soon as the image needs to be generated again."
   (if (not (org-ilm--attachment-data))
       (apply orig-func args)
     (let* ((page (car args))
            (window (nth 1 args)) ; optional
+           ;; Highlights shown are either the interactive capture, or if that is
+           ;; not active, the child captures and point.
            (highlights (or (ensure-list
                             (org-ilm--pdf-interactive-capture-page-highlights page))
                            (and (org-ilm--attachment-data)
@@ -1158,7 +1164,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
         :single-page-p t
         :parts (list (make-org-ilm-pdf-page
                       :number (org-ilm--pdf-page-normalized)
-                      :area (org-ilm--pdf-active-region)))))
+                      :area (org-ilm--pdf-region-normalized)))))
     (error "No active region")))
 
 (defun org-ilm--pdf-extract-outline-section (output-type)
@@ -1236,9 +1242,7 @@ See also `org-ilm-pdf-convert-org-respect-area'."
                      (org-ilm--pdf-convert-attachment-to-org
                       (org-ilm--pdf-path)
                       (pcase-let ((`(,beg . ,end) (org-ilm-pdf-spec--range spec)))
-                        (if (= beg end)
-                            (1- beg)
-                          (cons (1- beg) (1- end))))
+                        (if (= beg end) beg (cons beg end)))
                       extract-id
                       'main output-type)))
          (apply #'org-ilm--import-capture :ext "org" capture-args)))
@@ -1498,11 +1502,15 @@ With prefix arg, use mouse position as top cutoff point."
         top)
     
     (if arg
-      (let ((pos (org-ilm--pdf-mouse-position-relative)))
-        (setq top (cdr pos))
-        (when (and bottom (> top bottom))
-          (setq bottom nil)))
-      (setq bottom nil))
+        ;; Arg: Top is mouse y pos
+        (let ((pos (org-ilm--pdf-mouse-position-relative)))
+          (setq top (cdr pos))
+          (when (and bottom (> top bottom))
+            (setq bottom nil)))
+      ;; Default to the top edge of the current virtual view instead of nil
+      (let ((v-top (nth 1 (org-ilm--pdf-region-normalized '(0 0 1 1)))))
+        (setq top (if (> v-top 0.0) v-top nil))
+        (setq bottom nil)))
 
     (map-let (:end-page :end-bottom) org-ilm-pdf-interactive-capture
       (when (and end-page (<= end-page page))
@@ -1517,6 +1525,11 @@ With prefix arg, use mouse position as top cutoff point."
     (pdf-view-redisplay)
     (org-ilm--pdf-interactive-capture-print-state)))
 
+(defun org-ilm-pdf-select-begin-page-and-pos ()
+  "Select current page as start point of capture, with mouse pos as top."
+  (interactive)
+  (funcall-interactively #'org-ilm-pdf-select-begin-page t))
+
 (defun org-ilm-pdf-select-end-page (arg)
   "Select current page as end point of capture.
 With prefix arg, use mouse position as bottom cutoff point."
@@ -1524,9 +1537,13 @@ With prefix arg, use mouse position as bottom cutoff point."
   (let ((page (org-ilm--pdf-page-normalized))
         bottom)
     
-    (when arg
-      (let ((pos (org-ilm--pdf-mouse-position-relative)))
-        (setq bottom (cdr pos))))
+    (if arg
+        ;; Bottom is mouse y pos
+        (let ((pos (org-ilm--pdf-mouse-position-relative)))
+          (setq bottom (cdr pos)))
+      ;; Default to the bottom edge of the current virtual view instead of nil
+      (let ((v-bottom (nth 3 (org-ilm--pdf-region-normalized '(0 0 1 1)))))
+        (setq bottom (if (< v-bottom 1.0) v-bottom nil))))
 
     (map-let (:begin-page :begin-top :begin-bottom) org-ilm-pdf-interactive-capture
       (cond
@@ -1551,6 +1568,11 @@ With prefix arg, use mouse position as bottom cutoff point."
             (plist-get org-ilm-pdf-interactive-capture :end-bottom) bottom))
     (pdf-view-redisplay)
     (org-ilm--pdf-interactive-capture-print-state)))
+
+(defun org-ilm-pdf-select-end-page-and-pos ()
+  "Select current page as end point of capture, with mouse pos as bottom."
+  (interactive)
+  (funcall-interactively #'org-ilm-pdf-select-end-page t))
 
 (defun org-ilm-pdf-select-region (&optional no-redisplay)
   "Add active region to interactive capture."
@@ -1596,13 +1618,14 @@ With prefix arg, use mouse position as bottom cutoff point."
   (cond
    (org-ilm-global-minor-mode
     (define-key pdf-view-mode-map (kbd "[") #'org-ilm-pdf-select-begin-page)
+    (define-key pdf-view-mode-map (kbd "M-[") #'org-ilm-pdf-select-begin-page-and-pos)
     (define-key pdf-view-mode-map (kbd "]") #'org-ilm-pdf-select-end-page)
+    (define-key pdf-view-mode-map (kbd "M-]") #'org-ilm-pdf-select-end-page-and-pos)
     (define-key pdf-view-mode-map (kbd "\"") #'org-ilm-pdf-select-region)
     (advice-add 'keyboard-quit :before #'org-ilm--pdf-interactive-capture-reset))
    (t
-    (define-key pdf-view-mode-map (kbd "[") nil)
-    (define-key pdf-view-mode-map (kbd "]") nil)
-    (define-key pdf-view-mode-map (kbd "\"") nil)
+    (dolist (k '("[" "M-[" "]" "M-]" "\""))
+      (define-key pdf-view-mode-map (kbd k) nil))
     (advice-remove 'keyboard-quit #'org-ilm--pdf-interactive-capture-reset))))
 
 (add-hook 'org-ilm-global-minor-mode-hook #'org-ilm--pdf-interactive-capure--hook)
@@ -1685,16 +1708,19 @@ With prefix arg, use mouse position as bottom cutoff point."
 (defun org-ilm--pdf-ilm-after-attachment-setup-hook (buf)
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      ;; Refresh pdf highlights when an element has been deleted
-      (letrec ((hook (lambda (&rest r)
-                       (if (buffer-live-p buf)
+      (when (org-ilm--pdf-mode-p)
+        ;; Refresh pdf highlights when an element has been deleted
+        (letrec ((hook (lambda (&rest r)
+                         (when (buffer-live-p buf)
                            (with-current-buffer buf
-                             (org-ilm--pdf-highlights-refresh))
-                         (remove-hook 'org-ilm-element-delete-hook hook)))))
-        (when (org-ilm--pdf-mode-p)
-          (add-hook 'org-ilm-element-delete-hook hook)))
+                             (org-ilm--pdf-highlights-refresh))))))
+          (add-hook 'org-ilm-element-delete-hook hook)
 
-      )))
+          ;; Clean up the hook immediately when this specific PDF buffer is killed
+          (add-hook 'kill-buffer-hook
+                    (lambda ()
+                      (remove-hook 'org-ilm-element-delete-hook hook))
+                    nil t))))))
 
 (add-hook 'org-ilm-attachment-after-setup-hook
           #'org-ilm--pdf-ilm-after-attachment-setup-hook)
