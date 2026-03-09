@@ -38,6 +38,7 @@
 (require 'org-ilm-collection)
 (require 'org-ilm-attachment)
 (require 'org-ilm-capture)
+(require 'org-ilm-parameter)
 (require 'org-ilm-card)
 (require 'org-ilm-concept)
 (require 'org-ilm-context)
