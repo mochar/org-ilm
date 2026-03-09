@@ -500,6 +500,7 @@ BODY is evaluated inside the new buffer before displaying it."
   ;;   (goto-char loc)))
   (org-node-goto-id org-id))
 
+;; TODO This is super slow!!!!
 (defmacro org-ilm--org-with-headline-contents-visible (&rest body)
   "Necessary when parsing hidden/collapsed data within headline."
   (declare (debug (body)) (indent 1))
@@ -534,7 +535,8 @@ save-excursion."
                   (string= ,thing (org-id-get))))
          ;; Reveal entry contents, otherwise run into problems parsing the
          ;; metadata, such as with org-srs drawer.
-         (org-ilm--org-with-headline-contents-visible ,@body)
+         ;; (org-ilm--org-with-headline-contents-visible ,@body)
+         ,@body
 
        (let (,m-org-id ,m-entry)
          (cond
@@ -561,7 +563,9 @@ save-excursion."
               
               ;; Reveal entry contents, otherwise run into problems parsing the
               ;; metadata, such as with org-srs drawer.
-              (org-ilm--org-with-headline-contents-visible ,@body))))))))
+              ;; (org-ilm--org-with-headline-contents-visible ,@body)
+              ,@body
+              )))))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)
   "Return headline element from org id."
