@@ -116,16 +116,22 @@ The OST remains the same, but operations will instead adjust their calculations.
     (oset bqueue id (org-id-new)))
   (org-ilm--bqueue-file (oref bqueue collection) (oref bqueue id)))
 
-(defun org-ilm--bqueue-saved-queues (collection)
-  "Return for each saved queues of COLLECTION a plist with its info."
-  (mapcar
-   (lambda (q)
-     (list :collection collection
-           :id (car q)
-           :name (plist-get (cdr q) :name)
-           :file (org-ilm--bqueue-file collection (car q))
-           ))
-   (map-elt org-ilm-custom-queues collection)))
+(defun org-ilm--bqueue-saved-queues (&optional collections)
+  "Return for each saved queues of COLLECTIONS a plist with its info."
+  (let ((collections (ensure-list (or collections (map-keys org-ilm-custom-queues)))))
+    (apply
+     #'append
+     (mapcar
+      (lambda (collection)
+        (mapcar
+         (lambda (q)
+           (list :collection collection
+                 :id (car q)
+                 :name (plist-get (cdr q) :name)
+                 :file (org-ilm--bqueue-file collection (car q))
+                 ))
+         (map-elt org-ilm-custom-queues collection)))
+      collections))))
 
 (defun org-ilm-bqueue--pagination-range (bqueue)
   "Return (start . end) indices of the elements in the current page.
@@ -639,11 +645,20 @@ If point on concept, add all headlines of concept."
 (defconst org-ilm-queue-link "ilmqueue")
 
 (defun org-ilm--bqueue-link-folow (link)
-  
-  )
+  (if-let* ((queue (seq-find (lambda (q) (string= link (plist-get q :id)))
+                             (org-ilm--bqueue-saved-queues)))
+            (bqueue (ost-read (plist-get queue :file))))
+      (org-ilm--bqueue-buffer-create bqueue :switch-p t)
+    (user-error "Queue not found!")))
 
 (defun org-ilm--bqueue-link-store (interactive-p)
-  )
+  (when (bound-and-true-p org-ilm-bqueue)
+    (with-slots (id collection name) org-ilm-bqueue
+        (org-link-store-props
+         :type org-ilm-queue-link
+         :link (concat org-ilm-queue-link ":" id)
+         :description (format "%s (%s)" name collection)))
+    t))
 
 (org-link-set-parameters
  org-ilm-queue-link
