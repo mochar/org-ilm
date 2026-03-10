@@ -69,7 +69,9 @@ The attachment's buffer is current.")
                (:conc-name org-ilm-review--))
   "Review data."
   id type log buffer start card-revealed rating
-  (update-p t :description "Whether to update priority and schedule after review"))
+  (update-p t :description "Whether to update priority and schedule after review")
+  (custom-sched nil :description "User specified new due date")
+  )
 
 (defun org-ilm--review-element ()
   (org-ilm--element-by-id (oref org-ilm--review id)))
@@ -252,12 +254,12 @@ Return t if already ready."
     ;; Update priority and schedule
     (let* ((element (org-ilm--review-element))
            (duration (org-ilm--review-duration)))
-      
-      (when (and (oref org-ilm--review update-p)
-                 (not dont-update))
+      (when (and (oref org-ilm--review update-p) (not dont-update))
         (org-ilm--element-review
          (org-ilm-element--type element)
-         element duration :rating (oref org-ilm--review rating))))
+         element duration
+         :rating (oref org-ilm--review rating)
+         :scheduled (oref org-ilm--review custom-sched))))
     
     (let ((element (org-ilm--bqueue-pop)))
       
@@ -489,6 +491,22 @@ needs the attachment buffer."
      :transient t
      :if (lambda () (and (org-ilm--review-card-p)
                          (not (oref org-ilm--review card-revealed)))))
+    ("N" "Next"
+     (lambda ()
+       (interactive)
+       (let (date)
+         (while (ts<= (ts-parse (setq date (org-read-date nil nil nil "New date: ")))
+                      (org-ilm--ts-today))
+           (message "Minimum postpone date should be tomorrow")
+           (sleep-for 1.))
+         (oset org-ilm--review custom-sched date)
+         (org-ilm-review-next)))
+     :description
+     (lambda ()
+       (concat "Next " (propertize "(custom date)" 'face 'Info-quoted)))
+     :inapt-if-not
+     (lambda () (or (not (org-ilm--review-card-p))
+                    (oref org-ilm--review card-revealed))))
     ("s" "Reschedule" org-ilm-review-postpone)
     ("d" "Done" org-ilm-review-done)
     ("q" "Quit" org-ilm-review-quit)]

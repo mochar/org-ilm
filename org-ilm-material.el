@@ -89,19 +89,21 @@ as a new element and the initial interval based on PRIORITY is returned."
         (max 1 (round new-interval))))))
 
 (cl-defmethod org-ilm--element-next-state ((type (eql 'material)) element duration &rest args)
-  (org-ilm--element-with-point-at element
-    (let* ((review-log  (or (plist-get args :log) (org-ilm--log-read)))
-           (last-review (car (last review-log))))
-      (cl-assert last-review nil "Element missing log")
-      (let* ((scheduled (org-ilm-element--sched element))
-             (priority  (org-ilm-element--priority element))
-             (multiplier (org-ilm--parameter-compile-value 'material-multiplier))
-             (interval (org-ilm--material-calculate-interval
-                        priority scheduled
-                        (ts-parse (org-ilm-log-review--timestamp last-review))
-                        multiplier))
-             (due (ts-adjust 'day interval (ts-now))))
-        (list :scheduled due :priority priority)))))
+  (if-let ((due (plist-get args :scheduled)))
+      (list :scheduled due :priority (org-ilm-element--priority element))
+    (org-ilm--element-with-point-at element
+      (let* ((review-log  (or (plist-get args :log) (org-ilm--log-read)))
+             (last-review (car (last review-log))))
+        (cl-assert last-review nil "Element missing log")
+        (let* ((scheduled (org-ilm-element--sched element))
+               (priority  (org-ilm-element--priority element))
+               (multiplier (org-ilm--parameter-compile-value 'material-multiplier))
+               (interval (org-ilm--material-calculate-interval
+                          priority scheduled
+                          (ts-parse (org-ilm-log-review--timestamp last-review))
+                          multiplier))
+               (due (ts-adjust 'day interval (ts-now))))
+          (list :scheduled due :priority priority))))))
 
 (cl-defmethod org-ilm--element-review ((type (eql 'material)) element duration &rest args)
   "Apply a review on the material element.

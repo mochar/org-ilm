@@ -195,7 +195,8 @@ An empty log implies a new card, so step is 0."
               ;; duration ;; TODO Pass this?
               )))
 
-      (list :scheduled (ts-parse (fsrs-card-due card))
+      (list :scheduled (or (plist-get args :scheduled)
+                           (ts-parse (fsrs-card-due card)))
             :priority priority
             :rating rating
             :timestamp timestamp
@@ -209,7 +210,7 @@ An empty log implies a new card, so step is 0."
       (atomic-change-group
         (org-ilm--log-log
          'card (org-ilm-element--collection element) priority
-         (fsrs-card-due card) rating
+         scheduled rating
          :timestamp timestamp
          :duration duration
          :state (fsrs-card-state card)
@@ -222,7 +223,7 @@ An empty log implies a new card, so step is 0."
         (org-entry-put nil org-ilm-property-card-difficulty
                        (number-to-string (fsrs-card-difficulty card)))
         (org-ilm--org-schedule
-         :timestamp (ts-parse (fsrs-card-due card)))))))
+         :timestamp scheduled)))))
 
 (cl-defmethod org-ilm--element-first-interval ((type (eql 'card)) collection priority &rest args)
   (let ((card-interval (org-ilm-card-first-interval)))
