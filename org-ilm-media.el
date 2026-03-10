@@ -240,7 +240,7 @@ the ytdlp flags which I don't care to do atm."
           (insert "- [[ilmmedia:" range "][" range "]] " title "\n")))
     (message "No chapter data available")))
 
-;;;; Custom link
+;;;; Custom Org link
 
 ;; Will get the media file name from ILM_MEDIA property so that we only have to
 ;; store the timestamps in the link.

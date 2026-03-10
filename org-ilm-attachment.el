@@ -197,7 +197,7 @@ missing, something else is wrong, so throw an error."
       (error "Could not create attachment data `org-ilm--data'"))))
 
 
-;;;;; Navigation
+;;;; Navigation
 
 (defun org-ilm--attachment-navigate (org-nav-cmd &rest args)
   (if-let ((attachment (org-ilm--attachment-data))
@@ -240,7 +240,7 @@ missing, something else is wrong, so throw an error."
     (goto-char (point-min))
     (re-search-forward (car orig-attachment) nil t)))
 
-;;;;; Transient
+;;;; Transient
 
 (defun org-ilm-attachment-actions ()
   "Open menu with actions to be applied on current element attachment."
@@ -296,6 +296,28 @@ missing, something else is wrong, so throw an error."
 
   (interactive "P")
   (transient-setup 'org-ilm--attachment-transient nil nil :scope scope))
+
+;;;; Custom Org link
+
+(defconst org-ilm-attachment-link "ilmattach")
+
+(defun org-ilm--attachment-link-folow (link)
+  (org-ilm--attachment-open-by-id link))
+
+(defun org-ilm--attachment-link-store (interactive-p)
+  (pcase-let ((`(,id ,collection ,path ,type) (org-ilm--attachment-data)))
+    (when-let ((entry (org-mem-entry-by-id id)))
+      (org-link-store-props
+       :type org-ilm-attachment-link
+       :link (concat org-ilm-attachment-link ":" id)
+       :description (format "%s (%s)" (org-mem-entry-title entry) collection))
+      t)))
+
+(org-link-set-parameters
+ org-ilm-attachment-link
+ :follow #'org-ilm--attachment-link-folow
+ :store #'org-ilm--attachment-link-store
+ )
 
 ;;; Footer
 

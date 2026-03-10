@@ -682,7 +682,7 @@ DAYS can be specified as numeric prefix arg."
   "Save queue to disk."
   (interactive)
   (org-ilm--bqueue-write)
-  (message "Saved queue to %s" (org-ilm-queue--file org-ilm-pqueue))
+  (message "Saved queue to %s" (org-ilm-queue--file org-ilm-bqueue))
   t)
 
 (defun org-ilm-queue-delete ()

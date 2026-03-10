@@ -552,7 +552,8 @@ If point on concept, add all headlines of concept."
                el)
            (when (eq target 'children) (outline-next-heading))
            (while (< (point) end)
-             (when (setq el (org-ilm--element-at-point))
+             (when (and (setq el (org-ilm--element-at-point))
+                        (not (org-ilm-element--done el)))
                (when (org-ilm--bqueue-insert el :buffer bqueue-buf :exists-ok t)
                  (cl-incf n-added)))
              (outline-next-heading))))))
@@ -604,6 +605,23 @@ If point on concept, add all headlines of concept."
      (org-ilm--bqueue-buffer-create
       (org-ilm--bqueue-select-bqueue)
       :active-p t :switch-p (not dont-switch)))))
+
+;;;; Custom Org link
+
+(defconst org-ilm-queue-link "ilmqueue")
+
+(defun org-ilm--bqueue-link-folow (link)
+  
+  )
+
+(defun org-ilm--bqueue-link-store (interactive-p)
+  )
+
+(org-link-set-parameters
+ org-ilm-queue-link
+ :follow #'org-ilm--bqueue-link-folow
+ :store #'org-ilm--bqueue-link-store
+ )
 
 ;;; Footer
 

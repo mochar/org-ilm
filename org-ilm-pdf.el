@@ -794,6 +794,7 @@ TODO Cute if we can use numeric prefix to jump to that page number"
                  :rect (list 0 0 1 1))
                 highlights)))))))
     ;; Point
+    ;; TODO This might be slow as its called on every page turn?
     (when-let* ((point (org-ilm--pdf-point-get))
                 (point-page (car point))
                 (point-rect (cdr point)))

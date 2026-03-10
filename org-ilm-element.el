@@ -996,6 +996,19 @@ With active region delete all in region."
   (transient-setup 'org-ilm--element-queue-transient nil nil :scope (transient-scope)))
 
 
+;;;; Custom Org link
+
+(defconst org-ilm-element-link "ilmelement")
+
+(defun org-ilm--element-link-folow (link)
+  (org-ilm--org-goto-id link))
+
+(org-link-set-parameters
+ org-ilm-element-link
+ :follow #'org-ilm--element-link-folow
+ )
+
+
 ;;; Footer
 
 (provide 'org-ilm-element)
