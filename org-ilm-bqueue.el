@@ -45,6 +45,10 @@
                (:conc-name org-ilm-bqueue--)
                (:include org-ilm-queue))
   "Queue of elements shown in the queue buffer."
+  (id
+   (org-id-new)
+   :documentation
+   "ID used as filename to store the queue.")
   (query
    nil
    :documentation
@@ -80,9 +84,10 @@ The OST remains the same, but operations will instead adjust their calculations.
 (cl-defmethod ost-serialize ((bqueue org-ilm-bqueue))
   ;; Don't serialize elements, instead get IDs from ost and parse them again
   ;; when deserializing.
-  (with-slots (query type key reversed randomness page-size) bqueue
+  (with-slots (id query type key reversed randomness page-size) bqueue
     (append (cl-call-next-method)
-            (list :query query
+            (list :id id
+                  :query query
                   :type type
                   :key key
                   :reversed reversed
@@ -91,14 +96,36 @@ The OST remains the same, but operations will instead adjust their calculations.
 
 (cl-defmethod ost-deserialize ((bqueue org-ilm-bqueue) data)
   (cl-call-next-method)
-
-  (map-let (:query :type :key :reversed :randomness :page-size) data
-    (setf (org-ilm-bqueue--query bqueue) query
+  (map-let (:id :query :type :key :reversed :randomness :page-size) data
+    (setf (org-ilm-bqueue--id bqueue) id
+          (org-ilm-bqueue--query bqueue) query
           (org-ilm-bqueue--type bqueue) type
           (org-ilm-bqueue--key bqueue) key
           (org-ilm-bqueue--reversed bqueue) reversed
           (org-ilm-bqueue--randomness bqueue) randomness
           (org-ilm-bqueue--page-size bqueue) page-size)))
+
+(defun org-ilm--bqueue-file (collection id)
+  "Bqueues are stored with their ID as filename."
+  (expand-file-name
+   (concat id ".el")
+   (org-ilm--collection-data-dir collection)))
+
+(cl-defmethod org-ilm-queue--file ((bqueue org-ilm-bqueue))
+  (unless (oref bqueue id)
+    (oset bqueue id (org-id-new)))
+  (org-ilm--bqueue-file (oref bqueue collection) (oref bqueue id)))
+
+(defun org-ilm--bqueue-saved-queues (collection)
+  "Return for each saved queues of COLLECTION a plist with its info."
+  (mapcar
+   (lambda (q)
+     (list :collection collection
+           :id (car q)
+           :name (plist-get (cdr q) :name)
+           :file (org-ilm--bqueue-file collection (car q))
+           ))
+   (map-elt org-ilm-custom-queues collection)))
 
 (defun org-ilm-bqueue--pagination-range (bqueue)
   "Return (start . end) indices of the elements in the current page.
@@ -328,13 +355,14 @@ the queue and shuffling it afterwards. To achieve the latter, call
                     :annotate annotate
                     :items
                     (mapcar
-                     (lambda (f)
-                       (propertize (file-name-base f)
-                                   :path f
-                                   :action
-                                   (lambda ()
-                                     (ost-read f))))
-                     (org-ilm--queue-saved-queues collection))
+                     (lambda (queue)
+                       (map-let (:name :file) queue
+                         (propertize name
+                                     :path file
+                                     :action
+                                     (lambda ()
+                                       (ost-read file)))))
+                     (org-ilm--bqueue-saved-queues collection))
                     )
                    )
                   :require-match t

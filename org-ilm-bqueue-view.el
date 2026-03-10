@@ -678,10 +678,29 @@ DAYS can be specified as numeric prefix arg."
     ;; (recenter-top-bottom)
     ))
 
+(defun org-ilm-queue-rename (name)
+  "Rename queue."
+  (interactive
+   (list (read-string "Title: " (oref org-ilm-bqueue name))))
+  ;; If a saved queue, make sure to update its name there as well
+  (with-slots (id collection) org-ilm-bqueue
+    (when-let* ((col-queues (map-elt org-ilm-custom-queues collection))
+                (data (map-elt col-queues id)))
+      (setf (plist-get data :name) name)
+      (customize-save-variable 'org-ilm-custom-queues org-ilm-custom-queues)))
+  (oset org-ilm-bqueue name name)
+  (org-ilm-queue-revert))
+
 (defun org-ilm-queue-save ()
   "Save queue to disk."
   (interactive)
-  (org-ilm--bqueue-write)
+  (with-slots (id name collection) org-ilm-bqueue
+    (let ((data (list :collection collection :name name)))
+      (if-let ((col-queues (alist-get collection org-ilm-custom-queues)))
+          (setf (map-elt col-queues id) data)
+        (setf (alist-get collection org-ilm-custom-queues) `((,id . ,data))))
+      (customize-save-variable 'org-ilm-custom-queues org-ilm-custom-queues)))
+  (org-ilm-queue--write org-ilm-bqueue)
   (message "Saved queue to %s" (org-ilm-queue--file org-ilm-bqueue))
   t)
 
@@ -809,6 +828,14 @@ DAYS can be specified as numeric prefix arg."
   :refresh-suffixes t
 
   ["Settings"
+   ("t" "Title" org-ilm-queue-rename
+    :description
+    (lambda ()
+      (with-current-buffer (transient-scope)
+        (concat "Title" " "
+                (propertize (oref org-ilm-bqueue name) 'face 'transient-value))))
+    :transient t)
+   (:info "")
    ("k" "Key"
     :cons 'key
     :class org-ilm-transient-cons-switches

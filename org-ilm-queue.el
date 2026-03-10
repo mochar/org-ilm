@@ -23,6 +23,13 @@
    :type symbol
    :documentation "Collection symbol."))
 
+;;;; Variables
+
+(defcustom org-ilm-custom-queues nil
+  "Queues saved by the user."
+  :type '(alist :key-type symbol :value-type alist)
+  :group 'org-ilm-queue)
+
 ;;;; Serialization
 
 (cl-defmethod ost-serialize ((queue org-ilm-queue))
@@ -60,15 +67,6 @@
     (ost-write queue file))
   ;; Return nil prevent printing
   nil)
-
-(defun org-ilm--queue-saved-queues (&optional collection)
-  "Return paths of queues saved in COLLECTION."
-  (let* ((collection (or collection (org-ilm--active-collection)))
-         (dir (org-ilm--collection-data-dir collection))
-         (queue-files (directory-files dir t "\\.el$")))
-    (seq-filter
-     (lambda (f) (not (string= (file-name-base f) org-ilm-pqueue-name)))
-     queue-files)))
 
 ;;;; Functions
 
