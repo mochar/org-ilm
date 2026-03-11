@@ -101,7 +101,7 @@ Difficulty is between 1 and 10. Want a bit more precision here."
 (defun org-ilm-log-review-from-alist (alist &optional type)
   "Make an `org-ilm-log-review' object from an ALIST.
 If element TYPE is omitted, infer from headline at point."
-  (unless type (setq type (org-ilm--element-type)))
+  (setq type (or type (alist-get 'type alist) (org-ilm--element-type)))
   (cl-assert (member type '(material card)))
   
   ;; Empty values are parsed as "" so turn them to nil
