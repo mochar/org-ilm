@@ -536,11 +536,12 @@ successfully.. ON-ERROR will be called when any job errors."
 ;;;; Defuddle
 
 ;; Defuddle: https://github.com/kepano/defuddle
-;; Simplify html to markdown
+;; Extract main content from webpages. Convert to markdown.
 
-(defconst org-ilm-convert-defuddle-path
-  (expand-file-name "scripts/defuddle.mjs"
-                    (file-name-directory (or load-file-name buffer-file-name))))
+(defcustom org-ilm-convert-defuddle-path (executable-find "defuddle")
+  "Path to the defuddle executable."
+  :type 'file
+  :group 'org-ilm-convert)
 
 (cl-defun org-ilm--convert-make-defuddle
     (run-p
@@ -582,13 +583,14 @@ successfully.. ON-ERROR will be called when any job errors."
      :data (list :output-path output-path
                  :output-format output-format)
      :payload
-     (list
-      org-ilm-convert-node-path
-      org-ilm-convert-defuddle-path
-      input-type
-      input
-      output-format
-      output-path)
+     (-non-nil
+      (list
+       org-ilm-convert-defuddle-path
+       "parse"
+       input
+       (when to-markdown "--markdown")
+       "--output"
+       output-path))
      job-args)))
 
 (cl-defmethod org-ilm--convert-make-converter ((type (eql 'defuddle)) run-p &rest args)
@@ -604,7 +606,7 @@ successfully.. ON-ERROR will be called when any job errors."
 (when nil
   (org-ilm--convert-make-defuddle
    'run
-   :input "~/ilm/test/.ilm/attach/cceaf254-5bce-42db-a023-36b76d792045/log-normal-distribution-wikipedia.html"
+   :input "~/ilm/test/.ilm/attach/49bfcc2b-2d3d-406f-8898-bfe444ea3a09/49bfcc2b-2d3d-406f-8898-bfe444ea3a09.html"
    :output-folder "~/tmp/marker/"
    :output-format "markdown"
    :job-args
@@ -617,7 +619,7 @@ successfully.. ON-ERROR will be called when any job errors."
    :on-success (lambda (j) (message "WOWOWOWO"))
    :converters
    '((defuddle
-      :input "~/ilm/test/.ilm/attach/cceaf254-5bce-42db-a023-36b76d792045/log-normal-distribution-wikipedia.html"
+      :input "~/ilm/test/.ilm/attach/49bfcc2b-2d3d-406f-8898-bfe444ea3a09/49bfcc2b-2d3d-406f-8898-bfe444ea3a09.html"
       :output-folder "~/tmp/marker/"
       :output-format "markdown"
       )
