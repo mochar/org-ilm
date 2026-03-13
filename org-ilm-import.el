@@ -1214,20 +1214,32 @@ images to a local directory, replacing them with org file links."
    (lambda ()
      (org-ilm--import-default-args import))))
 
-;; TODO When on org link, use link description as title
-(defun org-ilm-import-webpage (url)
+(defun org-ilm-import-webpage (&optional url title)
   "Import a webpage to your collection."
-  (interactive (list (read-string "URL: " (thing-at-point 'url))))
+  (interactive)
+  (unless url
+    (cond-let*
+      ([org-link (org-ilm--org-link-parse)]
+       (setq url (car org-link)
+             title (cdr org-link)))
+      ((setq url (thing-at-point 'url)))))
+  (setq url (read-string "URL: " url))
   (unless (org-url-p url)
     (user-error "Not a valid URL: %s" url))
   (org-ilm--import-webpage-transient
-   (make-org-ilm-webpage-import :url url :ref url)))
+   (make-org-ilm-webpage-import :title title :url url :ref url)))
 
 ;;;; URL import
 
-(defun org-ilm-import-url (url)
+(defun org-ilm-import-url (&optional url title)
   "Import something from a URL to your collection."
-  (interactive (list (read-string "URL: " (thing-at-point 'url))))
+  (interactive)
+  (unless url
+    (cond-let*
+      ([org-link (org-ilm--org-link-parse)]
+       (setq url (car org-link)
+             title (cdr org-link)))
+      ((setq url (thing-at-point 'url)))))
   (unless (org-url-p url)
     (user-error "Not a valid URL: %s" url))
   (cond-let*
@@ -1236,7 +1248,7 @@ images to a local directory, replacing them with org file links."
       (make-org-ilm-media-import :source url :ref url :title media-title)))
     (t
      (org-ilm--import-webpage-transient
-      (make-org-ilm-webpage-import :url url :ref url)))))
+      (make-org-ilm-webpage-import :title title :url url :ref url)))))
 
 ;;; Footer
 

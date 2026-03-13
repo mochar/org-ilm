@@ -452,6 +452,16 @@ BODY is evaluated inside the new buffer before displaying it."
   ;; (org-id-find string)
   (org-mem-entry-by-id string))
 
+(defun org-ilm--org-link-parse ()
+  "Returns (link . description) of org link at point."
+  (let ((el (org-element-context)))
+    (when (eq (org-element-type el) 'link)
+      (cons
+       (org-element-property :raw-link el)
+       (buffer-substring-no-properties
+        (org-element-property :contents-begin el)
+        (org-element-property :contents-end el))))))
+
 (defun org-ilm--org-element-around-point (type)
   (org-element-lineage (org-element-at-point) type t))
 
