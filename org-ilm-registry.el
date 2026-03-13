@@ -729,14 +729,18 @@ environment (multiline), paste it in headline body."
     ([el (when (eq major-mode 'org-mode) (org-element-context))]
      (when (and (eq (org-element-type el) 'link)
                 (string= (org-element-property :type el) "file"))
-       (when-let ((data (org-ilm-registry--type-image-from-path
+       (let* ((caption (or (org-element-property :caption el)
+                           (->> (org-element-property :parent el)
+                                (org-element-property :caption))))
+              (data (org-ilm-registry--type-image-from-path
                          (expand-file-name (org-element-property :path el))
-                         (car (flatten-list
-                               (org-element-property :caption el))))))
-         (org-combine-plists
-          data
-          (list :begin (org-element-property :begin el)
-                :end (org-element-property :end el))))))
+                         (car (flatten-list caption)))))
+         (when data
+           (map-merge
+            'plist
+            data
+            (list :begin (org-element-property :begin el)
+                  :end (org-element-property :end el)))))))
     ;; Current buffer is image.
     ([data (org-ilm-registry--type-image-from-path
             (buffer-file-name (buffer-base-buffer)))]
