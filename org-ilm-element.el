@@ -582,7 +582,16 @@ With active region delete all in region."
     (if-let ((element (org-ilm--element-from-context)))
         (org-ilm--element-delete element 'all)
       (user-error "No element at point")))))
-    
+
+(cl-defmethod org-ilm--delete (&context (ilm-location collection))
+  (call-interactively #'org-ilm-element-delete))
+
+(cl-defmethod org-ilm--delete (&context (ilm-location attachment))
+  (call-interactively #'org-ilm-element-delete))
+
+(cl-defmethod org-ilm--delete (&context (ilm-location queue))
+  (call-interactively #'org-ilm-element-delete))
+
 
 ;;;; Transient
 

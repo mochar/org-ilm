@@ -245,6 +245,22 @@ This helps share functionality of a type while being able to filter on a more gr
       (funcall #'org-ilm-registry-register (car type) (cdr type))
     (call-interactively #'org-ilm-registry-register)))
 
+;;;###autoload
+(defun org-ilm-registry-delete ()
+  "Delete entry at point."
+  (interactive)
+  (org-mark-subtree)
+  (unless (yes-or-no-p "Delete registry entry and its attachment?")
+    (pop-mark)
+    (user-error "Abort deletion"))
+  (let ((attachment (org-ilm-registry--attachment-path (org-id-get))))
+    (when (and attachment (file-exists-p attachment))
+      (delete-file attachment)))
+  (org-ilm--org-delete-headline))
+
+(cl-defmethod org-ilm--delete (&context (ilm-location registry))
+  (call-interactively #'org-ilm-registry-delete))
+
 ;;;; Functions
 
 (defun org-ilm-registry--collection-entries (collection &optional types map-f)

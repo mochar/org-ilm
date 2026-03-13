@@ -71,6 +71,9 @@ here."
 
 ;;;; Generics
 
+(cl-defgeneric org-ilm--delete ()
+  (user-error "Nothing to delete here"))
+
 (cl-defgeneric org-ilm--extract ()
   (user-error "Cannot extract here"))
 

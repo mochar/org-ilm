@@ -89,7 +89,7 @@
   ";" org-ilm-context-map
   "n" #'org-ilm-concept-set
   "g" org-ilm-registry-prefix-map
-  "k" #'org-ilm-element-delete
+  "k" #'org-ilm-delete
   "r" #'org-ilm-review
   "q" #'org-ilm-queue
   "+" #'org-ilm-queue-add-dwim
@@ -285,6 +285,11 @@
       )
      :require-match t
      :prompt "Select: ")))
+
+(defun org-ilm-delete (arg)
+  "Delete element at point."
+  (interactive "P")
+  (org-ilm--delete))
 
 (defun org-ilm-extract (&optional priority)
   "Extract region.
