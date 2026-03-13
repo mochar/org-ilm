@@ -377,6 +377,13 @@ TODO Need to add registry to `org-mem-seek-link-types'? dont think so"
   (car (file-expand-wildcards
         (expand-file-name (concat org-id "*") (org-attach-dir)))))
 
+(defun org-ilm--registry-org-link-preview-file (entry ov link)
+  (org-link-preview-file
+   ov
+   (with-current-buffer (find-file-noselect (org-mem-entry-file entry))
+     (org-ilm-registry--attachment-path (org-mem-entry-id entry)))
+   link))
+
 ;;;; Register
 
 (defvar org-ilm-registry-register-hook nil
@@ -432,7 +439,8 @@ org-capture template properties."
                    (if org-note-abort
                        nil
 
-                     (org-ilm--org-mem-update-cache-after-capture 'entry)
+                     ;; (org-ilm--org-mem-update-cache-after-capture 'entry)
+                     (org-ilm--org-mem-ensure)
 
                      (when on-success (funcall on-success id))
 
@@ -502,11 +510,88 @@ PARAMETERS should be keyword value pairs. See `org-ilm-registry-types'."
 
 ;;;;; Latex type
 
+;; Latex code, either stored in the LATEX property, or in the body of the
+;; entry. 
+
+;; The option `org-ilm-registry-latex-cached' determines the behavior. Set to t,
+;; an image of the latex code is pregenerated and stored as the entry's
+;; attachment. Previews are thus standard image overlays from org-link. The hash
+;; of the latex code is stored in the HASH property, which is always checked
+;; before showing a preview. If outdated, a new image is generated and the hash
+;; is updated.
+;; If `org-ilm-registry-latex-cached' is nil, we use org-latex's on the fly
+;; image generation for the previews. Internally org-latex uses caching as well
+;; though. The way this is implemented is by using `org-latex-preview-place'
+;; which actually creates a new overlay. Therefore we need some way to detect
+;; when the link preview overlay is deleted, so that latex overlay can also be
+;; deleted. The function called when a preview is turned off is
+;; `org-link-preview-clear' which calls `delete-overlay'. Unfortunately the
+;; 'modification-hooks overlay property does not detect overlay deletions. So my
+;; best solution at the moment is to advice `delete-overlay', which is done in
+;; the global minor mode.
+
+(defconst org-ilm-registry-latex-property "LATEX")
+(defconst org-ilm-registry-latex-hash-property "HASH")
+
+(defcustom org-ilm-registry-latex-cached t
+  "Latex entries are stored as images rather than live org-latex previews."
+  :group 'org-ilm-registry
+  :type 'boolean)
+
+(defcustom org-ilm-registry-latex-preview-type
+  org-latex-preview-process-default
+  "See `org-latex-preview-process-default'."
+  :group 'org-ilm-registry
+  :type 'symbol)
+
+(defun org-ilm-registry--type-latex-create-image (latex)
+  "Create image of rendered LATEX string and return path.
+
+This uses the org-latex's `org-latex-preview-create-images' which saves
+the image in a cache directory, so this function just returns that path
+directly."
+  (org-latex-preview-create-images 
+   latex
+   :processing-type org-ilm-registry-latex-preview-type))
+
+(defun org-ilm-registry--type-latex-get-attach-image (id)
+  "Reads the latex code of entry with ID, turn it into an image saved as an
+org-attach file, and add hash of the latex code in the HASH property."
+  (let* ((entry (org-mem-entry-by-id id))
+         (latex (org-ilm-registry--type-latex-from-entry entry))
+         (hash (sha1 latex))
+         (cached-hash (org-mem-entry-property
+                       org-ilm-registry-latex-hash-property entry))
+         (img-path (org-ilm-registry--attachment-path id)))
+    (if (and hash cached-hash (string= hash cached-hash) ; Hash same
+             img-path (file-exists-p img-path)) ; Image exists
+        img-path
+      ;; File doesnt exist or hash is outdated: create new image
+      (org-ilm--org-with-point-at id
+        (let* ((image (org-ilm-registry--type-latex-create-image latex))
+               (attach-dir (org-attach-dir-get-create)))
+          (setq img-path (expand-file-name
+                          (concat id "." (file-name-extension image))
+                          attach-dir))
+          (copy-file image img-path 'ok-if-exists)
+          (org-attach-sync))
+        (org-entry-put nil org-ilm-registry-latex-hash-property hash)
+        (save-buffer)
+        (org-ilm--org-mem-ensure)
+        img-path))))
+
+(defun org-ilm-registry--type-latex-at-point ()
+  "Return the latex content from entry at point.
+Can be either in the LATEX property or the body text."
+  (or
+   (org-entry-get nil org-ilm-registry-latex-property)
+   (org-ilm-registry--org-get-contents)))
+
 (defun org-ilm-registry--type-latex-from-entry (entry)
   "Return the latex content from ENTRY.
 Can be either in the LATEX property or the body text."
   (or
-   (org-mem-entry-property "LATEX" entry)
+   (org-mem-entry-property org-ilm-registry-latex-property entry)
    (org-ilm-registry--entry-contents entry)))
 
 (defun org-ilm-registry--type-latex-place (latex beg end)
@@ -515,20 +600,21 @@ Can be either in the LATEX property or the body text."
    (list (list beg end latex))))
 
 (defun org-ilm-registry--type-latex-preview (entry ov link)
-  "Place a latex overlay on the link.
-
-The way this is implemented is by using `org-latex-preview-place' which
- actually creates a new overlay. Therefore we need some way to detect
- when the link preview overlay is deleted, so that latex overlay can
- also be deleted. The function called when a preview is turned off is
- `org-link-preview-clear' which calls `delete-overlay'. Unfortunately
- the 'modification-hooks overlay property does not detect overlay
- deletions. So my best solution at the moment is to advice
- `delete-overlay', which is done in the global minor mode."
+  "Place a latex overlay on the link."
   (when-let ((latex (org-ilm-registry--type-latex-from-entry entry)))
-    (overlay-put ov 'org-ilm-registry-latex t)
-    (org-ilm-registry--type-latex-place
-     latex (overlay-start ov) (overlay-end ov))
+    (cond
+       ;; With caching turned on, the latex is stored as an attachment image, so
+       ;; render it as a standard org-link file.
+     (org-ilm-registry-latex-cached
+      (let ((id (org-mem-entry-id entry)))
+        (org-ilm-registry--type-latex-get-attach-image id)
+        (setq entry (org-mem-entry-by-id id))
+        (org-ilm--registry-org-link-preview-file entry ov link)))
+     ;; Without caching, place a latex overlay.
+     (t
+      (overlay-put ov 'org-ilm-registry-latex t)
+      (org-ilm-registry--type-latex-place
+       latex (overlay-start ov) (overlay-end ov))))
     t))
 
 (defun org-ilm-registry--type-latex-teardown (ov)
@@ -539,6 +625,7 @@ The way this is implemented is by using `org-latex-preview-place' which
       (delete-overlay o))))
 
 (defun org-ilm-registry--type-latex-paste (entry)
+  "Insert the latex code at point."
   (insert (org-ilm-registry--type-latex-from-entry entry)))
 
 (defun org-ilm-registry--type-latex-parse ()
@@ -558,21 +645,33 @@ environment (multiline), paste it in headline body."
             :end (org-element-property :end org-element)))))
 
 (defun org-ilm-registry--type-latex-create (&optional args)
-  (cl-destructuring-bind (&key latex title fragment begin end) args
-    (if (null latex)
-        (list :title title :props (list :LATEX ""))
-      (list :title title
-            :body (unless fragment latex)
-            :props (list :LATEX (when fragment latex))
-            :region (list begin end)))))
+  (map-let (:latex :title :fragment :begin :end) args
+    (let (data)
+      (if (null latex)
+          (setq data (list :title title :props (list :LATEX "")))
+        (setq data
+              (list :title title
+                    :body (unless fragment latex)
+                    :props (list :LATEX (when fragment latex))
+                    :region (list begin end))))
+      ;; If we use caching, we read the latex code after the capture has been
+      ;; comitted, and turn it into an image attachment.
+      (when org-ilm-registry-latex-cached
+        (setf (plist-get data :on-success)
+              (lambda (id) (org-ilm-registry--type-latex-get-attach-image id))))
+      data)))
 
 (defun org-ilm-registry--type-latex-view (entry)
   (let* ((latex (org-ilm-registry--type-latex-from-entry entry))
-         (img (org-latex-preview-create-images 
-               latex
-               :processing-type org-latex-preview-process-default)))
+         (img-path (if org-ilm-registry-latex-cached
+                       (org-ilm-registry--type-latex-get-attach-image
+                        (org-mem-entry-id entry))
+                     (org-ilm-registry--type-latex-create-image latex)))
+         (img (create-image img-path nil nil :scale 2.5 :refresh t)))
+    ;; Force remove from emacs image cache
+    (image-flush img)
     (org-ilm--with-special-buffer org-ilm-registry-buffer-name
-      (insert-image (create-image (expand-file-name img) nil nil :scale 2.5)))))
+      (insert-image img))))
 
 (org-ilm-registry-set-type
  "latex"
@@ -591,11 +690,7 @@ environment (multiline), paste it in headline body."
 ;; Relies on var `image-file-name-extensions' to determine image files.
 
 (defun org-ilm-registry--type-image-preview (entry ov link)
-  (org-link-preview-file
-   ov
-   (with-current-buffer (find-file-noselect (org-mem-entry-file entry))
-     (org-ilm-registry--attachment-path (org-mem-entry-id entry)))
-   link))
+  (org-ilm--registry-org-link-preview-file entry ov link))
 
 (defun org-ilm-registry--type-image-paste (entry)
   (let ((path (org-mem-entry-property "PATH" entry)))
