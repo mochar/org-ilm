@@ -23,12 +23,19 @@
 
 ;;;; Data
 
-(cl-defstruct (org-ilm-import
-               (:conc-name org-ilm-import--)
-               (:include org-ilm-capture
-                         (type 'material)
-                         (parent (org-ilm--element-from-context))
-                         (collection (org-ilm--active-collection))))
+(cl-defstruct
+    (org-ilm-import
+     (:conc-name org-ilm-import--)
+     (:include org-ilm-capture
+               (type 'material)
+               (parent (org-ilm--element-from-context))
+               (collection (org-ilm--active-collection))
+               ;; Only when we import while having an attachment open do we want
+               ;; to inherit the concepts
+               (concepts
+                (when-let ((element (org-ilm--attachment-element)))
+                  (seq-keep #'org-mem-entry-by-id
+                            (car (oref element concepts)))))))
   (ref nil :documentation "Global identifier (url/doi)")
   (bib-alist nil :documentation "Bibtex alist")
   (info nil :documentation "Info from zotero translation server.
@@ -291,6 +298,7 @@ See `org-ilm--citation-get-zotero'"))
         (_ choice)))))
 
 (transient-define-suffix org-ilm--import-suffix-concepts ()
+  "List of concept org-mem entries."
   :transient 'transient--do-stack
   :key "n"
   :inapt-if-not (lambda () (alist-get 'collection (org-ilm--transient-parse)))
@@ -1206,6 +1214,7 @@ images to a local directory, replacing them with org file links."
    (lambda ()
      (org-ilm--import-default-args import))))
 
+;; TODO When on org link, use link description as title
 (defun org-ilm-import-webpage (url)
   "Import a webpage to your collection."
   (interactive (list (read-string "URL: " (thing-at-point 'url))))

@@ -29,6 +29,9 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 (defvar org-ilm-concept-change-hook nil
   "Hook run when concept of an element or concept changed.")
 
+(defconst org-ilm-property-concepts "CONCEPTS")
+(defconst org-ilm-property-concepts+ "CONCEPTS+")
+
 ;;;; Functions
 
 (defun org-ilm--concept-collection-entries (collection &optional map-f)
@@ -77,7 +80,7 @@ If available, the last alias in the ROAM_ALIASES property will be used."
 
 (defun org-ilm--concept-parse-property (&optional string inherit)
   "Return (id . title) of concepts in STRING or property of heading at point."
-  (unless string (setq string (org-entry-get nil "CONCEPTS" inherit)))
+  (unless string (setq string (org-entry-get nil org-ilm-property-concepts inherit)))
   (when string
     (let ((link-match-pos 0)
           concepts)
@@ -118,8 +121,8 @@ org-mem-entry object."
 For value of CONCEPTS, see `org-ilm--concept-property-prepare'."
   (let ((value (org-ilm--concept-property-prepare concepts)))
     (if value
-        (org-entry-put nil "CONCEPTS+" value)
-      (org-entry-delete nil "CONCEPTS+"))
+        (org-entry-put nil org-ilm-property-concepts+ value)
+      (org-entry-delete nil org-ilm-property-concepts+))
     (save-buffer)
     (org-ilm--org-mem-ensure)
     (run-hooks 'org-ilm-concept-change-hook)))
@@ -582,7 +585,7 @@ parents, which is defined differently for concepts and extracts/cards:
                   (and (not is-concept) ; Concept never inherit!
                        (or (eq ancestor-type 'material)
                            (string= ancestor-state "DONE"))))
-              (when-let ((prop (org-mem-entry-property "CONCEPTS+" ancestor-entry)))
+              (when-let ((prop (org-mem-entry-property org-ilm-property-concepts+ ancestor-entry)))
                 (setq property-concepts-str
                       (concat property-concepts-str " " prop))))
              

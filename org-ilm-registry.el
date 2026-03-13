@@ -421,18 +421,30 @@ org-capture template properties."
          (props (org-combine-plists (list :ID id) (plist-get data :props)))
          (on-success (plist-get data :on-success))
          (template-string (car template)))
+    
     (when org-ilm-registry-add-link-in-title
       (setq title
             (concat
              (format "[[%s][%s]]: " (org-ilm-registry--link-target) type)
              title)))
+
+    ;; Source buffer org link
     (setf (plist-get props :SOURCE) (org-store-link '(4)))
+
+    ;; Insert concepts from source buffer
+    (when-let* ((element (org-ilm--element-from-context))
+                (concept-ids (car (oref element concepts)))
+                (prop (org-ilm--concept-property-prepare concept-ids)))
+      (setf (plist-get props :CONCEPTS+) prop))
+
+    ;; Template string
     (unless template-string
       (setq template-string
             (format "* %s%s%s"
                     (or title "")
                     "%?"
                     (if body (concat "\n" body) ""))))
+    
     (cl-letf* ((default-template-props
                 (list 
                  :hook
@@ -443,6 +455,7 @@ org-capture template properties."
                     do (org-entry-put nil (if (stringp p) p (substring (symbol-name p) 1)) v))
                    (org-entry-put nil org-ilm-property-registry type)
                    (org-node-nodeify-entry)
+                   
                    ;; Toggle open the properties drawer
                    (save-excursion
                      (forward-line)
