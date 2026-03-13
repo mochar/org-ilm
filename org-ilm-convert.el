@@ -1459,12 +1459,10 @@ See: https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#output-template-example
                 (if-let* ((filename-path (plist-get (oref job data) :output-path))
                           (filename (org-ilm-convert--ytdlp-read-filename
                                      filename-path)))
-                    (progn
-                      (org-ilm--org-with-point-at id
-                        (org-entry-put nil org-ilm-property-media filename))
+                    (org-ilm--org-with-point-at id
+                      (org-entry-put nil org-ilm-property-media filename)
                       (save-buffer))
-                  (warn "Ilm media filename not found")))))
-          )
+                  (warn "Ilm media filename not found"))))))
          (ytdlp
           :output-dir ,output-dir
           ;; TODO This wont be handled correctly when we depend on ytdlp-filename
