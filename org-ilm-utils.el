@@ -536,8 +536,9 @@ save-excursion."
          ;; Reveal entry contents, otherwise run into problems parsing the
          ;; metadata, such as with org-srs drawer.
          ;; (org-ilm--org-with-headline-contents-visible ,@body)
-         ,@body
-
+         (progn ; progn in case body contains multiple forms
+           ,@body)
+       
        (let (,m-org-id ,m-entry)
          (cond
           ((stringp ,thing)

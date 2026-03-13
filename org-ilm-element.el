@@ -466,7 +466,7 @@ review.")
         (unless (yes-or-no-p "Delete element?")
           (pop-mark)
           (user-error "Abort deletion")))
-      
+
       (when (and (member warn '(all attachment)) (org-attach-dir))
         (cond-let*
           ;; Top-level elements (ie imports) have their DIR property set. So if
