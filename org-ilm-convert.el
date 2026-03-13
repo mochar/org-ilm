@@ -511,6 +511,10 @@ successfully.. ON-ERROR will be called when any job errors."
            ;; default-directory to output path and want to store
            ;; media in same folder, set to "."
            "--extract-media" "."
+           ;; When input file contains image links, pandoc will attempt to
+           ;; download them. At least for wikipedia, a user agent is required,
+           ;; otherwise wikipedia retruns some text instructing us to do so.
+           "--request-header" "User-Agent:\"Mozilla/5.0\""
            "--verbose"
            input-path "-o" output-path)
      job-args)))
@@ -607,6 +611,16 @@ successfully.. ON-ERROR will be called when any job errors."
   (org-ilm--convert-make-defuddle
    'run
    :input "~/ilm/test/.ilm/attach/49bfcc2b-2d3d-406f-8898-bfe444ea3a09/49bfcc2b-2d3d-406f-8898-bfe444ea3a09.html"
+   :output-folder "~/tmp/marker/"
+   :output-format "markdown"
+   :job-args
+   (list
+    )
+   )
+
+  (org-ilm--convert-make-defuddle
+   'run
+   :input "https://en.m.wikipedia.org/wiki/Leather"
    :output-folder "~/tmp/marker/"
    :output-format "markdown"
    :job-args
