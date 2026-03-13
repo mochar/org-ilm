@@ -143,16 +143,20 @@
                (propertize
                 (symbol-name (org-ilm-bqueue--collection org-ilm-bqueue))
                 'face 'highlight))))
+         (marked-info
+          (when org-ilm--bqueue-marked-objects
+             (format "M:%s" (length org-ilm--bqueue-marked-objects))))
          (page-info
           (with-slots (page page-size) org-ilm-bqueue
             (when (and page-size (not (zerop (ost-size org-ilm-bqueue))))
-              (format "(%s/%s)" (1+ page) (1+ (org-ilm-bqueue--page-max org-ilm-bqueue))))))
-         (page-info-len (length (or page-info ""))))
+              (format "P:%s/%s" (1+ page) (1+ (org-ilm-bqueue--page-max org-ilm-bqueue))))))
+         (info (string-join (list marked-info page-info) " "))
+         (info-len (length (or info ""))))
     (setq header-line-format
           (list left-segment
                 ;; Dynamic space to push page-info to the right
-                (propertize " " 'display `(space :align-to (- right ,page-info-len)))
-                page-info))))
+                (propertize " " 'display `(space :align-to (- right ,info-len)))
+                info))))
 
 (defun org-ilm-queue-revert (&optional rebuild)
   "Revert/refresh the queue buffer. With REBUILD, reparse elements."
