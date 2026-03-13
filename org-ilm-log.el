@@ -164,11 +164,11 @@ If element TYPE is omitted, infer from headline at point."
      :due due :duration duration :action action
      :state state :stability stability :difficulty difficulty)))
 
-(defun org-ilm-log-review-ensure (data)
+(defun org-ilm-log-review-ensure (data &optional type)
   "Make an `org-ilm-log-review' object from alist DATA, or return if already is one."
   (if (org-ilm-log-review-p data)
       data
-    (org-ilm-log-review-from-alist data)))
+    (org-ilm-log-review-from-alist data type)))
 
 (defun org-ilm--log-data-ensure (data)
   "Make `org-ilm-log-review' object list from alist or list of alists DATA."
@@ -327,6 +327,7 @@ DUE is the new scheduled review timestamp."
 (defun org-ilm--log-read (&optional collections dont-sort)
   "Read the data of the log drawer table of COLLECTION."
   (let ((collections (ensure-list collections))
+        (type (org-ilm--element-type))
         (reviews '()))
     (save-excursion
       (when (org-ilm--log-beginning-of-drawer)
@@ -345,7 +346,7 @@ DUE is the new scheduled review timestamp."
                                   (substring-no-properties (nth i row))))
                           (number-sequence 0 (1- (length columns))))))
                     (setf (alist-get 'collection row-data) collection)
-                    (push (org-ilm-log-review-ensure row-data) reviews)))))))))
+                    (push (org-ilm-log-review-ensure row-data type) reviews)))))))))
     (if dont-sort
         (nreverse reviews)
       (sort reviews :key #'org-ilm-log-review--timestamp

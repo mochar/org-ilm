@@ -260,6 +260,12 @@ Return t if already ready."
          element duration
          :rating (oref org-ilm--review rating)
          :scheduled (oref org-ilm--review custom-sched))))
+
+    ;; Make sure the review transient is closed if this is the last element of
+    ;; the queue.
+    (when (and (= (org-ilm--bqueue-count) 1)
+               (eq transient-current-command 'org-ilm--review-transient))
+      (transient--emergency-exit))
     
     (let ((element (org-ilm--bqueue-pop)))
       
@@ -460,16 +466,9 @@ needs the attachment buffer."
 
 (transient-define-prefix org-ilm--review-transient ()
   :refresh-suffixes t
-  ["Review"
-   (:info*
-   (lambda ()
-     (propertize
-      (org-ilm-element--title (org-ilm--review-element))
-      'face '(:slant italic))))]
-
   [
-   ["Actions"
-    ("n" "Next" org-ilm-review-next
+   ["Review"
+    ("SPC" "Next" org-ilm-review-next
      :description
      (lambda ()
        (if (org-ilm--review-card-p)
@@ -485,13 +484,14 @@ needs the attachment buffer."
             (propertize
              (org-ilm--ts-human-relative scheduled)
              'face 'Info-quoted)))))
+     :transient t
      :if (lambda () (or (not (org-ilm--review-card-p))
                         (oref org-ilm--review card-revealed))))
-    ("n" "Reveal" org-ilm-review-reveal
+    ("SPC" "Reveal" org-ilm-review-reveal
      :transient t
      :if (lambda () (and (org-ilm--review-card-p)
                          (not (oref org-ilm--review card-revealed)))))
-    ("N" "Next"
+    ("RET" "Next"
      (lambda ()
        (interactive)
        (let (date)
@@ -504,11 +504,12 @@ needs the attachment buffer."
      :description
      (lambda ()
        (concat "Next " (propertize "(custom date)" 'face 'Info-quoted)))
+     :transient t
      :inapt-if-not
      (lambda () (or (not (org-ilm--review-card-p))
                     (oref org-ilm--review card-revealed))))
-    ("s" "Reschedule" org-ilm-review-postpone)
-    ("d" "Done" org-ilm-review-done)
+    ("s" "Reschedule" org-ilm-review-postpone :transient t)
+    ("d" "Done" org-ilm-review-done :transient t)
     ("q" "Quit" org-ilm-review-quit)]
    
    ["Next"
@@ -533,11 +534,53 @@ needs the attachment buffer."
                      desc " "
                      (propertize
                       (org-ilm--ts-human-relative scheduled)
-                      'face 'Info-quoted))))))
+                      'face 'Info-quoted))
+                    :transient t))))
          '(("1" "Easy" org-ilm-review-rate-easy :easy)
            ("2" "Good" org-ilm-review-rate-good :good)
            ("3" "Hard" org-ilm-review-rate-hard :hard)
            ("4" "Again" org-ilm-review-rate-again :again)))))
+    ]
+
+   ["Element"
+    :setup-children
+    (lambda (children)
+      (org-ilm--element-transient-setup-concept-children
+       (oref (org-ilm--review-element) concepts) children))
+    ("e" "Element..." org-ilm-element-menu
+     :transient transient--do-recurse)
+    ("p" "Priority"
+     (lambda ()
+       (interactive)
+       (call-interactively #'org-ilm-element-set-priority))
+     :description
+     (lambda ()
+       (let ((element (org-ilm--review-element)))
+         (concat
+          "Priority "
+          (if (org-ilm-element--done element)
+              (propertize "(done)" 'face 'Info-quoted)
+            (when-let* ((priority (org-ilm-element--priority-formatted element)))
+              (propertize priority 'face 'transient-value))))))
+     :transient transient--do-call
+     :inapt-if (lambda () (oref (org-ilm--review-element) done)))
+    ("n" "Concepts"
+     (lambda ()
+       (interactive)
+       (org-ilm--concept-set
+        (oref org-ilm--review id)
+        (lambda ()
+          ;; (org-ilm--element-transient-update-scope)
+          ;; (unless (eq transient-current-command 'org-ilm--element-transient)
+          ;;   (org-ilm--element-transient (org-ilm--element-from-context)))
+          ))) 
+     :transient transient--do-stay
+     :description
+     (lambda ()
+       (concat
+        "Concepts "
+        (unless (oref (org-ilm--review-element) concepts)
+          (propertize "nil" 'face 'transient-inactive-value)))))
     ]
    ]
   )

@@ -670,6 +670,28 @@ With active region delete all in region."
      (unless (eq transient-current-command 'org-ilm--element-transient)
        (org-ilm--element-transient (org-ilm--element-from-context))))))
 
+(defun org-ilm--element-transient-setup-concept-children (concepts &optional children)
+  (append
+   children
+   (pcase-let ((`(,concepts . ,n-direct) concepts)) 
+     (seq-map
+      (lambda (concept-id)
+        (let* ((entry (org-mem-entry-by-id concept-id))
+               (title (org-ilm--org-mem-title-full entry))
+               (keymap (make-sparse-keymap)))
+          ;; TODO Clicking doesnt work
+          (define-key keymap [mouse-1]
+                      (lambda ()
+                        (interactive)
+                        (org-ilm--org-goto-id concept-id)))
+          (transient-parse-suffix
+           'org-ilm--element-transient
+           (list :info
+                 (propertize title 'face 'transient-value
+                             'mouse-face 'highlight
+                             'keymap keymap)))))
+      (last concepts n-direct)))))
+
 (transient-define-prefix org-ilm--element-transient (element)
   :refresh-suffixes t
   
@@ -684,26 +706,8 @@ With active region delete all in region."
   [
    :setup-children
    (lambda (children)
-     (append
-      children
-      (pcase-let ((`(,concepts . ,n-direct) (oref (transient-scope) concepts))) 
-        (seq-map
-         (lambda (concept-id)
-           (let* ((entry (org-mem-entry-by-id concept-id))
-                  (title (org-ilm--org-mem-title-full entry))
-                  (keymap (make-sparse-keymap)))
-             ;; TODO Clicking doesnt work
-             (define-key keymap [mouse-1]
-                         (lambda ()
-                           (interactive)
-                           (org-ilm--org-goto-id concept-id)))
-             (transient-parse-suffix
-              'org-ilm--element-transient
-              (list :info
-                    (propertize title 'face 'transient-value
-                                'mouse-face 'highlight
-                                'keymap keymap)))))
-         (last concepts n-direct)))))
+     (org-ilm--element-transient-setup-concept-children
+      (oref (transient-scope) concepts) children))
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
    (org-ilm--element-transient-collection)
