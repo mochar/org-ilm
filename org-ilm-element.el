@@ -593,6 +593,22 @@ With active region delete all in region."
     (org-ilm--transient-set-scope element)
     (run-hook-with-args 'org-ilm-element-update-hook element)))
 
+(transient-define-suffix org-ilm--element-transient-title ()
+  :key "t"
+  :description
+  (lambda ()
+    (concat
+     "Title "
+     (propertize
+      (oref (transient-scope) title)
+      'face 'transient-value)))
+  :transient 'transient--do-call
+  (interactive)
+  (org-ilm--element-with-point-at (transient-scope)
+    (org-edit-headline)
+    (save-buffer))
+  (org-ilm--element-transient-update-scope))
+
 (transient-define-suffix org-ilm--element-transient-schedule ()
   :key "s"
   :description
@@ -695,19 +711,22 @@ With active region delete all in region."
 (transient-define-prefix org-ilm--element-transient (element)
   :refresh-suffixes t
   
+  ;; [:description
+  ;;  (lambda ()
+  ;;    (capitalize (symbol-name (oref (transient-scope) type))))
+  ;;  (:info*
+  ;;   (lambda ()
+  ;;     (propertize (oref (transient-scope) title) 'face 'italic)))
+  ;;  ]
+  
   [:description
    (lambda ()
      (capitalize (symbol-name (oref (transient-scope) type))))
-   (:info*
-    (lambda ()
-      (propertize (oref (transient-scope) title) 'face 'italic)))
-   ]
-  
-  [
    :setup-children
    (lambda (children)
      (org-ilm--element-transient-setup-concept-children
       (oref (transient-scope) concepts) children))
+   (org-ilm--element-transient-title)
    (org-ilm--element-transient-schedule)
    (org-ilm--element-transient-priority)
    (org-ilm--element-transient-collection)
