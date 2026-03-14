@@ -652,12 +652,12 @@ If point on concept, add all headlines of concept."
     (user-error "Queue not found!")))
 
 (defun org-ilm--bqueue-link-store (interactive-p)
-  (when (bound-and-true-p org-ilm-bqueue)
+  (when (and (bound-and-true-p org-ilm-bqueue) current-prefix-arg)
     (with-slots (id collection name) org-ilm-bqueue
-        (org-link-store-props
-         :type org-ilm-queue-link
-         :link (concat org-ilm-queue-link ":" id)
-         :description (format "%s (%s)" name collection)))
+      (org-link-store-props
+       :type org-ilm-queue-link
+       :link (concat org-ilm-queue-link ":" id)
+       :description (format "%s (%s)" name collection)))
     t))
 
 (org-link-set-parameters

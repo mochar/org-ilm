@@ -305,13 +305,14 @@ missing, something else is wrong, so throw an error."
   (org-ilm--attachment-open-by-id link))
 
 (defun org-ilm--attachment-link-store (interactive-p)
-  (pcase-let ((`(,id ,collection ,path ,type) (org-ilm--attachment-data)))
-    (when-let ((entry (org-mem-entry-by-id id)))
-      (org-link-store-props
-       :type org-ilm-attachment-link
-       :link (concat org-ilm-attachment-link ":" id)
-       :description (format "%s (%s)" (org-mem-entry-title entry) collection))
-      t)))
+  (when current-prefix-arg
+    (pcase-let ((`(,id ,collection ,path ,type) (org-ilm--attachment-data)))
+      (when-let ((entry (org-mem-entry-by-id id)))
+        (org-link-store-props
+         :type org-ilm-attachment-link
+         :link (concat org-ilm-attachment-link ":" id)
+         :description (format "%s (%s)" (org-mem-entry-title entry) collection))
+        t))))
 
 (org-link-set-parameters
  org-ilm-attachment-link

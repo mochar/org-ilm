@@ -315,6 +315,42 @@ With numeric prefix arg, use as priority rank."
   (interactive "P")
   (org-ilm--point))
 
+;;;; Custom Org link
+
+;; Custom Org mode link.
+
+;; This makes it so that C-c l stores the element at point, which can be from
+;; within the collection, attachment, or queue. If a prefix arg is passed, this
+;; link won't be captured. Instead, org-ilm-attachment.el and org-ilm-bqueue.el
+;; will have their custom links activated. The former is unnecessary though, as
+;; opening an attachment directly from a standard link (this one) can be done by
+;; using a prefix arg.
+
+;; TODO Extend this to also work with queue ids.
+
+(defconst org-ilm-link "ilm")
+
+(defun org-ilm--link-folow (link)
+  (let ((id link))
+    (if current-prefix-arg
+        (org-ilm--attachment-open-by-id id)
+      (org-ilm--org-goto-id id))))
+
+(defun org-ilm--link-store (interactive-p)
+  (let ((element (org-ilm--element-from-context)))
+    (when (and element (not current-prefix-arg))
+      (org-link-store-props
+       :type org-ilm-link
+       :link (concat org-ilm-link ":" (oref element id))
+       :description (format "%s (%s)" (oref element title) (oref element collection)))
+      t)))
+
+(org-link-set-parameters
+ org-ilm-link
+ :follow #'org-ilm--link-folow
+ :store #'org-ilm--link-store
+ )
+
   
 ;;;; Footer
 
