@@ -777,21 +777,6 @@ PROPERTIES is an optional plist of extra behavior (e.g., '(:prepend t))."
 
 ;;;; Org-node / org-mem
 
-(defun org-ilm--node-read-candidate-state-only (states &optional prompt blank-ok initial-input)
-  "Like `org-node-read-candidate' but for nodes with STATES todo-state only."
-  (let* ((states-list (if (stringp states) (list states) states))
-         (choice
-          (completing-read (or prompt "Node: ")
-                           (if blank-ok #'org-node-collection-main
-                             #'org-node-collection-basic)
-                           (lambda (name node)
-                             (member (org-mem-todo-state node) states-list))
-                           ()
-                           initial-input
-                           (if org-node-alter-candidates 'org-node-hist-altered
-                             'org-node-hist))))
-    (gethash choice org-node--candidate<>entry)))
-
 (defun org-ilm--org-mem-ancestry-ids (entry-or-id &optional with-root-str)
   "Return org ids of ancestors of entry."
   (when-let* ((entry (if (stringp entry-or-id)
