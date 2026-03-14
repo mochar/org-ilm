@@ -74,7 +74,7 @@
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-minor-mode'."
   "i" #'org-ilm-import
-  "e" #'org-ilm-element-menu
+  "e" #'org-ilm-element-dwim
   "a" #'org-ilm-attachment-actions
   "p" #'org-ilm-element-set-priority
   "s" #'org-ilm-element-set-schedule
@@ -285,6 +285,15 @@
       )
      :require-match t
      :prompt "Select: ")))
+
+(defun org-ilm-element-dwim ()
+  "Open element menu or if not element, turn into one."
+  (interactive)
+  (condition-case nil
+      (call-interactively #'org-ilm-element-menu)
+    (error
+     (when (yes-or-no-p "No element at point. Turn into concept?")
+       (org-ilm-concept-into)))))
 
 (defun org-ilm-delete (arg)
   "Delete element at point."

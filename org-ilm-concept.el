@@ -396,9 +396,16 @@ With THROW-NEW, user is able to input a new name, which will then be
 (defun org-ilm-concept-set ()
   "Add or remove concepts from the CONCEPTS property."
   (interactive)
-  (if-let ((id (ignore-errors (and (eq major-mode 'org-mode) (org-id-get)))))
-      (org-ilm--concept-set id)
-    (user-error "Cannot set concepts here")))
+  (cond
+   ((eq major-mode 'org-agenda-mode)
+    (org-agenda-with-point-at-orig-entry nil
+      (let ((id (org-id-get-create)))
+        (org-ilm--concept-set id))))
+   ((and (eq major-mode 'org-mode) (org-at-heading-p))
+    (let ((id (org-id-get-create)))
+      (org-ilm--concept-set id)))
+   (t
+    (user-error "Point not on a headline!"))))
 
 ;;;; Transient
 
