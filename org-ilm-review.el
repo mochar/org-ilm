@@ -141,8 +141,11 @@ during review."
 
   (unless (or org-ilm-bqueue-active-buffer
               (org-ilm--bqueue-select-active-buffer))
-    ;; TODO let user choose inactive one and make it active
-    (user-error "No active queue buffer!"))
+    (if (not (yes-or-no-p "Review outstanding?"))
+        (user-error "No active queue buffer")
+      (let* ((bqueue (org-ilm--bqueue-build-outstanding (org-ilm--active-collection)))
+             (buf (org-ilm--bqueue-buffer-create bqueue :active-p t :switch-p nil)))
+        (org-ilm--bqueue-set-active-buffer buf))))
 
   ;; Make sure queue is not empty
   (with-current-buffer org-ilm-bqueue-active-buffer
