@@ -511,6 +511,8 @@ BODY is evaluated inside the new buffer before displaying it."
   (org-node-goto-id org-id))
 
 ;; TODO This is super slow!!!!
+;; Thu Apr  9 00:10:09 2026 - Trouble parsing ilm tables without it so turned it on again.
+;; Seems not as slow anymore?
 (defmacro org-ilm--org-with-headline-contents-visible (&rest body)
   "Necessary when parsing hidden/collapsed data within headline."
   (declare (debug (body)) (indent 1))
@@ -545,9 +547,9 @@ save-excursion."
                   (string= ,thing (org-id-get))))
          ;; Reveal entry contents, otherwise run into problems parsing the
          ;; metadata, such as with org-srs drawer.
-         ;; (org-ilm--org-with-headline-contents-visible ,@body)
-         (progn ; progn in case body contains multiple forms
-           ,@body)
+         (org-ilm--org-with-headline-contents-visible ,@body)
+         ;; (progn ; progn in case body contains multiple forms
+         ;;   ,@body)
        
        (let (,m-org-id ,m-entry)
          (cond
@@ -574,8 +576,8 @@ save-excursion."
               
               ;; Reveal entry contents, otherwise run into problems parsing the
               ;; metadata, such as with org-srs drawer.
-              ;; (org-ilm--org-with-headline-contents-visible ,@body)
-              ,@body
+              (org-ilm--org-with-headline-contents-visible ,@body)
+              ;; ,@body
               )))))))
 
 (defun org-ilm--org-headline-element-from-id (org-id)

@@ -324,8 +324,8 @@ needs the attachment buffer."
                 (make-org-ilm-review
                  :id (oref element id)
                  :type (oref element type)
-                 :log (org-ilm--element-with-point-at element
-                        (org-ilm--log-read))
+                 :log (org-ilm--org-with-point-at id
+                         (org-ilm--log-read))
                  :start (current-time)))
           
           (org-ilm--org-with-point-at id
