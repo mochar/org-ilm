@@ -84,7 +84,8 @@
   ;; "c" #'org-ilm-cloze-toggle
   "c" #'org-ilm-clozeify
   "f" #'org-ilm-find
-  "t" #'org-ilm-attachment-transclude
+  ;; "t" #'org-ilm-attachment-transclude
+  "t" #'org-ilm-element-set-title
   "." #'org-ilm-point
   ";" org-ilm-context-map
   "n" #'org-ilm-concept-set

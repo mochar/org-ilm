@@ -315,6 +315,20 @@ review.")
 
 (cl-defgeneric org-ilm--element-review (type element duration &rest args))
 
+(defun org-ilm-element-set-title ()
+  "Set the title of an ilm element."
+  (interactive)
+  (if-let ((element (org-ilm--element-from-context)))
+      (let* ((title (read-string "Title: "
+                                 (if (region-active-p)
+                                     (buffer-substring-no-properties
+                                      (region-beginning) (region-end))
+                                   (org-ilm-element--title element)))))
+        (org-ilm--element-with-point-at element
+          (org-edit-headline title)
+          (save-buffer)))
+    (user-error "No ilm element")))
+
 (defun org-ilm-element-set-schedule (element timestamp)
   "Set the schedule of an ilm element."
   (interactive
