@@ -148,7 +148,12 @@
            (region-text (org-ilm--org-buffer-text-prepare region-begin region-end))
            (extract-org-id (or (plist-get capture-kwargs :id) (org-id-new)))
            (entry (org-mem-entry-by-id attach-org-id))
-           props)
+           title props)
+
+      ;; Title
+      (if (save-excursion (goto-char region-begin) (org-at-heading-p))
+          (setq title (org-get-heading t t t t))
+        (setq title (org-ilm--generate-text-snippet region-text)))
 
       ;; If the element has media, then extract time.
       (when (org-mem-entry-property-with-inheritance org-ilm-property-media entry)
@@ -161,6 +166,7 @@
        :parent (org-ilm--element-by-id file-org-id)
        :id extract-org-id
        :content region-text
+       :title title
        :props props
        :on-success
        (lambda (&rest _)
