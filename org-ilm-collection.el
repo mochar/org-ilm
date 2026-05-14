@@ -86,16 +86,17 @@ The following specify default targets, for which see
 
 ;;;; Collection
 
-(defun org-ilm-collections (&optional kind)
+(defun org-ilm--collections (&optional kind)
   "Return alist of collection symbol -> data alist."
   (pcase kind
     ('set org-ilm-collections)
     ('custom org-ilm-custom-collections)
     (_ (append org-ilm-collections org-ilm-custom-collections))))
 
-(defun org-ilm--collection-property (collection property &optional kind)
+(defun org-ilm--collection-property- (collection-alist property &optional kind)
   "Return PROPERTY of COLLECTION."
-  (when-let ((config (alist-get collection (org-ilm-collections kind))))
+  (let ((collection (car collection-alist))
+        (config (cdr collection-alist)))
     (cond-let*
       ;; When the property points to a target, we need to convert it to absolute path.
       ([key (intern (substring (symbol-name property) 1))]
@@ -112,6 +113,11 @@ The following specify default targets, for which see
        (expand-file-name (plist-get config :path)))
       (t 
        (plist-get config property)))))
+
+(defun org-ilm--collection-property (collection-name property &optional kind)
+  "Return PROPERTY of collection with name COLLECTION-NAME."
+  (when-let ((collection-alist (assoc collection-name (org-ilm--collections kind))))
+    (org-ilm--collection-property- collection-alist property kind)))
 
 (defun org-ilm--collection-path (collection)
   "Return path of COLLECTION."
@@ -163,7 +169,7 @@ The following specify default targets, for which see
 
 (defun org-ilm--collection-first-valid (&optional collections)
   "Goes up the ilm element hierarchy until it finds the first valid collection property."
-  (let ((collections (or collections (mapcar #'car (org-ilm-collections)))))
+  (let ((collections (or collections (mapcar #'car (org-ilm--collections)))))
     (org-element-lineage-map (org-element-at-point)
         (lambda (el)
           (-some--> (org-entry-get el org-ilm-property-collection)
@@ -251,7 +257,7 @@ When FILE is nil, file of current buffer."
       (seq-keep
        (lambda (c)
          (when (funcall test path (plist-get (cdr c) :path)) (car c)))
-       (org-ilm-collections kind)))))
+       (org-ilm--collections kind)))))
 
 (defun org-ilm--select-collection (&optional file kind)
   "Prompt user for collection to select from.
@@ -259,7 +265,7 @@ With FILE, limit collections to those valid in file (see :path property
 in `org-ilm-collections')."
   (let ((collections (if file
                          (org-ilm--collection-file file nil kind)
-                       (mapcar #'car (org-ilm-collections kind)))))
+                       (mapcar #'car (org-ilm--collections kind)))))
     (car 
      (org-ilm--select-alist
       (mapcar
@@ -282,7 +288,7 @@ in `org-ilm-collections')."
 (defun org-ilm--select-collection-file (collection &optional relative-p prompt)
   "Prompt user to select a file from COLLECTION.
 With RELATIVE-P non-nil, return path truncated relative to collection directory."
-  (cl-assert (assoc collection (org-ilm-collections)))
+  (cl-assert (assoc collection (org-ilm--collections)))
   (let ((col-path (org-ilm--collection-path collection))
         (files (org-ilm--collection-files collection))
         file)

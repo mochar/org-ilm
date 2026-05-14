@@ -141,7 +141,7 @@ The callback ON-ABORT is called when capture is cancelled."
               ;; TODO Can probably just be completing read
               (_ (error "Target %s may belong to one of multiple collections: %s" collections)))))))
      (t
-      (cl-assert (assoc collection (org-ilm-collections)) nil
+      (cl-assert (assoc collection (org-ilm--collections)) nil
                  "COLLECTION must be a valid if no PARENT or TARGET given, got %s"
                  collection)
       (setq target (org-ilm--collection-property collection :element-target))))

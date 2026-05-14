@@ -408,7 +408,7 @@ With optional COLLECTION, include only if belongs to it."
                      :state #'consult--buffer-preview
                      :items (mapcar #'buffer-name (org-ilm--bqueue-buffers collection))
                      ))
-                  (mapcar #'car (org-ilm-collections))))))
+                  (mapcar #'car (org-ilm--collections))))))
     (car choice)))
 
 (defun org-ilm-queue-buffers ()

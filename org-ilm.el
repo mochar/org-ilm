@@ -60,6 +60,7 @@
 (require 'org-ilm-review)
 (require 'org-ilm-registry)
 (require 'org-ilm-convert)
+(require 'org-ilm-overview)
 
 ;;;; Variables
 
@@ -74,6 +75,7 @@
 (defvar-keymap org-ilm-map
   :doc "Keymap for `org-ilm-global-minor-mode'."
   "i" #'org-ilm-import
+  "l" #'org-ilm-overview
   "e" #'org-ilm-element-dwim
   "a" #'org-ilm-attachment-actions
   "p" #'org-ilm-element-set-priority
