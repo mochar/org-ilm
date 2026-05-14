@@ -33,6 +33,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'cl-print)
 
 ;;;; Node
 
@@ -72,11 +73,11 @@
   (with-slots (black key id left right parent size) s
     (princ
      (format "#(ost-node %s %s %s %s %s %s %s)"
-                   black key id size
-                   (when left (ost-node-id left))
-                   (when right (ost-node-id right))
-                   (when parent (ost-node-id parent)))
-           stream)))
+             black key id size
+             (when left (ost-node-id left))
+             (when right (ost-node-id right))
+             (when parent (ost-node-id parent)))
+     stream)))
 
 (defun ost-node-child (node direction)
   "Get the child of NODE in DIRECTION ('left or 'right)."
@@ -141,6 +142,7 @@ First orders by key, then by id."
                  (ost-tree-dynamic s)
                  (hash-table-count (ost-tree-nodes s)))
          stream))
+
 
 (defun ost-tree-node-by-id (tree id)
   "Return the node with id ID."

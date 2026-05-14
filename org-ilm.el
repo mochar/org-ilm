@@ -200,8 +200,9 @@
   (if-let* ((data (org-ilm--attachment-data))
             (org-id-loc (org-id-find (car data))))
       (org-ilm--org-goto-id (car data))
-    (let ((collection (org-ilm--select-collection)))
-      (find-file (cdr collection)))))
+    (let* ((collection (org-ilm--select-collection))
+           (file (org-ilm--select-collection-file collection)))
+      (find-file file))))
 
 (defun org-ilm-open-dwim ()
   "Open element of highlight or within collection."
