@@ -19,6 +19,16 @@
 
 ;; Magit sections.
 
+(defvar-keymap org-ilm-overview-bqueue-section-map
+  :doc "Keymap for `bqueue' sections."
+  "RET" (lambda ()
+          (interactive)
+          (switch-to-buffer (oref (magit-section-at) value)))
+  )
+
+(defclass org-ilm-overview-bqueue-section (magit-section)
+  ((keymap :initform 'org-ilm-overview-bqueue-section-map)))
+   
 (defvar-keymap org-ilm-overview-collection-section-map
   :doc "Keymap for `collection' sections."
   "RET" (lambda (&optional priority-queue)
@@ -54,6 +64,16 @@
   ((keymap :initform 'org-ilm-overview-queue-section-map)))
 
 ;;;; View
+
+(defun org-ilm--overview-insert-open-queue-buffers ()
+  (when-let ((buffers (org-ilm--bqueue-buffers)))
+    (magit-insert-section (magit-section)
+      (magit-insert-heading "Open queues")
+      (dolist (buf buffers)
+        (magit-insert-section (org-ilm-overview-bqueue-section buf)
+          (let ((bqueue (with-current-buffer buf org-ilm-bqueue)))
+            (insert (format "%s (%s)" (oref bqueue name) (oref bqueue collection)) ?\n)))))
+    (insert ?\n)))
 
 (defun org-ilm--overview-insert-collections ()
   (let* ((collections (org-ilm--collections))
@@ -95,6 +115,7 @@
   (erase-buffer)
   (goto-char (point-min))
   (magit-insert-section (magit-root-section)
+    (org-ilm--overview-insert-open-queue-buffers)
     (org-ilm--overview-insert-collections))
   (magit-section-show-level-2)
   (setq-local buffer-read-only t)
