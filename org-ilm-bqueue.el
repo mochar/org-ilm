@@ -321,6 +321,10 @@ the queue and shuffling it afterwards. To achieve the latter, call
            :query query
            args)))
 
+(defun org-ilm--bqueue-build-pqueue (collection)
+  "Build a bqueue of the priority queue (all elements) of COLLECTION."
+  (org-ilm--pqueue-bqueue collection))
+
 (defun org-ilm--bqueue-build-outstanding (collection)
   "Build a bqueue with all outstanding elements of COLLECTION."
   (org-ilm--bqueue-build
@@ -329,6 +333,13 @@ the queue and shuffling it afterwards. To achieve the latter, call
    "Outstanding queue"
    :type 'outstanding
    :randomness org-ilm-outstanding-randomness))
+
+(defun org-ilm--bqueue-build-custom (collection queue-id)
+  "Load bqueue of a custom queue."
+  (let ((path (org-ilm--bqueue-file collection queue-id)))
+    (if (file-exists-p path)
+        (ost-read path)
+      (error "File of queue \"%s\" not found"))))
 
 (defun org-ilm--bqueue-select-bqueue (&optional collection)
   "Select from where to get the bqueue and (make and) return it."
@@ -348,7 +359,7 @@ the queue and shuffling it afterwards. To achieve the latter, call
                      (propertize "Priority queue"
                                  :desc "All elements"
                                  :action (lambda ()
-                                           (org-ilm--pqueue-bqueue collection)))
+                                           (org-ilm--bqueue-build-pqueue collection)))
                      (propertize "Outstanding queue"
                                  :desc "Due elements"
                                  :action (lambda ()
@@ -542,6 +553,47 @@ When EXISTS-OK, don't throw error if ELEMENT already in queue."
   (org-ilm--bqueue-with-buffer buffer
     (org-ilm-bqueue--pop org-ilm-bqueue)
     (org-ilm-queue-revert)))
+
+;;;; Queue open
+
+(defun org-ilm--bqueue-open-pqueue (collection)
+  "Open priority queue buffer of COLLECTION, creating new one if not exists."
+  (if-let ((buf (seq-find
+                 (lambda (b)
+                   (with-current-buffer b
+                     (and (eq (oref org-ilm-bqueue type) 'pqueue)
+                          (eq (oref org-ilm-bqueue collection) collection))))
+                 (org-ilm--bqueue-buffers))))
+      (switch-to-buffer buf)
+    (org-ilm--bqueue-buffer-create
+     (org-ilm--bqueue-build-pqueue collection)
+     :switch-p t)))
+
+(defun org-ilm--bqueue-open-outstanding (collection)
+  "Open outstanding queue buffer of COLLECTION, creating new one if not exists."
+  (if-let ((buf (seq-find
+                 (lambda (b)
+                   (with-current-buffer b
+                     (and (eq (oref org-ilm-bqueue type) 'outstanding)
+                          (eq (oref org-ilm-bqueue collection) collection))))
+                 (org-ilm--bqueue-buffers))))
+      (switch-to-buffer buf)
+    (org-ilm--bqueue-buffer-create
+     (org-ilm--bqueue-build-outstanding collection)
+     :switch-p t)))
+
+(defun org-ilm--bqueue-open-custom (collection queue-id)
+  "Open custom queue buffer of COLLECTION, creating new one if not exists."
+  (if-let ((buf (seq-find
+                 (lambda (b)
+                   (with-current-buffer b
+                     (and (eq (oref org-ilm-bqueue id) queue-id)
+                          (eq (oref org-ilm-bqueue collection) collection))))
+                 (org-ilm--bqueue-buffers))))
+      (switch-to-buffer buf)
+    (org-ilm--bqueue-buffer-create
+     (org-ilm--bqueue-build-custom collection queue-id)
+     :switch-p t)))
 
 ;;;; Queue building
 
