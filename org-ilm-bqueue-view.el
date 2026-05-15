@@ -73,6 +73,7 @@
   "M u" #'org-ilm-queue-mark-unmark-all
   "M i" #'org-ilm-queue-mark-invert
   "M ?" #'org-ilm-queue-mark-missing
+  "M t" #'org-ilm-queue-mark-by-type
   )
 
 ;;;; Table
@@ -533,6 +534,17 @@ DAYS can be specified as numeric prefix arg."
     (when-let* ((element (org-ilm--element-by-id id))
                 (due (* -1 (org-ilm-element--schedrel element))))
       (when (<= (round due) days) 
+        (org-ilm--bqueue-mark-objects id))))
+  (org-ilm-queue-revert))
+
+(defun org-ilm-queue-mark-by-type (types)
+  "Mark elements of the given type."
+  (interactive
+   (list
+    (mapcar #'intern (completing-read-multiple "Type: " '(card material) nil t))))
+  (dolist (id (org-ilm--bqueue-elements))
+    (when-let ((element (org-ilm--element-by-id id)))
+      (when (member (oref element type) types)
         (org-ilm--bqueue-mark-objects id))))
   (org-ilm-queue-revert))
 
