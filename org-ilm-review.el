@@ -396,7 +396,13 @@ needs the attachment buffer."
   (let ((card-p (org-ilm--review-card-p))
         (card-revealed (oref org-ilm--review card-revealed)))
     (concat
-     (propertize "Ilm Review" 'face '(:weight bold :height 1.0))
+     (propertize
+      "Ilm Review"
+      'face '(:weight bold :height 1.0)
+      'mouse-face 'highlight
+      'local-map (let ((map (make-sparse-keymap)))
+                   (define-key map [header-line mouse-1] #'org-ilm-review-actions)
+                   map))
      "   "
      (funcall
       #'concat
